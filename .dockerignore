@@ -1,0 +1,9 @@
+target
+web/node_modules
+web/dist
+web/auto-imports.d.ts
+web/components.d.ts
+web/src/icons.json
+data
+.git
+docs

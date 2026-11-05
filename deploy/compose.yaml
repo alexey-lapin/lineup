@@ -1,0 +1,24 @@
+# Example compose file:
+#
+#   docker compose up -d
+#
+# Then open http://<host>:9300 and set the base URLs under Settings.
+name: lineup
+
+services:
+  lineup:
+    image: ghcr.io/alexey-lapin/lineup:0.1.0   # pin a release tag
+    container_name: lineup
+    restart: unless-stopped
+    ports:
+      - "9300:9300"
+    environment:
+      TZ: UTC
+      LINEUP_LOG: info
+    volumes:
+      - lineup-data:/data
+
+volumes:
+  lineup-data:
+    # Explicit name so it is the same everywhere (otherwise compose prefixes it: lineup_lineup-data).
+    name: lineup-data
