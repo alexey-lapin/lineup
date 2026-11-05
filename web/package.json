@@ -1,0 +1,37 @@
+{
+  "name": "lineup-web",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.16.1",
+  "scripts": {
+    "dev": "vite",
+    "gen:api": "openapi-typescript src/api/openapi.json -o src/api/schema.d.ts",
+    "typecheck": "node scripts/gen-icons.mjs && vite build --logLevel warn && vue-tsc --noEmit",
+    "build": "node scripts/gen-icons.mjs && vite build && vue-tsc --noEmit",
+    "gen:icons": "node scripts/gen-icons.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@iconify/vue": "5.0.5",
+    "@nuxt/ui": "^4.12.0",
+    "@pinia/colada": "^1.4.9",
+    "openapi-fetch": "^0.17.0",
+    "pinia": "^4.1.0",
+    "tailwindcss": "^4.3.4",
+    "vue": "^3.5.44",
+    "vue-draggable-plus": "^0.6.1",
+    "vue-router": "^5.4.0"
+  },
+  "devDependencies": {
+    "@iconify-json/lucide": "^1.2.151",
+    "@types/node": "^26.6.6",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "@vue/test-utils": "^2.5.1",
+    "happy-dom": "^21.0.4",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^5.1.0",
+    "vue-tsc": "^3.3.14"
+  }
+}

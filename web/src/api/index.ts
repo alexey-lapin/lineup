@@ -1,0 +1,100 @@
+import createClient from 'openapi-fetch'
+import type { components, paths } from './schema'
+
+export type Channel = components['schemas']['Channel']
+export type ChannelCreate = components['schemas']['ChannelCreate']
+export type ChannelPatch = components['schemas']['ChannelPatch']
+export type Source = components['schemas']['Source']
+export type Playlist = components['schemas']['Playlist']
+export type PlaylistDetail = components['schemas']['PlaylistDetail']
+export type Settings = components['schemas']['Settings']
+export type SettingsPatch = components['schemas']['SettingsPatch']
+export type ImportReport = components['schemas']['ImportReport']
+export type ResolveResponse = components['schemas']['ResolveResponse']
+export type Status = components['schemas']['Status']
+
+export const client = createClient<paths>({ baseUrl: '/api/v1' })
+
+export class ApiError extends Error {
+  constructor(
+    public code: string,
+    message: string,
+    public status: number
+  ) {
+    super(message)
+  }
+}
+
+type Result<T> = { data?: T; error?: unknown; response: Response }
+
+/** Unwrap an openapi-fetch result: throw ApiError on failure. */
+export async function unwrap<T>(p: Promise<Result<T>>): Promise<T> {
+  let r: Result<T>
+  try {
+    r = await p
+  } catch (e) {
+    throw new ApiError('unreachable', `Cannot reach the lineup server (${(e as Error).message})`, 0)
+  }
+  if (!r.response.ok) {
+    const body = r.error as { error?: { code?: string; message?: string } } | undefined
+    throw new ApiError(
+      body?.error?.code ?? 'internal',
+      body?.error?.message ?? `HTTP ${r.response.status}`,
+      r.response.status
+    )
+  }
+  return r.data as T
+}
+
+export const api = {
+  status: () => unwrap(client.GET('/status')),
+
+  channels: (query?: { q?: string; group?: string; playlist?: string }) =>
+    unwrap(client.GET('/channels', { params: { query } })),
+  createChannel: (body: ChannelCreate) => unwrap(client.POST('/channels', { body })),
+  patchChannel: (id: number, body: ChannelPatch) =>
+    unwrap(client.PATCH('/channels/{id}', { params: { path: { id } }, body })),
+  deleteChannel: (id: number) => unwrap(client.DELETE('/channels/{id}', { params: { path: { id } } })),
+  resolve: (input: string) => unwrap(client.POST('/resolve', { body: { input } })),
+
+  playlists: () => unwrap(client.GET('/playlists')),
+  playlist: (slug: string) => unwrap(client.GET('/playlists/{slug}', { params: { path: { slug } } })),
+  createPlaylist: (slug: string, name?: string) =>
+    unwrap(client.POST('/playlists', { body: { slug, name: name || null } })),
+  patchPlaylist: (slug: string, body: { name?: string; slug?: string }) =>
+    unwrap(client.PATCH('/playlists/{slug}', { params: { path: { slug } }, body })),
+  deletePlaylist: (slug: string) => unwrap(client.DELETE('/playlists/{slug}', { params: { path: { slug } } })),
+  addItem: (slug: string, channel_id: number, position?: number) =>
+    unwrap(
+      client.POST('/playlists/{slug}/items', {
+        params: { path: { slug } },
+        body: { channel_id, position: position ?? null }
+      })
+    ),
+  replaceItems: (slug: string, channel_ids: number[]) =>
+    unwrap(client.PUT('/playlists/{slug}/items', { params: { path: { slug } }, body: { channel_ids } })),
+  removeItem: (slug: string, channel_id: number) =>
+    unwrap(client.DELETE('/playlists/{slug}/items/{channel_id}', { params: { path: { slug, channel_id } } })),
+
+  settings: () => unwrap(client.GET('/settings')),
+  patchSettings: (body: SettingsPatch) => unwrap(client.PATCH('/settings', { body })),
+  importM3u: (m3u_text: string, playlist_slug: string, dry_run: boolean) =>
+    unwrap(client.POST('/import', { body: { m3u_text, playlist_slug, dry_run } })),
+  refresh: (slugs: string[] = []) => unwrap(client.POST('/refresh', { body: { slugs } }))
+}
+
+/** Absolute URL of a playlist as Jellyfin should be configured with it. */
+export function playlistUrl(slug: string): string {
+  return `${window.location.origin}/p/${encodeURIComponent(slug)}.m3u`
+}
+
+export function sourceLabel(s: Source): string {
+  switch (s.kind) {
+    case 'acestream':
+      return `ace ${s.id.slice(0, 8)}`
+    case 'vk':
+      return `vk ${s.owner_id}_${s.video_id}`
+    case 'raw':
+      return s.url
+  }
+}
