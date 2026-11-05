@@ -1,0 +1,13 @@
+[package]
+name = "lineup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lineup-server.workspace = true
+lineup-cli.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

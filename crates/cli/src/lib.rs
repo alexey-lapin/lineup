@@ -1,0 +1,289 @@
+//! `lineup` command line: argument definitions and the HTTP client commands.
+//!
+//! `serve` is defined here but executed by the `lineup` binary (which links the server).
+
+mod client;
+mod commands;
+mod output;
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use clap::{Args, CommandFactory, Parser, Subcommand};
+
+pub use client::{CliError, exit_code};
+
+#[derive(Debug, Parser)]
+#[command(name = "lineup", version, about = "Manage Jellyfin Live TV channels and playlists")]
+pub struct Cli {
+    /// Server URL [default: from ~/.config/lineup/config.toml, else http://127.0.0.1:9300]
+    #[arg(long, global = true, env = "LINEUP_SERVER")]
+    pub server: Option<String>,
+    /// Print machine-readable JSON (the API response) instead of text.
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Only print essentials (ids, URLs); no tables.
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Run the lineup server.
+    Serve(ServeArgs),
+    /// Add channels from inputs (acestream://id, 40-hex id, vk.com URL, VK proxy URL, any URL).
+    Add(AddArgs),
+    /// List channels, optionally filtered by a search term.
+    Ls(LsArgs),
+    /// Show one channel.
+    Show { channel: String },
+    /// Edit a channel.
+    Edit(EditArgs),
+    /// Delete channels.
+    Rm {
+        #[arg(required = true)]
+        channels: Vec<String>,
+    },
+    /// Enable channels (they appear in playlists again).
+    Enable {
+        #[arg(required = true)]
+        channels: Vec<String>,
+    },
+    /// Disable channels (kept, but left out of playlist output; numbering is unchanged).
+    Disable {
+        #[arg(required = true)]
+        channels: Vec<String>,
+    },
+    /// Parse an input and show the source, stream URL and any duplicate, without saving.
+    Resolve { input: String },
+    /// Manage playlists.
+    #[command(subcommand)]
+    Playlist(PlaylistCmd),
+    /// Import an m3u file (path, URL, or - for stdin) into a playlist.
+    Import(ImportArgs),
+    /// Re-emit change notifications for playlists (all when none are given).
+    Refresh { slugs: Vec<String> },
+    /// Show or change settings.
+    #[command(subcommand)]
+    Settings(SettingsCmd),
+    /// Download a consistent copy of the server's database (restore: stop lineup, replace /data/lineup.db).
+    Backup {
+        /// Output file (must not exist).
+        path: PathBuf,
+    },
+    /// Server status.
+    Status,
+    /// Print the CLI's usage spec (https://usage.jdx.dev) for completions and docs.
+    Usage,
+}
+
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Address to listen on.
+    #[arg(long, env = "LINEUP_BIND", default_value = "0.0.0.0:9300")]
+    pub bind: SocketAddr,
+    /// Directory for the database and caches.
+    #[arg(long, env = "LINEUP_DATA_DIR", default_value = "./data")]
+    pub data_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    #[arg(required = true)]
+    pub inputs: Vec<String>,
+    /// Display name (only with a single input). Defaults to a name derived from the source.
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long)]
+    pub group: Option<String>,
+    #[arg(long)]
+    pub tvg_id: Option<String>,
+    #[arg(long)]
+    pub logo: Option<String>,
+    /// Append to this playlist (repeatable).
+    #[arg(long = "playlist", short = 'p')]
+    pub playlists: Vec<String>,
+    /// Mark as a live event (VK match etc.).
+    #[arg(long)]
+    pub event: bool,
+    /// Event kickoff time (RFC 3339, e.g. 2026-11-05T20:00:00Z).
+    #[arg(long)]
+    pub kickoff: Option<chrono::DateTime<chrono::Utc>>,
+    /// Create disabled.
+    #[arg(long)]
+    pub disabled: bool,
+    /// Show what would be added without saving.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LsArgs {
+    /// Search name, tvg-id or source key.
+    pub query: Option<String>,
+    #[arg(long)]
+    pub group: Option<String>,
+    #[arg(long, short = 'p')]
+    pub playlist: Option<String>,
+    #[arg(long, value_enum)]
+    pub kind: Option<KindArg>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum KindArg {
+    Acestream,
+    Vk,
+    Raw,
+}
+
+impl KindArg {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KindArg::Acestream => "acestream",
+            KindArg::Vk => "vk",
+            KindArg::Raw => "raw",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct EditArgs {
+    pub channel: String,
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long, conflicts_with = "no_group")]
+    pub group: Option<String>,
+    #[arg(long)]
+    pub no_group: bool,
+    #[arg(long, conflicts_with = "no_tvg_id")]
+    pub tvg_id: Option<String>,
+    #[arg(long)]
+    pub no_tvg_id: bool,
+    #[arg(long, conflicts_with = "no_logo")]
+    pub logo: Option<String>,
+    #[arg(long)]
+    pub no_logo: bool,
+    /// New source (any input form accepted by `add`).
+    #[arg(long)]
+    pub source: Option<String>,
+    #[arg(long, conflicts_with = "no_event")]
+    pub event: bool,
+    #[arg(long)]
+    pub no_event: bool,
+    #[arg(long, conflicts_with = "no_kickoff")]
+    pub kickoff: Option<chrono::DateTime<chrono::Utc>>,
+    #[arg(long)]
+    pub no_kickoff: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PlaylistCmd {
+    /// List playlists.
+    Ls,
+    /// Show a playlist's channels in order.
+    Show { slug: String },
+    /// Create a playlist.
+    Create {
+        slug: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Rename a playlist (display name and/or slug).
+    Rename {
+        slug: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "slug")]
+        new_slug: Option<String>,
+    },
+    /// Delete a playlist (channels are kept).
+    Rm { slug: String },
+    /// Add channels to a playlist.
+    Add {
+        slug: String,
+        #[arg(required = true)]
+        channels: Vec<String>,
+        /// 1-based position for the first channel (others follow it).
+        #[arg(long)]
+        at: Option<i64>,
+    },
+    /// Remove channels from a playlist.
+    Remove {
+        slug: String,
+        #[arg(required = true)]
+        channels: Vec<String>,
+    },
+    /// Move a channel to a 1-based position.
+    Move {
+        slug: String,
+        channel: String,
+        position: i64,
+    },
+    /// Replace the playlist's channels with exactly these, in this order.
+    Set { slug: String, channels: Vec<String> },
+    /// Print the playlist URL(s).
+    Url { slug: String },
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// File path, http(s) URL (fetched by the server), or - for stdin.
+    pub source: String,
+    #[arg(long, short = 'p')]
+    pub playlist: String,
+    /// Preview only; nothing is written.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SettingsCmd {
+    /// Show all settings.
+    Get,
+    /// Set one setting: acexy_base, engine_base or vk_base.
+    Set { key: String, value: String },
+}
+
+/// What the binary should do after parsing.
+pub enum Dispatch {
+    Serve(ServeArgs),
+    Client(Cli),
+}
+
+pub fn parse() -> Dispatch {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Serve(args) => Dispatch::Serve(args),
+        _ => Dispatch::Client(cli),
+    }
+}
+
+/// Run a client command; returns the process exit code.
+pub async fn run(cli: Cli) -> i32 {
+    if matches!(cli.command, Command::Usage) {
+        let mut cmd = Cli::command();
+        let mut buf = Vec::new();
+        clap_usage::generate(&mut cmd, "lineup", &mut buf);
+        // Ignore broken pipes (e.g. `lineup usage | head`).
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
+        return 0;
+    }
+    let json = cli.json;
+    match commands::run(cli).await {
+        Ok(()) => 0,
+        Err(CliError::Reported(code)) => code,
+        Err(e) => {
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"error": {"code": e.code(), "message": e.to_string()}})
+                );
+            } else {
+                eprintln!("error: {e}");
+            }
+            exit_code(&e)
+        }
+    }
+}

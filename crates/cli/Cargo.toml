@@ -1,0 +1,24 @@
+[package]
+name = "lineup-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+api-types.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+clap_usage = "5"
+reqwest = { version = "0.13", features = ["json", "query"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true
+toml = "0.9"
+
+[dev-dependencies]
+axum = "0.8"
+lineup-server = { path = "../server" }
+tempfile = "3"
