@@ -1,0 +1,11 @@
+target/
+node_modules/
+/web/dist/
+/web/auto-imports.d.ts
+/web/components.d.ts
+/data/
+.DS_Store
+/web/src/icons.json
+
+# IDE
+.idea/

@@ -1,0 +1,449 @@
+//! HTTP layer: REST API (`/api/v1`), playlist output (`/p/<slug>.m3u`), OpenAPI and the embedded UI.
+
+use std::sync::Arc;
+
+use api_types::{
+    Channel, ChannelCreate, ChannelPatch, ErrorBody, ErrorDetail, ImportReport, ImportRequest, ItemAdd, ItemsReplace,
+    Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest,
+    ResolveResponse, Settings, SettingsPatch, SourceKind, Status,
+};
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
+use axum::http::request::Parts;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use utoipa::{IntoParams, OpenApi};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+
+use crate::store::{ChannelFilter, Store};
+use crate::{Error, web};
+
+pub type AppState = Arc<Store>;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(title = "lineup", description = "Channel and playlist manager for Jellyfin Live TV"),
+    components(schemas(SourceKind))
+)]
+struct ApiDoc;
+
+fn api_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(status))
+        .routes(routes!(list_channels, create_channel))
+        .routes(routes!(get_channel, patch_channel, delete_channel))
+        .routes(routes!(resolve))
+        .routes(routes!(list_playlists, create_playlist))
+        .routes(routes!(get_playlist, patch_playlist, delete_playlist))
+        .routes(routes!(add_item, replace_items))
+        .routes(routes!(remove_item))
+        .routes(routes!(move_item))
+        .routes(routes!(get_settings, patch_settings))
+        .routes(routes!(import))
+        .routes(routes!(refresh))
+}
+
+/// The OpenAPI document (paths are relative to `/api/v1`).
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    let (_, mut api) = api_router().split_for_parts();
+    api.servers = Some(vec![utoipa::openapi::Server::new("/api/v1")]);
+    api
+}
+
+pub fn router(store: AppState) -> Router {
+    router_with_scratch(store, std::env::temp_dir())
+}
+
+/// `scratch` is where temporary files (backups) are written; use the data dir in production.
+pub fn router_with_scratch(store: AppState, scratch: std::path::PathBuf) -> Router {
+    let (api, _) = api_router().split_for_parts();
+    // Not in OpenAPI: it returns a binary file.
+    let api = api.route(
+        "/backup",
+        get(move |State(store): State<AppState>| {
+            let scratch = scratch.clone();
+            async move { backup(store, scratch).await }
+        }),
+    );
+    let doc = openapi();
+    Router::new()
+        .nest("/api/v1", api.fallback(api_not_found))
+        .route("/api/openapi.json", get(move || async move { Json(doc) }))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/p/{file}", get(playlist_m3u))
+        .fallback(web::static_handler)
+        .with_state(store)
+}
+
+// -------------------------------------------------------------------- plumbing
+
+pub struct ApiError(Error);
+
+impl From<Error> for ApiError {
+    fn from(e: Error) -> Self {
+        ApiError(e)
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match &self.0 {
+            Error::NotFound(_) => StatusCode::NOT_FOUND,
+            Error::Conflict(_) => StatusCode::CONFLICT,
+            Error::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        if status.is_server_error() {
+            tracing::error!("{}", self.0);
+        }
+        let body = ErrorBody {
+            error: ErrorDetail {
+                code: self.0.code().into(),
+                message: self.0.to_string(),
+            },
+        };
+        (status, Json(body)).into_response()
+    }
+}
+
+type ApiResult<T> = Result<T, ApiError>;
+
+/// `Json<T>` whose rejection is our JSON error body.
+pub struct Body<T>(T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
+    type Rejection = ApiError;
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(v)) => Ok(Body(v)),
+            Err(e) => Err(ApiError(Error::Invalid(e.body_text()))),
+        }
+    }
+}
+
+/// `Path<T>` whose rejection is our JSON error body (code `invalid`).
+pub struct ApiPath<T>(T);
+
+impl<S: Send + Sync, T: DeserializeOwned + Send> FromRequestParts<S> for ApiPath<T> {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, ApiError> {
+        match Path::<T>::from_request_parts(parts, state).await {
+            Ok(Path(v)) => Ok(ApiPath(v)),
+            Err(e) => Err(ApiError(Error::Invalid(e.body_text()))),
+        }
+    }
+}
+
+/// `Query<T>` whose rejection is our JSON error body (code `invalid`).
+pub struct ApiQuery<T>(T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for ApiQuery<T> {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, ApiError> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(v)) => Ok(ApiQuery(v)),
+            Err(e) => Err(ApiError(Error::Invalid(e.body_text()))),
+        }
+    }
+}
+
+async fn api_not_found() -> ApiError {
+    ApiError(Error::NotFound("no such API route".into()))
+}
+
+// -------------------------------------------------------------------- status
+
+#[utoipa::path(get, path = "/status", responses((status = 200, body = Status)))]
+async fn status() -> Json<Status> {
+    Json(Status {
+        version: env!("CARGO_PKG_VERSION").into(),
+    })
+}
+
+// -------------------------------------------------------------------- channels
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct ChannelQuery {
+    /// Exact group-title.
+    group: Option<String>,
+    /// Case-insensitive substring of name, tvg-id or source key.
+    q: Option<String>,
+    /// Only channels in this playlist.
+    playlist: Option<String>,
+    kind: Option<SourceKind>,
+}
+
+#[utoipa::path(get, path = "/channels", params(ChannelQuery), responses((status = 200, body = Vec<Channel>)))]
+async fn list_channels(
+    State(s): State<AppState>,
+    ApiQuery(q): ApiQuery<ChannelQuery>,
+) -> ApiResult<Json<Vec<Channel>>> {
+    let filter = ChannelFilter {
+        group: q.group,
+        q: q.q,
+        playlist: q.playlist,
+        kind: q.kind,
+    };
+    Ok(Json(s.list_channels(&filter).await?))
+}
+
+#[utoipa::path(post, path = "/channels", request_body = ChannelCreate,
+    responses((status = 201, body = Channel), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
+async fn create_channel(
+    State(s): State<AppState>,
+    Body(req): Body<ChannelCreate>,
+) -> ApiResult<(StatusCode, Json<Channel>)> {
+    Ok((StatusCode::CREATED, Json(s.create_channel(req).await?)))
+}
+
+#[utoipa::path(get, path = "/channels/{id}", params(("id" = i64, Path)),
+    responses((status = 200, body = Channel), (status = 404, body = ErrorBody)))]
+async fn get_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<Channel>> {
+    Ok(Json(s.get_channel(id).await?))
+}
+
+#[utoipa::path(patch, path = "/channels/{id}", params(("id" = i64, Path)), request_body = ChannelPatch,
+    responses((status = 200, body = Channel), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn patch_channel(
+    State(s): State<AppState>,
+    ApiPath(id): ApiPath<i64>,
+    Body(req): Body<ChannelPatch>,
+) -> ApiResult<Json<Channel>> {
+    Ok(Json(s.patch_channel(id, req).await?))
+}
+
+#[utoipa::path(delete, path = "/channels/{id}", params(("id" = i64, Path)),
+    responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn delete_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
+    s.delete_channel(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(post, path = "/resolve", request_body = ResolveRequest,
+    responses((status = 200, body = ResolveResponse), (status = 422, body = ErrorBody)))]
+async fn resolve(State(s): State<AppState>, Body(req): Body<ResolveRequest>) -> ApiResult<Json<ResolveResponse>> {
+    Ok(Json(s.resolve(&req.input).await?))
+}
+
+// -------------------------------------------------------------------- playlists
+
+#[utoipa::path(get, path = "/playlists", responses((status = 200, body = Vec<Playlist>)))]
+async fn list_playlists(State(s): State<AppState>) -> ApiResult<Json<Vec<Playlist>>> {
+    Ok(Json(s.list_playlists().await?))
+}
+
+#[utoipa::path(post, path = "/playlists", request_body = PlaylistCreate,
+    responses((status = 201, body = PlaylistDetail), (status = 409, body = ErrorBody)))]
+async fn create_playlist(
+    State(s): State<AppState>,
+    Body(req): Body<PlaylistCreate>,
+) -> ApiResult<(StatusCode, Json<PlaylistDetail>)> {
+    Ok((StatusCode::CREATED, Json(s.create_playlist(req).await?)))
+}
+
+#[utoipa::path(get, path = "/playlists/{slug}", params(("slug" = String, Path)),
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody)))]
+async fn get_playlist(State(s): State<AppState>, ApiPath(slug): ApiPath<String>) -> ApiResult<Json<PlaylistDetail>> {
+    Ok(Json(s.get_playlist(&slug).await?))
+}
+
+#[utoipa::path(patch, path = "/playlists/{slug}", params(("slug" = String, Path)), request_body = PlaylistPatch,
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn patch_playlist(
+    State(s): State<AppState>,
+    ApiPath(slug): ApiPath<String>,
+    Body(req): Body<PlaylistPatch>,
+) -> ApiResult<Json<PlaylistDetail>> {
+    Ok(Json(s.patch_playlist(&slug, req).await?))
+}
+
+#[utoipa::path(delete, path = "/playlists/{slug}", params(("slug" = String, Path)),
+    responses((status = 204), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn delete_playlist(State(s): State<AppState>, ApiPath(slug): ApiPath<String>) -> ApiResult<StatusCode> {
+    s.delete_playlist(&slug).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(post, path = "/playlists/{slug}/items", params(("slug" = String, Path)), request_body = ItemAdd,
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn add_item(
+    State(s): State<AppState>,
+    ApiPath(slug): ApiPath<String>,
+    Body(req): Body<ItemAdd>,
+) -> ApiResult<Json<PlaylistDetail>> {
+    Ok(Json(s.add_item(&slug, req.channel_id, req.position).await?))
+}
+
+#[utoipa::path(put, path = "/playlists/{slug}/items", params(("slug" = String, Path)), request_body = ItemsReplace,
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
+async fn replace_items(
+    State(s): State<AppState>,
+    ApiPath(slug): ApiPath<String>,
+    Body(req): Body<ItemsReplace>,
+) -> ApiResult<Json<PlaylistDetail>> {
+    Ok(Json(s.replace_items(&slug, req.channel_ids).await?))
+}
+
+#[utoipa::path(delete, path = "/playlists/{slug}/items/{channel_id}",
+    params(("slug" = String, Path), ("channel_id" = i64, Path)),
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody)))]
+async fn remove_item(
+    State(s): State<AppState>,
+    ApiPath((slug, channel_id)): ApiPath<(String, i64)>,
+) -> ApiResult<Json<PlaylistDetail>> {
+    Ok(Json(s.remove_item(&slug, channel_id).await?))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct MoveRequest {
+    /// New 1-based position (clamped).
+    position: i64,
+}
+
+#[utoipa::path(post, path = "/playlists/{slug}/items/{channel_id}/move",
+    params(("slug" = String, Path), ("channel_id" = i64, Path)), request_body = MoveRequest,
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody)))]
+async fn move_item(
+    State(s): State<AppState>,
+    ApiPath((slug, channel_id)): ApiPath<(String, i64)>,
+    Body(req): Body<MoveRequest>,
+) -> ApiResult<Json<PlaylistDetail>> {
+    Ok(Json(s.move_item(&slug, channel_id, req.position).await?))
+}
+
+// -------------------------------------------------------------------- settings, import, refresh
+
+#[utoipa::path(get, path = "/settings", responses((status = 200, body = Settings)))]
+async fn get_settings(State(s): State<AppState>) -> ApiResult<Json<Settings>> {
+    Ok(Json(s.settings().await?))
+}
+
+#[utoipa::path(patch, path = "/settings", request_body = SettingsPatch,
+    responses((status = 200, body = Settings), (status = 422, body = ErrorBody)))]
+async fn patch_settings(State(s): State<AppState>, Body(req): Body<SettingsPatch>) -> ApiResult<Json<Settings>> {
+    Ok(Json(s.patch_settings(req).await?))
+}
+
+#[utoipa::path(post, path = "/import", request_body = ImportRequest,
+    responses((status = 200, body = ImportReport), (status = 422, body = ErrorBody)))]
+async fn import(State(s): State<AppState>, Body(req): Body<ImportRequest>) -> ApiResult<Json<ImportReport>> {
+    let text = match (req.m3u_text, req.url) {
+        (Some(t), None) => t,
+        (None, Some(url)) => fetch_text(&url).await?,
+        _ => return Err(Error::Invalid("exactly one of `m3u_text` or `url` is required".into()).into()),
+    };
+    Ok(Json(s.import(&text, &req.playlist_slug, req.dry_run).await?))
+}
+
+/// Largest m3u accepted by import-by-URL (direct imports are bounded by the request body limit).
+pub const IMPORT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+async fn fetch_text(url: &str) -> Result<String, Error> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| Error::Internal(e.to_string()))?;
+    let mut res = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| Error::Invalid(format!("fetching {url}: {e}")))?;
+    if !res.status().is_success() {
+        return Err(Error::Invalid(format!("fetching {url}: HTTP {}", res.status())));
+    }
+    let too_big = || Error::Invalid(format!("fetching {url}: larger than {IMPORT_MAX_BYTES} bytes"));
+    if res.content_length().is_some_and(|n| n > IMPORT_MAX_BYTES as u64) {
+        return Err(too_big());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = res
+        .chunk()
+        .await
+        .map_err(|e| Error::Invalid(format!("reading {url}: {e}")))?
+    {
+        if body.len() + chunk.len() > IMPORT_MAX_BYTES {
+            return Err(too_big());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|_| Error::Invalid(format!("{url}: response is not UTF-8 text")))
+}
+
+#[utoipa::path(post, path = "/refresh", request_body = RefreshRequest,
+    responses((status = 200, body = RefreshResponse), (status = 404, body = ErrorBody)))]
+async fn refresh(State(s): State<AppState>, Body(req): Body<RefreshRequest>) -> ApiResult<Json<RefreshResponse>> {
+    Ok(Json(RefreshResponse {
+        slugs: s.refresh(req.slugs).await?,
+    }))
+}
+
+// -------------------------------------------------------------------- playlist output
+
+async fn playlist_m3u(State(s): State<AppState>, Path(file): Path<String>, headers: HeaderMap) -> Response {
+    let Some(slug) = file.strip_suffix(".m3u8").or_else(|| file.strip_suffix(".m3u")) else {
+        return (StatusCode::NOT_FOUND, "not found\n").into_response();
+    };
+    let body = match s.render_m3u(slug).await {
+        Ok(b) => b,
+        Err(Error::NotFound(m)) => return (StatusCode::NOT_FOUND, format!("{m}\n")).into_response(),
+        Err(e) => return ApiError(e).into_response(),
+    };
+    let etag = format!("\"{:016x}\"", fnv1a64(body.as_bytes()));
+    let etag_hv = HeaderValue::from_str(&etag).expect("etag is ascii");
+    let mut res = if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag || t.trim() == "*"))
+    {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        ([(header::CONTENT_TYPE, "audio/x-mpegurl; charset=utf-8")], body).into_response()
+    };
+    res.headers_mut().insert(header::ETAG, etag_hv);
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    res
+}
+
+/// `GET /api/v1/backup`: a consistent SQLite snapshot (`VACUUM INTO`), streamed as a file.
+async fn backup(store: AppState, scratch: std::path::PathBuf) -> Response {
+    let name = format!(
+        ".lineup-backup-{}-{}.db",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    );
+    let tmp = scratch.join(name);
+    let result = async {
+        store.backup_to(&tmp).await?;
+        tokio::fs::read(&tmp)
+            .await
+            .map_err(|e| Error::Internal(format!("reading backup: {e}")))
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&tmp).await;
+    match result {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/vnd.sqlite3"),
+                (header::CONTENT_DISPOSITION, "attachment; filename=\"lineup.db\""),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => ApiError(e).into_response(),
+    }
+}
+
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in data {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/api-types", "crates/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/alexey-lapin/lineup"
+publish = false
+
+[workspace.dependencies]
+api-types = { package = "lineup-api-types", path = "crates/api-types" }
+lineup-server = { path = "crates/server" }
+lineup-cli = { path = "crates/cli" }
+
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "signal", "sync", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+utoipa = { version = "6", features = ["chrono"] }
+
+[profile.release]
+lto = "thin"
+strip = true
