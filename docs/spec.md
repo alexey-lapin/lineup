@@ -299,7 +299,7 @@ usage                   # emit usage spec
 ```
 - `<channel>` accepts an id, an exact name, or an input that resolves to an existing source, such as an ace id.
 
-## 12. Web UI (Vue 3 + Vite + TS + @nuxt/ui v4 in Vue mode, vue-router, Pinia Colada, vite-plugin-pwa)
+## 12. Web UI (Vue 3 + Vite + TS + @nuxt/ui v4 in Vue mode, vue-router, Pinia Colada; a hand-written manifest and service worker)
 
 - **Channels**
   - Searchable table with group, health badge, source kind and playlist chips.
@@ -354,9 +354,9 @@ deploy/          example compose.yaml, restore.sh
 - Event bus consumers, Jellyfin hook (with follow-up) and webhook hooks, delivery log, SSE.
 - Probes, with the schedule off by default until the engine response and acexy status have been captured as test fixtures.
 
-**M4 Polish.**
-- PWA manifest and mobile layout. Service worker registration is guarded and only happens in a secure context.
-- Open-in-player links, `usage` spec and completions, macOS CLI release binaries, deploy docs.
+**M4 Polish** (done).
+- PWA manifest, icons and mobile layout. The service worker caches only the UI shell (never `/api` or `/p`), and is registered only in a secure context.
+- Open-in-player links, `usage` spec and `completions`, CLI release binaries for macOS and Linux on x86_64 and arm64, deploy docs.
 
 ## 15. Open questions
 

@@ -119,7 +119,7 @@ pub async fn run(cli: Cli) -> R {
         channels: None,
     };
     match cli.command {
-        Command::Serve(_) | Command::Usage => unreachable!("handled by caller"),
+        Command::Serve(_) | Command::Usage | Command::Completions { .. } => unreachable!("handled by caller"),
 
         Command::Backup { path } => {
             if path.exists() {

@@ -91,6 +91,11 @@ pub enum Command {
     Status,
     /// Print the CLI's usage spec (https://usage.jdx.dev) for completions and docs.
     Usage,
+    /// Print a shell completion script, e.g. `lineup completions zsh > ~/.zfunc/_lineup`.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -413,6 +418,12 @@ pub async fn run(cli: Cli) -> i32 {
         let mut buf = Vec::new();
         clap_usage::generate(&mut cmd, "lineup", &mut buf);
         // Ignore broken pipes (e.g. `lineup usage | head`).
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
+        return 0;
+    }
+    if let Command::Completions { shell } = cli.command {
+        let mut buf = Vec::new();
+        clap_complete::generate(shell, &mut Cli::command(), "lineup", &mut buf);
         let _ = std::io::Write::write_all(&mut std::io::stdout(), &buf);
         return 0;
     }

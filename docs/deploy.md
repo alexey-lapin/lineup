@@ -10,7 +10,7 @@ docker compose -f deploy/compose.yaml up -d
 
 Pin a release tag rather than `latest`. The container runs as uid 10001 and stores everything under `/data`.
 
-Open `http://<host>:9300` and set the base URLs under **Settings**. Use addresses that Jellyfin and your players can reach, not `localhost`:
+Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI. Use addresses that Jellyfin and your players can reach, not `localhost`:
 
 | Setting | What it is | Example |
 |---|---|---|
@@ -26,7 +26,16 @@ echo 'server = "http://media-host:9300"' > ~/.config/lineup/config.toml
 lineup status
 ```
 
-Or set `LINEUP_SERVER`, or pass `--server`.
+Or set `LINEUP_SERVER`, or pass `--server`. Every command takes `--json` for scripts and agents, and exit codes are stable (0 ok, 2 usage, 3 not found, 4 conflict, 5 server unreachable).
+
+Shell completions:
+
+```sh
+lineup completions zsh > ~/.zfunc/_lineup     # also bash, fish, elvish, powershell
+lineup usage                                  # a usage spec (https://usage.jdx.dev)
+```
+
+CLI binaries for macOS and Linux (x86_64 and arm64) are attached to each GitHub release.
 
 ## Bring in an existing playlist
 

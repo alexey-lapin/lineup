@@ -13,3 +13,9 @@ app.use(PiniaColada, { queryOptions: { staleTime: 5_000 } })
 app.use(router)
 app.use(ui)
 app.mount('#app')
+
+// Service workers need a secure context (HTTPS or localhost); over plain HTTP on a LAN the app
+// still works from the home screen, just without offline support.
+if (import.meta.env.PROD && 'serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('/sw.js').catch((e) => console.warn('service worker:', e))
+}
