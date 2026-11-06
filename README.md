@@ -1,6 +1,6 @@
 # lineup
 
-lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. It serves each playlist as M3U and its guide as XMLTV over HTTP, for players and media servers that read them from a URL, such as Jellyfin and Emby Live TV, Kodi with IPTV Simple, or IPTV apps like TiviMate. Channels are Acestream streams (played through [acexy](https://github.com/Javinator9889/acexy)), live VK videos (played through a VK proxy), or plain stream URLs. One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, tells Jellyfin (or anything with a webhook) when something changes, and can check Acestream swarm health. The same binary is also a CLI for people and agents.
+lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. It serves each playlist as M3U and its guide as XMLTV over HTTP, for players and media servers that read them from a URL, such as Jellyfin and Emby Live TV, Kodi with IPTV Simple, or IPTV apps like TiviMate. Channels are Acestream streams (played through [acexy](https://github.com/Javinator9889/acexy)), live VK videos (played through a VK proxy), or plain stream URLs. One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, calls webhooks (for example Jellyfin's guide refresh) when something changes, and can check Acestream swarm health. The same binary is also a CLI for people and agents.
 
 - Spec and roadmap: [docs/spec.md](docs/spec.md)
 - Deploying: [docs/deploy.md](docs/deploy.md)
@@ -27,7 +27,7 @@ lineup show|edit|rm|enable|disable <channel>   # channel = id, exact name, or an
 lineup playlist ls|show|create|rename|rm|add|remove|move|set|url
 lineup import <file|url|-> -p <slug> [--dry-run]
 lineup epg sources ls|add|edit|rm ; epg fetch [id...] ; epg search <query>
-lineup hook ls|add jellyfin|add webhook|enable|disable|rm|test|deliveries
+lineup hook ls|add|edit|enable|disable|rm|test|deliveries
 lineup probe [channel...] [--force]
 lineup settings get | settings set <key> <value> | settings test acexy|engine|vk [--base URL]
 lineup refresh [slug...]

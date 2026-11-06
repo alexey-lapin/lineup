@@ -163,7 +163,6 @@ async fn hook_commands() {
     let add = [
         "hook",
         "add",
-        "webhook",
         "n",
         "http://127.0.0.1:1/x",
         "--header",
@@ -173,19 +172,7 @@ async fn hook_commands() {
     ];
     assert_eq!(lineup(&s, &add).await, 0);
     assert_eq!(
-        lineup(
-            &s,
-            &[
-                "hook",
-                "add",
-                "webhook",
-                "n",
-                "http://127.0.0.1:1/x",
-                "--events",
-                "bogus"
-            ]
-        )
-        .await,
+        lineup(&s, &["hook", "add", "n", "http://127.0.0.1:1/x", "--events", "bogus"]).await,
         2
     );
     assert_eq!(
@@ -194,6 +181,16 @@ async fn hook_commands() {
         "the receiver is unreachable"
     );
     assert_eq!(lineup(&s, &["hook", "deliveries", "1"]).await, 0);
+    // Edit the URL; the header is kept unless --header is given.
+    assert_eq!(
+        lineup(
+            &s,
+            &["hook", "edit", "1", "--url", "http://127.0.0.1:1/y", "--name", "m"]
+        )
+        .await,
+        0
+    );
+    assert_eq!(lineup(&s, &["hook", "edit", "1", "--url", "not a url"]).await, 2);
     assert_eq!(lineup(&s, &["hook", "disable", "1"]).await, 0);
     assert_eq!(lineup(&s, &["hook", "rm", "1"]).await, 0);
     assert_eq!(lineup(&s, &["hook", "test", "1"]).await, 3);

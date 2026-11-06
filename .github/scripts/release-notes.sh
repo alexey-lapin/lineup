@@ -13,6 +13,11 @@ image=$2
 version=${tag#v}
 prev=$(git describe --tags --abbrev=0 --match 'v*' "$tag^" 2>/dev/null || true)
 
+# Hand-written notes for this release (breaking changes, upgrade steps), read from the tag itself.
+if notes=$(git show "$tag:docs/releases/$tag.md" 2>/dev/null); then
+  printf '%s\n\n' "$notes"
+fi
+
 cat <<MD
 ## Install
 

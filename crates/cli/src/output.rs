@@ -363,17 +363,11 @@ pub fn hooks(list: &[Hook]) {
         return;
     }
     table(
-        &["ID", "NAME", "KIND", "TARGET", "EVENTS", "DEBOUNCE"],
+        &["ID", "NAME", "TARGET", "EVENTS", "DEBOUNCE"],
         list.iter()
             .map(|h| {
-                let (kind, target) = match &h.config {
-                    HookConfig::Jellyfin {
-                        base_url,
-                        followup_minutes,
-                        ..
-                    } => ("jellyfin", format!("{base_url} (follow-up {followup_minutes}m)")),
-                    HookConfig::Webhook { method, url, .. } => ("webhook", format!("{method} {url}")),
-                };
+                let HookConfig::Webhook { method, url, .. } = &h.config;
+                let target = format!("{method} {url}");
                 let name = if h.enabled {
                     h.name.clone()
                 } else {
@@ -382,7 +376,6 @@ pub fn hooks(list: &[Hook]) {
                 vec![
                     h.id.to_string(),
                     name,
-                    kind.into(),
                     target,
                     h.events.join(","),
                     format!("{}s", h.debounce_secs),
@@ -403,7 +396,6 @@ pub fn deliveries(list: &[HookDelivery]) {
             .map(|d| {
                 let trigger = match d.trigger {
                     DeliveryTrigger::Events => "events",
-                    DeliveryTrigger::Followup => "follow-up",
                     DeliveryTrigger::Test => "test",
                 };
                 let result = if d.ok {

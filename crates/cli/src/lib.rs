@@ -78,7 +78,7 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Manage hooks (Jellyfin guide refresh, webhooks).
+    /// Manage hooks (webhooks called when playlists, guide data or channel health change).
     #[command(subcommand)]
     Hook(HookCmd),
     /// Re-emit change notifications for playlists (all when none are given).
@@ -323,16 +323,40 @@ pub enum EpgSourcesCmd {
 pub enum HookCmd {
     /// List hooks (secrets are masked).
     Ls,
-    /// Add a hook.
-    #[command(subcommand)]
-    Add(HookAddCmd),
+    /// Add a webhook: lineup sends the change events as JSON to the URL.
+    Add {
+        name: String,
+        url: String,
+        #[arg(long, default_value = "POST")]
+        method: String,
+        /// Extra header, as Name=value (repeatable), e.g. an Authorization token.
+        #[arg(long = "header", value_parser = parse_header)]
+        headers: Vec<(String, String)>,
+        #[command(flatten)]
+        common: HookCommon,
+    },
+    /// Change a hook. Headers are kept unless --header is given (then they are replaced).
+    Edit {
+        id: i64,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        method: Option<String>,
+        /// Replace all headers, as Name=value (repeatable).
+        #[arg(long = "header", value_parser = parse_header)]
+        headers: Vec<(String, String)>,
+        #[command(flatten)]
+        common: HookCommon,
+    },
     /// Enable a hook.
     Enable { id: i64 },
     /// Disable a hook.
     Disable { id: i64 },
     /// Delete a hook and its delivery log.
     Rm { id: i64 },
-    /// Send a test event now (for Jellyfin this really starts a guide refresh).
+    /// Send a test event now (the receiver really acts on it).
     Test { id: i64 },
     /// Show recent delivery attempts, newest first.
     Deliveries {
@@ -350,40 +374,6 @@ pub struct HookCommon {
     /// Seconds without new events before delivering (default 30).
     #[arg(long)]
     pub debounce: Option<u32>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum HookAddCmd {
-    /// Run Jellyfin's Refresh Guide task when playlists or guide data change.
-    Jellyfin {
-        name: String,
-        /// Jellyfin base URL, e.g. http://jellyfin:8096
-        #[arg(long)]
-        url: String,
-        /// Jellyfin API key (Dashboard → API Keys).
-        #[arg(long, env = "LINEUP_JELLYFIN_API_KEY")]
-        api_key: String,
-        /// Scheduled task id; looked up by key RefreshGuide when omitted.
-        #[arg(long)]
-        task_id: Option<String>,
-        /// Second refresh this many minutes after the last delivery (0 = off).
-        #[arg(long, default_value_t = 65)]
-        followup_minutes: u32,
-        #[command(flatten)]
-        common: HookCommon,
-    },
-    /// POST (or PUT/PATCH) the event envelope as JSON to a URL.
-    Webhook {
-        name: String,
-        url: String,
-        #[arg(long, default_value = "POST")]
-        method: String,
-        /// Extra header, as Name=value (repeatable).
-        #[arg(long = "header", value_parser = parse_header)]
-        headers: Vec<(String, String)>,
-        #[command(flatten)]
-        common: HookCommon,
-    },
 }
 
 fn parse_header(s: &str) -> Result<(String, String), String> {

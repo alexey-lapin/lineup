@@ -446,7 +446,7 @@ export interface components {
             tvg_logo?: string | null;
         };
         /** @enum {string} */
-        DeliveryTrigger: "events" | "followup" | "test";
+        DeliveryTrigger: "events" | "test";
         /** @description A channel offered by a guide source. */
         EpgChannel: {
             display_names: string[];
@@ -561,23 +561,8 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description What a hook calls. */
+        /** @description What a hook calls. Tagged by `kind` so other kinds can be added later; today only webhooks. */
         HookConfig: {
-            /** @description API key (Dashboard → API Keys). Write-only: responses show a mask. */
-            api_key: string;
-            /** @description e.g. `http://jellyfin:8096` */
-            base_url: string;
-            /**
-             * Format: int32
-             * @description A second refresh this many minutes after the last delivery, once Jellyfin's cached
-             *     guide download has expired; 0 turns it off.
-             */
-            followup_minutes?: number;
-            /** @enum {string} */
-            kind: "jellyfin";
-            /** @description Scheduled task id; found by its key `RefreshGuide` when empty. */
-            task_id?: string | null;
-        } | {
             /** @description Extra request headers. Values are write-only: responses show a mask. */
             headers?: {
                 [key: string]: string;
@@ -592,7 +577,7 @@ export interface components {
             /** Format: int32 */
             debounce_secs?: number | null;
             enabled?: boolean;
-            /** @description Defaults: `playlist.changed` and `epg.updated` for Jellyfin, every event for webhooks. */
+            /** @description Defaults to every event type. */
             events?: string[] | null;
             name: string;
         };

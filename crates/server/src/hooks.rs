@@ -2,8 +2,7 @@
 //!
 //! Each worker collects matching events until none has arrived for `debounce_secs` (or the window
 //! has been open for [`MAX_WAIT_FACTOR`] times that), then delivers them in one envelope, retrying
-//! with backoff. Jellyfin hooks also schedule one follow-up refresh `followup_minutes` after the
-//! latest delivery. Workers are rebuilt whenever hooks change.
+//! with backoff. Workers are rebuilt whenever hooks change.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +17,29 @@ use tokio::time::Instant;
 use crate::error::{Error, Result};
 use crate::store::{Event, NewDelivery, Store};
 
+/// Placeholder in the URL of a Jellyfin hook converted by migration 0005 without a task id.
+pub const MISSING_TASK_ID: &str = "REFRESH_GUIDE_TASK_ID";
+
+/// Warn about hooks converted from Jellyfin hooks that still need their URL completed (every start,
+/// until fixed). Logs ids and names only: the URL's other parts and the headers may hold secrets.
+pub async fn warn_unfinished(store: &Store) {
+    let hooks = match store.list_hooks().await {
+        Ok(h) => h,
+        Err(e) => return tracing::warn!("listing hooks: {e}"),
+    };
+    for h in hooks {
+        let HookConfig::Webhook { url, .. } = &h.config;
+        if url.contains(MISSING_TASK_ID) {
+            tracing::warn!(
+                "hook {} ({}) was converted from a Jellyfin hook without a task id and is disabled: \
+                 replace {MISSING_TASK_ID} in its URL with the Refresh Guide task id, then enable it",
+                h.id,
+                h.name
+            );
+        }
+    }
+}
+
 /// A debounce window never stays open longer than this many debounce periods.
 const MAX_WAIT_FACTOR: u32 = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -27,8 +49,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct Timing {
     /// Length of one `debounce_secs` unit.
     pub second: Duration,
-    /// Length of one `followup_minutes` unit.
-    pub minute: Duration,
     /// Waits before the retries (3 retries after the first attempt).
     pub backoff: [Duration; 3],
 }
@@ -37,7 +57,6 @@ impl Default for Timing {
     fn default() -> Self {
         Timing {
             second: Duration::from_secs(1),
-            minute: Duration::from_secs(60),
             backoff: [Duration::from_secs(2), Duration::from_secs(10), Duration::from_secs(30)],
         }
     }
@@ -154,7 +173,7 @@ impl Hooks {
     }
 
     /// Bring workers in line with the stored hooks. Changed hooks get their new configuration
-    /// without losing pending events or a scheduled follow-up; deleted or disabled hooks' workers
+    /// without losing pending events; deleted or disabled hooks' workers
     /// are stopped (dropping what they had pending), new ones started.
     async fn reload(self: &Arc<Self>, workers: &mut Workers) {
         let version = *self.store.watch_hooks().borrow();
@@ -197,19 +216,8 @@ impl Hooks {
         let mut pending: Vec<Stamped> = Vec::new();
         let mut window_start: Option<Instant> = None;
         let mut last_event: Option<Instant> = None;
-        let mut followup_at: Option<Instant> = None;
-        let mut task_id: Option<String> = None;
         loop {
             let debounce = self.timing.second * hook.debounce_secs;
-            let followup = match &hook.config {
-                HookConfig::Jellyfin { followup_minutes, .. } if *followup_minutes > 0 => {
-                    Some(self.timing.minute * *followup_minutes)
-                }
-                _ => None,
-            };
-            if followup.is_none() {
-                followup_at = None;
-            }
             // Recomputed every turn so configuration changes apply to an open window.
             let fire_at = match (window_start, last_event) {
                 (Some(start), Some(last)) => Some((last + debounce).min(start + debounce * MAX_WAIT_FACTOR)),
@@ -219,12 +227,7 @@ impl Hooks {
             tokio::select! {
                 msg = rx.recv() => match msg {
                     None => return,
-                    Some(Msg::Config(h)) => {
-                        if h.config != hook.config {
-                            task_id = None;
-                        }
-                        hook = *h;
-                    }
+                    Some(Msg::Config(h)) => hook = *h,
                     Some(Msg::Event(ev)) => {
                         let now = Instant::now();
                         if pending.is_empty() {
@@ -240,32 +243,16 @@ impl Hooks {
                     let batch = std::mem::take(&mut pending);
                     let body = envelope(&batch);
                     let types = event_types(&batch);
-                    self.deliver(&hook, &mut task_id, &body, &types, DeliveryTrigger::Events).await;
-                    // Later deliveries move the single follow-up later.
-                    if let Some(f) = followup {
-                        followup_at = Some(Instant::now() + f);
-                    }
-                }
-                _ = tokio::time::sleep_until(followup_at.unwrap_or(far)), if followup_at.is_some() => {
-                    followup_at = None;
-                    let body = envelope(&[]);
-                    self.deliver(&hook, &mut task_id, &body, &[], DeliveryTrigger::Followup).await;
+                    self.deliver(&hook, &body, &types, DeliveryTrigger::Events).await;
                 }
             }
         }
     }
 
     /// Deliver with retries, logging every attempt.
-    async fn deliver(
-        &self,
-        hook: &Hook,
-        task_id: &mut Option<String>,
-        body: &serde_json::Value,
-        types: &[String],
-        trigger: DeliveryTrigger,
-    ) {
+    async fn deliver(&self, hook: &Hook, body: &serde_json::Value, types: &[String], trigger: DeliveryTrigger) {
         for attempt in 1..=(self.timing.backoff.len() as u32 + 1) {
-            let a = self.send(hook, task_id, body).await;
+            let a = self.send(hook, body).await;
             let ok = a.ok;
             let what = log_attempt(hook, types, trigger, attempt, &a);
             self.log(hook.id, types, trigger, attempt, a).await;
@@ -314,7 +301,7 @@ impl Hooks {
             "window_end": Utc::now(),
         });
         let types = vec!["hook.test".to_string()];
-        let a = self.send(&hook, &mut None, &body).await;
+        let a = self.send(&hook, &body).await;
         log_attempt(&hook, &types, DeliveryTrigger::Test, 1, &a);
         // The row this attempt inserted, not merely the latest one.
         self.log(id, &types, DeliveryTrigger::Test, 1, a)
@@ -322,56 +309,18 @@ impl Hooks {
             .ok_or_else(|| Error::NotFound(format!("hook {id} was deleted during the test")))
     }
 
-    async fn send(&self, hook: &Hook, task_id: &mut Option<String>, body: &serde_json::Value) -> Attempt {
-        let res = match &hook.config {
-            HookConfig::Webhook { method, url, headers } => {
-                let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
-                let mut req = self.client.request(method, url).json(body).timeout(REQUEST_TIMEOUT);
-                for (k, v) in headers {
-                    req = req.header(k, v);
-                }
-                // Webhook URLs may carry tokens; keep them out of errors (and so out of logs).
-                req.send().await.map_err(|e| e.without_url().to_string())
-            }
-            HookConfig::Jellyfin {
-                base_url,
-                api_key,
-                task_id: configured,
-                ..
-            } => {
-                let id = match configured.clone().or_else(|| task_id.clone()) {
-                    Some(id) => id,
-                    None => match self.find_refresh_task(base_url, api_key).await {
-                        Ok(id) => {
-                            *task_id = Some(id.clone());
-                            id
-                        }
-                        Err(e) => {
-                            return Attempt {
-                                ok: false,
-                                http_code: None,
-                                error: Some(e),
-                            };
-                        }
-                    },
-                };
-                self.client
-                    .post(format!("{base_url}/ScheduledTasks/Running/{id}"))
-                    .header(reqwest::header::AUTHORIZATION, jellyfin_auth(api_key))
-                    .timeout(REQUEST_TIMEOUT)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-        };
-        match res {
+    async fn send(&self, hook: &Hook, body: &serde_json::Value) -> Attempt {
+        let HookConfig::Webhook { method, url, headers } = &hook.config;
+        let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::POST);
+        let mut req = self.client.request(method, url).json(body).timeout(REQUEST_TIMEOUT);
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        // Webhook URLs may carry tokens; keep them out of errors (and so out of logs).
+        match req.send().await {
             Ok(r) => {
                 let code = r.status().as_u16();
                 let ok = r.status().is_success();
-                // A stale cached task id (e.g. Jellyfin reinstalled) is looked up again next time.
-                if r.status() == reqwest::StatusCode::NOT_FOUND {
-                    *task_id = None;
-                }
                 Attempt {
                     ok,
                     http_code: Some(code),
@@ -381,31 +330,9 @@ impl Hooks {
             Err(e) => Attempt {
                 ok: false,
                 http_code: None,
-                error: Some(e),
+                error: Some(e.without_url().to_string()),
             },
         }
-    }
-
-    /// `GET {base}/ScheduledTasks` and pick the task with key `RefreshGuide`.
-    async fn find_refresh_task(&self, base_url: &str, api_key: &str) -> std::result::Result<String, String> {
-        let res = self
-            .client
-            .get(format!("{base_url}/ScheduledTasks"))
-            .header(reqwest::header::AUTHORIZATION, jellyfin_auth(api_key))
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await
-            .map_err(|e| format!("listing scheduled tasks: {e}"))?;
-        if !res.status().is_success() {
-            return Err(format!("listing scheduled tasks: HTTP {}", res.status()));
-        }
-        let tasks: Vec<serde_json::Value> = res.json().await.map_err(|e| format!("listing scheduled tasks: {e}"))?;
-        tasks
-            .iter()
-            .find(|t| t.get("Key").and_then(|k| k.as_str()) == Some("RefreshGuide"))
-            .and_then(|t| t.get("Id").and_then(|i| i.as_str()))
-            .map(str::to_string)
-            .ok_or_else(|| "Jellyfin has no scheduled task with key RefreshGuide".into())
     }
 }
 
@@ -432,10 +359,6 @@ fn log_attempt(hook: &Hook, types: &[String], trigger: DeliveryTrigger, attempt:
         );
     }
     what
-}
-
-fn jellyfin_auth(api_key: &str) -> String {
-    format!("MediaBrowser Token=\"{api_key}\"")
 }
 
 fn event_types(batch: &[Stamped]) -> Vec<String> {

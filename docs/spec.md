@@ -13,7 +13,7 @@ lineup is a standalone service that owns the channels. It serves playlists and t
 - Named playlists with channels picked by hand, served as `/p/<slug>.m3u` with a per-playlist `/p/<slug>/epg.xml`.
 - The app fetches the EPG itself.
 - An add flow that suggests a name and matching tvg-id and logo.
-- Events → hooks (a Jellyfin RefreshGuide hook and generic webhooks).
+- Events → webhooks (e.g. Jellyfin's RefreshGuide task).
 - Health probes for acestream channels (status only).
 - A Vue + Nuxt UI PWA for managing, and a Rust CLI over the same REST API.
 
@@ -203,15 +203,12 @@ Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` 
 - Retries 3 times with backoff (2s, 10s, 30s). Each attempt is logged; the last 200 rows per hook are kept.
 - A 2xx means *accepted*, not that the downstream is fresh.
 
-**Hook kinds**
-- `jellyfin`: `{base_url, api_key, task_id?, followup_minutes: 65}`.
-  - Calls `POST {base}/ScheduledTasks/Running/{task_id}` with `Authorization: MediaBrowser Token="…"`. If `task_id` is empty, it finds the task by key `RefreshGuide` via `GET /ScheduledTasks`.
-  - Never restarts Jellyfin.
-  - **Freshness**: Jellyfin's XMLTV provider reuses its downloaded XML for about 1h. Any change to a playlist's membership or channels can change its epg.xml. So *every* delivery (`playlist.changed` or `epg.updated`) also schedules a single follow-up RefreshGuide `followup_minutes` later. If more triggers arrive, that one follow-up is moved later rather than adding another. The follow-up call itself never schedules another follow-up.
-  - Contract: channel-list changes appear within about debounce plus refresh time. Guide-data changes appear within about 65 min of the *latest* merged guide change, assuming Jellyfin is up (later triggers move the follow-up). Verify the cache window against current Jellyfin releases (§15).
+**Hook kind** (0.3.0: webhooks only; the Jellyfin kind and its follow-up resend were removed)
 - `webhook`: `{method, url, headers{}}`. The body is always the envelope above. Body templates are deferred.
+- Integrations are recipes, not kinds: Jellyfin is `POST {base}/ScheduledTasks/Running/{RefreshGuide task id}` with `Authorization: MediaBrowser Token="…"` (docs/deploy.md). lineup never discovers task ids or schedules extra refreshes; the user supplies the full URL.
+- Migration 0005 converts 0.2 Jellyfin hooks; one without a stored task id becomes disabled with `REFRESH_GUIDE_TASK_ID` in its URL, can't be enabled until the URL is fixed, and is reported at startup.
 - Every hook has a "test" action that sends a synthetic event.
-- Secrets (api_key, header values) are write-only in the API and masked in responses.
+- Secrets (header values) are write-only in the API and masked in responses.
 
 ## 9. Health probes (acestream only)
 

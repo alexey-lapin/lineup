@@ -8,7 +8,7 @@ use api_types::{
 use serde::Serialize;
 
 use crate::client::{CliError, Client};
-use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, HookAddCmd, HookCmd, PlaylistCmd, SettingsCmd, output};
+use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, HookCmd, PlaylistCmd, SettingsCmd, output};
 
 type R<T = ()> = Result<T, CliError>;
 
@@ -485,44 +485,20 @@ async fn hook(x: &mut Ctx, cmd: HookCmd) -> R {
             let l: Vec<Hook> = x.c.get("/hooks").await?;
             x.emit(&l, |l| output::hooks(l));
         }
-        HookCmd::Add(add) => {
-            let (name, config, common) = match add {
-                HookAddCmd::Jellyfin {
-                    name,
-                    url,
-                    api_key,
-                    task_id,
-                    followup_minutes,
-                    common,
-                } => (
-                    name,
-                    HookConfig::Jellyfin {
-                        base_url: url,
-                        api_key,
-                        task_id,
-                        followup_minutes,
-                    },
-                    common,
-                ),
-                HookAddCmd::Webhook {
-                    name,
-                    url,
-                    method,
-                    headers,
-                    common,
-                } => (
-                    name,
-                    HookConfig::Webhook {
-                        method,
-                        url,
-                        headers: headers.into_iter().collect(),
-                    },
-                    common,
-                ),
-            };
+        HookCmd::Add {
+            name,
+            url,
+            method,
+            headers,
+            common,
+        } => {
             let req = HookCreate {
                 name,
-                config,
+                config: HookConfig::Webhook {
+                    method,
+                    url,
+                    headers: headers.into_iter().collect(),
+                },
                 events: common.events,
                 debounce_secs: common.debounce,
                 enabled: true,
@@ -531,6 +507,41 @@ async fn hook(x: &mut Ctx, cmd: HookCmd) -> R {
             x.emit(&h, |h| {
                 println!("added hook {} ({}) for {}", h.id, h.name, h.events.join(", "))
             });
+        }
+        HookCmd::Edit {
+            id,
+            name,
+            url,
+            method,
+            headers,
+            common,
+        } => {
+            // The current config comes back with masked header values; sending a mask back keeps
+            // the stored secret.
+            let cur: Hook = x.c.get(&format!("/hooks/{id}")).await?;
+            let HookConfig::Webhook {
+                method: cur_method,
+                url: cur_url,
+                headers: cur_headers,
+            } = cur.config;
+            let config = (url.is_some() || method.is_some() || !headers.is_empty()).then(|| HookConfig::Webhook {
+                method: method.unwrap_or(cur_method),
+                url: url.unwrap_or(cur_url),
+                headers: if headers.is_empty() {
+                    cur_headers
+                } else {
+                    headers.into_iter().collect()
+                },
+            });
+            let patch = HookPatch {
+                name,
+                config,
+                events: common.events,
+                debounce_secs: common.debounce,
+                enabled: None,
+            };
+            let h: Hook = x.c.patch(&format!("/hooks/{id}"), &patch).await?;
+            x.emit(&h, |h| println!("updated hook {} ({})", h.id, h.name));
         }
         HookCmd::Enable { id } | HookCmd::Disable { id } => {
             let enabled = matches!(cmd, HookCmd::Enable { .. });

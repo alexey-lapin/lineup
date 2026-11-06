@@ -66,7 +66,6 @@ async fn receiver(script: Vec<u16>) -> (String, Shared) {
 
 const TIMING: Timing = Timing {
     second: Duration::from_millis(20),
-    minute: Duration::from_millis(100),
     backoff: [Duration::from_millis(20); 3],
 };
 
@@ -125,9 +124,7 @@ async fn webhook_debounce_envelope_and_secrets() {
         })
         .await
         .unwrap();
-    let HookConfig::Webhook { headers, method, .. } = &hook.config else {
-        panic!()
-    };
+    let HookConfig::Webhook { headers, method, .. } = &hook.config;
     assert_eq!(headers["X-Token"], SECRET_MASK, "secrets are masked");
     assert_eq!(method, "POST");
     assert_eq!(hook.events.len(), 4, "webhooks get every event by default");
@@ -232,47 +229,38 @@ async fn retries_until_accepted() {
 }
 
 #[tokio::test]
-async fn jellyfin_refresh_with_followup() {
+async fn jellyfin_recipe_is_a_plain_webhook() {
     let (url, rx) = receiver(vec![]).await;
     let (store, hooks) = setup().await;
     let hook = store
         .create_hook(HookCreate {
             name: "jellyfin".into(),
-            config: HookConfig::Jellyfin {
-                base_url: format!("{url}/"),
-                api_key: "key123".into(),
-                task_id: None,
-                followup_minutes: 2,
+            config: HookConfig::Webhook {
+                method: "POST".into(),
+                url: format!("{url}/ScheduledTasks/Running/guide-task"),
+                headers: [("Authorization".to_string(), "MediaBrowser Token=\"key123\"".to_string())].into(),
             },
-            events: None,
+            events: Some(vec!["playlist.changed".into(), "epg.updated".into()]),
             debounce_secs: Some(1),
             enabled: true,
         })
         .await
         .unwrap();
-    assert_eq!(hook.events, ["playlist.changed", "epg.updated"]);
     hooks.synced().await;
     make_changes(&store).await;
 
-    // Task lookup, the refresh, then one follow-up refresh.
-    let reqs = wait_for(&rx, 3).await;
+    // One POST to the task URL with the token, and nothing after it (no follow-up resend).
+    let reqs = wait_for(&rx, 1).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let reqs_after = rx.lock().unwrap().requests.clone();
-    assert_eq!(reqs_after.len(), 3, "exactly one follow-up: {reqs_after:?}");
+    assert_eq!(rx.lock().unwrap().requests.len(), 1);
     assert_eq!(
         (reqs[0].method.as_str(), reqs[0].path.as_str()),
-        ("GET", "/ScheduledTasks")
+        ("POST", "/ScheduledTasks/Running/guide-task")
     );
-    for r in &reqs[1..] {
-        assert_eq!(
-            (r.method.as_str(), r.path.as_str()),
-            ("POST", "/ScheduledTasks/Running/guide-task")
-        );
-        assert_eq!(r.headers["authorization"], "MediaBrowser Token=\"key123\"");
-    }
+    assert_eq!(reqs[0].headers["authorization"], "MediaBrowser Token=\"key123\"");
     let log = store.hook_deliveries(hook.id, 10).await.unwrap();
-    let triggers: Vec<_> = log.iter().rev().map(|d| d.trigger).collect();
-    assert_eq!(triggers, [DeliveryTrigger::Events, DeliveryTrigger::Followup]);
+    let triggers: Vec<_> = log.iter().map(|d| d.trigger).collect();
+    assert_eq!(triggers, [DeliveryTrigger::Events]);
 
     // The test action: one attempt, logged.
     let d = hooks.test(hook.id).await.unwrap();
@@ -322,17 +310,16 @@ async fn events_right_after_creation_are_delivered() {
 }
 
 #[tokio::test]
-async fn edits_keep_pending_events_and_the_followup() {
+async fn edits_keep_pending_events() {
     let (url, rx) = receiver(vec![]).await;
     let (store, hooks) = setup().await;
     let hook = store
         .create_hook(HookCreate {
-            name: "jellyfin".into(),
-            config: HookConfig::Jellyfin {
-                base_url: url,
-                api_key: "k".into(),
-                task_id: Some("t".into()),
-                followup_minutes: 3,
+            name: "w".into(),
+            config: HookConfig::Webhook {
+                method: "POST".into(),
+                url,
+                headers: Default::default(),
             },
             events: None,
             debounce_secs: Some(5),
@@ -341,22 +328,19 @@ async fn edits_keep_pending_events_and_the_followup() {
         .await
         .unwrap();
     hooks.synced().await;
-    let rename = |n: &str| HookPatch {
-        name: Some(n.into()),
+    make_changes(&store).await;
+    // Renamed while the window is open: the events are still delivered, once.
+    let rename = HookPatch {
+        name: Some("a".into()),
         ..Default::default()
     };
-    make_changes(&store).await;
-    // Renamed while the window is open: the events are still delivered.
-    store.patch_hook(hook.id, rename("a")).await.unwrap();
+    store.patch_hook(hook.id, rename).await.unwrap();
     hooks.synced().await;
     wait_for(&rx, 1).await;
-    // Renamed after the delivery: the follow-up still comes.
-    store.patch_hook(hook.id, rename("b")).await.unwrap();
-    hooks.synced().await;
-    wait_for(&rx, 2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let log = store.hook_deliveries(hook.id, 10).await.unwrap();
-    let triggers: Vec<_> = log.iter().rev().map(|d| d.trigger).collect();
-    assert_eq!(triggers, [DeliveryTrigger::Events, DeliveryTrigger::Followup]);
+    let triggers: Vec<_> = log.iter().map(|d| d.trigger).collect();
+    assert_eq!(triggers, [DeliveryTrigger::Events]);
 }
 
 #[tokio::test]

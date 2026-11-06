@@ -88,26 +88,52 @@ Add it wherever your player takes an XMLTV guide; in Jellyfin that is **Dashboar
 
 Players cache the guide (Jellyfin for about an hour), so guide changes can take a while to appear.
 
-## Tell Jellyfin, or anything else, about changes
+## Tell players about changes: hooks
 
-Players and media servers re-read the playlist and guide on their own schedule. Hooks let lineup tell them right away: the Jellyfin hook refreshes Jellyfin, and a webhook sends the change events to any receiver that acts on them.
-
-A Jellyfin hook runs Jellyfin's **Refresh Guide** task whenever a playlist or guide data changes, so new channels show up without waiting for Jellyfin's own schedule. Create an API key in Jellyfin (**Dashboard → API Keys**), then add the hook under **Hooks** in the UI, or:
+Players and media servers re-read the playlist and guide on their own schedule. A hook makes lineup call a URL as soon as something changes, typically a media server's refresh endpoint:
 
 ```sh
-lineup hook add jellyfin Jellyfin --url http://jellyfin:8096 --api-key <key>
-lineup hook test 1          # really starts a guide refresh
+lineup hook add <name> <url> [--method POST|PUT|PATCH] [--header Name=value]... [--events a,b] [--debounce 30]
+lineup hook test 1          # sends a test event; the receiver really acts on it
 lineup hook deliveries 1
+lineup hook edit 1 --url <new url>
 ```
 
-Changes are collected for 30 seconds (`--debounce`) and delivered together. Because Jellyfin reuses a downloaded guide for about an hour, the hook runs a second refresh 65 minutes after the last change (`--followup-minutes`, 0 turns it off). The API key is stored write-only and never shown again.
-
-A webhook hook sends the same events as JSON to any URL (`lineup hook add webhook <name> <url>`):
+Changes are collected for 30 seconds (`--debounce`) and sent together, with retries. The body is always this JSON envelope, which a receiver may use or ignore:
 
 ```json
 {"events": [{"type": "playlist.changed", "at": "…", "payload": {"slugs": ["tv"]}}],
  "window_start": "…", "window_end": "…"}
 ```
+
+Header values (tokens) are stored write-only and never shown again. `lineup hook edit` keeps them unless you pass `--header`.
+
+A successful delivery means the receiver accepted the call, not that it has finished refreshing.
+
+### Jellyfin
+
+Jellyfin's **Refresh Guide** task re-reads tuners and guide providers. To run it on every change:
+
+1. Create an API key: **Dashboard → API Keys**.
+2. Find the task's id:
+
+   ```sh
+   curl -s -H 'Authorization: MediaBrowser Token="<key>"' http://jellyfin:8096/ScheduledTasks \
+     | jq -r '.[] | select(.Key == "RefreshGuide") | .Id'
+   ```
+
+3. Add the hook:
+
+   ```sh
+   lineup hook add Jellyfin http://jellyfin:8096/ScheduledTasks/Running/<task id> \
+     --header 'Authorization=MediaBrowser Token="<key>"' --events playlist.changed,epg.updated
+   ```
+
+If the task id ever changes (a 404 in `lineup hook deliveries`), look it up again and `lineup hook edit <id> --url …`. Jellyfin reuses a downloaded XMLTV guide for a while (about an hour), so a refresh right after a guide change may still show the old programmes until a later refresh.
+
+### Upgrading from 0.2
+
+0.3.0 replaced the built-in Jellyfin hook with webhooks. Existing Jellyfin hooks are converted on first start into the webhook above, keeping the API key. A hook that had no task id stored (the default, since 0.2 looked it up itself) is converted **disabled**, with `REFRESH_GUIDE_TASK_ID` in its URL; lineup logs a warning about it at every start. Look up the task id as above, then `lineup hook edit <id> --url http://jellyfin:8096/ScheduledTasks/Running/<task id>` and `lineup hook enable <id>` (or edit it under **Hooks**). The 65-minute follow-up refresh is gone.
 
 ## Health checks
 

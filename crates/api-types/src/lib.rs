@@ -541,25 +541,11 @@ pub const EVENT_TYPES: &[&str] = &[
 /// Shown instead of a stored secret. Sending it back unchanged keeps the secret.
 pub const SECRET_MASK: &str = "********";
 
-/// What a hook calls.
+/// What a hook calls. Tagged by `kind` so other kinds can be added later; today only webhooks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum HookConfig {
-    /// Runs Jellyfin's "Refresh Guide" scheduled task.
-    Jellyfin {
-        /// e.g. `http://jellyfin:8096`
-        base_url: String,
-        /// API key (Dashboard → API Keys). Write-only: responses show a mask.
-        api_key: String,
-        /// Scheduled task id; found by its key `RefreshGuide` when empty.
-        #[serde(default)]
-        task_id: Option<String>,
-        /// A second refresh this many minutes after the last delivery, once Jellyfin's cached
-        /// guide download has expired; 0 turns it off.
-        #[serde(default = "default_followup_minutes")]
-        followup_minutes: u32,
-    },
-    /// Sends the event envelope as JSON.
+    /// Sends the event envelope as JSON to a URL (e.g. a media server's refresh endpoint).
     Webhook {
         #[serde(default = "default_method")]
         method: String,
@@ -568,10 +554,6 @@ pub enum HookConfig {
         #[serde(default)]
         headers: std::collections::BTreeMap<String, String>,
     },
-}
-
-fn default_followup_minutes() -> u32 {
-    65
 }
 
 fn default_method() -> String {
@@ -596,7 +578,7 @@ pub struct Hook {
 pub struct HookCreate {
     pub name: String,
     pub config: HookConfig,
-    /// Defaults: `playlist.changed` and `epg.updated` for Jellyfin, every event for webhooks.
+    /// Defaults to every event type.
     #[serde(default)]
     pub events: Option<Vec<String>>,
     #[serde(default)]
@@ -625,8 +607,6 @@ pub struct HookPatch {
 pub enum DeliveryTrigger {
     /// Debounced events.
     Events,
-    /// The Jellyfin follow-up refresh.
-    Followup,
     /// The test action.
     Test,
 }

@@ -56,6 +56,7 @@ impl Store {
             None => default_events(&config),
         };
         let debounce = validate_debounce(req.debounce_secs.unwrap_or(DEFAULT_DEBOUNCE_SECS))?;
+        check_complete(&config, req.enabled)?;
         let ts = now();
         let id = sqlx::query(
             "INSERT INTO hooks(name, kind, config, events, debounce_secs, enabled, created_at, updated_at)
@@ -100,6 +101,7 @@ impl Store {
         if let Some(e) = patch.enabled {
             next.enabled = e;
         }
+        check_complete(&next.config, next.enabled)?;
         if next != cur {
             sqlx::query(
                 "UPDATE hooks SET name=?, kind=?, config=?, events=?, debounce_secs=?, enabled=?, updated_at=?
@@ -206,7 +208,6 @@ impl Store {
                     hook_id: r.try_get("hook_id")?,
                     events: serde_json::from_str(&events)?,
                     trigger: match trigger.as_str() {
-                        "followup" => DeliveryTrigger::Followup,
                         "test" => DeliveryTrigger::Test,
                         _ => DeliveryTrigger::Events,
                     },
@@ -234,23 +235,18 @@ impl Store {
 fn trigger_str(t: DeliveryTrigger) -> &'static str {
     match t {
         DeliveryTrigger::Events => "events",
-        DeliveryTrigger::Followup => "followup",
         DeliveryTrigger::Test => "test",
     }
 }
 
 fn kind(c: &HookConfig) -> &'static str {
     match c {
-        HookConfig::Jellyfin { .. } => "jellyfin",
         HookConfig::Webhook { .. } => "webhook",
     }
 }
 
-fn default_events(c: &HookConfig) -> Vec<String> {
-    match c {
-        HookConfig::Jellyfin { .. } => vec!["playlist.changed".into(), "epg.updated".into()],
-        HookConfig::Webhook { .. } => EVENT_TYPES.iter().map(|s| s.to_string()).collect(),
-    }
+fn default_events(_: &HookConfig) -> Vec<String> {
+    EVENT_TYPES.iter().map(|s| s.to_string()).collect()
 }
 
 fn clean_hook_name(s: &str) -> Result<String> {
@@ -299,26 +295,6 @@ fn http_url(field: &str, s: &str) -> Result<String> {
 
 fn validate_config(c: HookConfig) -> Result<HookConfig> {
     Ok(match c {
-        HookConfig::Jellyfin {
-            base_url,
-            api_key,
-            task_id,
-            followup_minutes,
-        } => {
-            let api_key = api_key.trim().to_string();
-            if api_key.is_empty() {
-                return Err(invalid("api_key must not be empty"));
-            }
-            if followup_minutes > 24 * 60 {
-                return Err(invalid("followup_minutes must be at most 1440"));
-            }
-            HookConfig::Jellyfin {
-                base_url: http_url("base_url", &base_url)?,
-                api_key,
-                task_id: task_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
-                followup_minutes,
-            }
-        }
         HookConfig::Webhook { method, url, headers } => {
             let method = method.trim().to_ascii_uppercase();
             if !matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
@@ -339,29 +315,33 @@ fn validate_config(c: HookConfig) -> Result<HookConfig> {
     })
 }
 
+/// An enabled hook must not point at the placeholder URL left by migration 0005.
+fn check_complete(c: &HookConfig, enabled: bool) -> Result<()> {
+    let HookConfig::Webhook { url, .. } = c;
+    if enabled && url.contains(crate::hooks::MISSING_TASK_ID) {
+        return Err(invalid(format!(
+            "replace {} in the URL with the real task id before enabling this hook",
+            crate::hooks::MISSING_TASK_ID
+        )));
+    }
+    Ok(())
+}
+
 fn contains_mask(c: &HookConfig) -> bool {
     match c {
-        HookConfig::Jellyfin { api_key, .. } => api_key == SECRET_MASK,
         HookConfig::Webhook { headers, .. } => headers.values().any(|v| v == SECRET_MASK),
     }
 }
 
-/// Replace masks sent back by a client with the stored secrets (same kind only).
+/// Replace masks sent back by a client with the stored secrets (by header name).
 fn keep_masked_secrets(mut next: HookConfig, cur: &HookConfig) -> HookConfig {
-    match (&mut next, cur) {
-        (HookConfig::Jellyfin { api_key, .. }, HookConfig::Jellyfin { api_key: old, .. }) if api_key == SECRET_MASK => {
-            *api_key = old.clone();
+    let (HookConfig::Webhook { headers, .. }, HookConfig::Webhook { headers: old, .. }) = (&mut next, cur);
+    for (k, v) in headers.iter_mut() {
+        if v == SECRET_MASK
+            && let Some(o) = old.get(k)
+        {
+            *v = o.clone();
         }
-        (HookConfig::Webhook { headers, .. }, HookConfig::Webhook { headers: old, .. }) => {
-            for (k, v) in headers.iter_mut() {
-                if v == SECRET_MASK
-                    && let Some(o) = old.get(k)
-                {
-                    *v = o.clone();
-                }
-            }
-        }
-        _ => {}
     }
     next
 }
@@ -369,7 +349,6 @@ fn keep_masked_secrets(mut next: HookConfig, cur: &HookConfig) -> HookConfig {
 /// The hook as shown by the API: secrets replaced by the mask.
 fn masked(mut h: Hook) -> Hook {
     match &mut h.config {
-        HookConfig::Jellyfin { api_key, .. } => *api_key = SECRET_MASK.into(),
         HookConfig::Webhook { headers, .. } => {
             for v in headers.values_mut() {
                 *v = SECRET_MASK.into();

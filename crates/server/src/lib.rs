@@ -31,6 +31,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let store = Arc::new(Store::open(&cfg.data_dir.join("lineup.db")).await?);
     let app = http::App::new(store, &cfg.data_dir);
     app.epg.recover().await?;
+    hooks::warn_unfinished(&app.store).await;
     app.epg.spawn_scheduler();
     app.hooks.spawn();
     app.prober.spawn_scheduler();

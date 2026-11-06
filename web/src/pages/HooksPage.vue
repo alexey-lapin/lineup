@@ -2,7 +2,7 @@
 import { useQuery, useQueryCache } from '@pinia/colada'
 import { useToast } from '@nuxt/ui/composables'
 import { computed, ref } from 'vue'
-import { api, EVENT_TYPES, SECRET_MASK, type Hook, type HookConfig, type HookDelivery } from '../api'
+import { api, EVENT_TYPES, type Hook, type HookConfig, type HookDelivery } from '../api'
 import { useAction } from '../composables'
 import { floating } from '../safe-area'
 
@@ -14,45 +14,24 @@ const refresh = () => cache.invalidateQueries({ key: ['hooks'] })
 
 // ---------------------------------------------------------------- form
 
-type Kind = 'jellyfin' | 'webhook'
 const formOpen = ref(false)
 const editing = ref<Hook | null>(null)
 const saving = ref(false)
-const form = ref({
-  kind: 'jellyfin' as Kind,
+const blank = () => ({
   name: '',
-  base_url: '',
-  api_key: '',
-  task_id: '',
-  followup_minutes: 65,
   method: 'POST',
   url: '',
   headers: [] as { name: string; value: string }[],
-  events: ['playlist.changed', 'epg.updated'] as string[],
+  events: [...EVENT_TYPES] as string[],
   debounce_secs: 30
 })
+const form = ref(blank())
 
-const kindItems = [
-  { label: 'Jellyfin guide refresh', value: 'jellyfin' },
-  { label: 'Webhook', value: 'webhook' }
-]
 const eventItems = EVENT_TYPES.map((e) => ({ label: e as string, value: e as string }))
 
 function openAdd() {
   editing.value = null
-  form.value = {
-    kind: 'jellyfin',
-    name: 'Jellyfin',
-    base_url: '',
-    api_key: '',
-    task_id: '',
-    followup_minutes: 65,
-    method: 'POST',
-    url: '',
-    headers: [],
-    events: ['playlist.changed', 'epg.updated'],
-    debounce_secs: 30
-  }
+  form.value = blank()
   formOpen.value = true
 }
 
@@ -60,39 +39,18 @@ function openEdit(h: Hook) {
   editing.value = h
   const c = h.config
   form.value = {
-    kind: c.kind,
     name: h.name,
-    base_url: c.kind === 'jellyfin' ? c.base_url : '',
-    api_key: c.kind === 'jellyfin' ? c.api_key : '',
-    task_id: c.kind === 'jellyfin' ? (c.task_id ?? '') : '',
-    followup_minutes: c.kind === 'jellyfin' ? (c.followup_minutes ?? 65) : 65,
-    method: c.kind === 'webhook' ? (c.method ?? 'POST') : 'POST',
-    url: c.kind === 'webhook' ? c.url : '',
-    headers: c.kind === 'webhook' ? Object.entries(c.headers ?? {}).map(([name, value]) => ({ name, value })) : [],
+    method: c.method ?? 'POST',
+    url: c.url,
+    headers: Object.entries(c.headers ?? {}).map(([name, value]) => ({ name, value })),
     events: [...h.events],
     debounce_secs: h.debounce_secs
   }
   formOpen.value = true
 }
 
-function onKindChange(k: Kind) {
-  if (editing.value) return
-  form.value.events = k === 'jellyfin' ? ['playlist.changed', 'epg.updated'] : [...EVENT_TYPES]
-  if (k === 'webhook' && form.value.name === 'Jellyfin') form.value.name = 'Webhook'
-  if (k === 'jellyfin' && form.value.name === 'Webhook') form.value.name = 'Jellyfin'
-}
-
 function config(): HookConfig {
   const f = form.value
-  if (f.kind === 'jellyfin') {
-    return {
-      kind: 'jellyfin',
-      base_url: f.base_url.trim(),
-      api_key: f.api_key.trim(),
-      task_id: f.task_id.trim() || null,
-      followup_minutes: Number(f.followup_minutes) || 0
-    }
-  }
   return {
     kind: 'webhook',
     method: f.method,
@@ -103,8 +61,7 @@ function config(): HookConfig {
 
 const canSave = computed(() => {
   const f = form.value
-  if (!f.name.trim() || !f.events.length || saving.value) return false
-  return f.kind === 'jellyfin' ? !!f.base_url.trim() && !!f.api_key.trim() : !!f.url.trim()
+  return !!f.name.trim() && !!f.url.trim() && f.events.length > 0 && !saving.value
 })
 
 async function save() {
@@ -171,10 +128,7 @@ async function loadLog(h: Hook) {
 }
 
 function target(h: Hook) {
-  return h.config.kind === 'jellyfin' ? h.config.base_url : `${h.config.method ?? 'POST'} ${h.config.url}`
-}
-function triggerLabel(d: HookDelivery) {
-  return d.trigger === 'followup' ? 'follow-up' : d.trigger
+  return `${h.config.method ?? 'POST'} ${h.config.url}`
 }
 </script>
 
@@ -194,8 +148,9 @@ function triggerLabel(d: HookDelivery) {
     <template #body>
       <UAlert v-if="error" color="error" variant="subtle" :title="error.message" />
       <p v-if="!isPending && !hooks?.length" class="text-sm text-muted max-w-2xl">
-        Hooks run when playlists or guide data change. A Jellyfin hook starts its "Refresh Guide" task, so
-        Jellyfin picks up changes without waiting for its schedule. A webhook sends the events as JSON to anything else.
+        A hook calls a URL when playlists, guide data or channel health change, sending the events as JSON.
+        Point it at a media server's refresh endpoint (for example Jellyfin's Refresh Guide task, with its API
+        key in an Authorization header) so changes show up without waiting for its schedule.
       </p>
 
       <div class="flex flex-col gap-3">
@@ -203,10 +158,7 @@ function triggerLabel(d: HookDelivery) {
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0 flex flex-col gap-1">
               <div class="flex items-center gap-2 min-w-0">
-                <UIcon
-                  :name="h.config.kind === 'jellyfin' ? 'i-lucide-tv-minimal-play' : 'i-lucide-webhook'"
-                  class="size-4 shrink-0 text-muted"
-                />
+                <UIcon name="i-lucide-webhook" class="size-4 shrink-0 text-muted" />
                 <span class="font-semibold truncate" :class="{ 'text-muted': !h.enabled }">{{ h.name }}</span>
                 <UBadge v-if="!h.enabled" color="neutral" variant="subtle" size="sm" label="disabled" />
               </div>
@@ -214,12 +166,7 @@ function triggerLabel(d: HookDelivery) {
               <div class="flex flex-wrap gap-1">
                 <UBadge v-for="e in h.events" :key="e" color="neutral" variant="outline" size="sm" :label="e" />
               </div>
-              <div class="text-xs text-dimmed">
-                debounce {{ h.debounce_secs }}s
-                <template v-if="h.config.kind === 'jellyfin' && (h.config.followup_minutes ?? 0) > 0">
-                  · follow-up after {{ h.config.followup_minutes }} min
-                </template>
-              </div>
+              <div class="text-xs text-dimmed">debounce {{ h.debounce_secs }}s</div>
             </div>
             <div class="flex items-center gap-1 shrink-0">
               <USwitch :model-value="h.enabled" aria-label="Enabled" @update:model-value="toggle(h)" />
@@ -251,43 +198,10 @@ function triggerLabel(d: HookDelivery) {
       <USlideover v-model:open="formOpen" :title="editing ? `Edit ${editing.name}` : 'Add hook'">
         <template #body>
           <form class="flex flex-col gap-4" @submit.prevent="save">
-            <UFormField label="Kind">
-              <USelect
-                v-model="form.kind"
-                :content="floating()"
-                :items="kindItems"
-                class="w-full"
-                :disabled="!!editing"
-                @update:model-value="(k) => onKindChange(k as Kind)"
-              />
-            </UFormField>
             <UFormField label="Name" required>
               <UInput v-model="form.name" class="w-full" />
             </UFormField>
 
-            <template v-if="form.kind === 'jellyfin'">
-              <UFormField label="Jellyfin URL" required>
-                <UInput v-model="form.base_url" class="w-full" placeholder="http://jellyfin:8096" autocapitalize="off" />
-              </UFormField>
-              <UFormField
-                label="API key"
-                required
-                :help="form.api_key === SECRET_MASK ? 'Stored; type a new key to replace it' : 'Dashboard → API Keys'"
-              >
-                <UInput v-model="form.api_key" type="password" class="w-full" autocomplete="off" />
-              </UFormField>
-              <UFormField label="Task id" help="Leave empty to find the Refresh Guide task automatically">
-                <UInput v-model="form.task_id" class="w-full" autocapitalize="off" />
-              </UFormField>
-              <UFormField
-                label="Follow-up refresh (minutes)"
-                help="Jellyfin caches a downloaded guide for about an hour; a second refresh after that picks up guide changes. 0 turns it off."
-              >
-                <UInput v-model.number="form.followup_minutes" type="number" min="0" class="w-32" />
-              </UFormField>
-            </template>
-
-            <template v-else>
               <UFormField label="URL" required>
                 <UInput v-model="form.url" class="w-full" placeholder="https://example.org/hook" autocapitalize="off" />
               </UFormField>
@@ -318,7 +232,6 @@ function triggerLabel(d: HookDelivery) {
                   />
                 </div>
               </UFormField>
-            </template>
 
             <UFormField label="Events">
               <USelectMenu v-model="form.events" :content="floating()" :items="eventItems" value-key="value" multiple class="w-full" />
@@ -354,7 +267,7 @@ function triggerLabel(d: HookDelivery) {
               />
               <div class="min-w-0 flex-1">
                 <div>
-                  {{ new Date(d.at).toLocaleString() }} · {{ triggerLabel(d) }}
+                  {{ new Date(d.at).toLocaleString() }} · {{ d.trigger }}
                   <span v-if="d.attempt > 1" class="text-muted">(try {{ d.attempt }})</span>
                 </div>
                 <div class="text-muted break-all">
