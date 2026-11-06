@@ -7,7 +7,7 @@ name: lineup
 
 services:
   lineup:
-    image: ghcr.io/alexey-lapin/lineup:0.1.0   # pin a release tag
+    image: ghcr.io/alexey-lapin/lineup:0.2.0   # pin a release tag
     container_name: lineup
     restart: unless-stopped
     ports:
