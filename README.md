@@ -69,4 +69,4 @@ corepack pnpm -C web gen:api
 
 CI checks that both generated files are up to date.
 
-Release: push a `v*` tag. The release workflow first runs the same checks as CI, then builds `ghcr.io/<owner>/lineup` for amd64 and arm64, plus CLI tarballs for macOS and Linux (x86_64 and arm64).
+Release: push a `v*` tag (a tag with a `-`, like `v1.0.0-rc.1`, becomes a pre-release). The release workflow runs the same checks as CI, builds `ghcr.io/<owner>/lineup` for amd64 and arm64 on native runners and CLI archives for macOS and Linux (x86_64 and arm64), and only then publishes the GitHub release with the archives, `SHA256SUMS` and notes. Notes list merged pull requests by label (`.github/release.yml`), or the commits since the previous tag when there are none (`.github/scripts/release-notes.sh`). To rebuild an existing tag, run the workflow by hand with that tag; tick `cli` to rebuild the archives and refresh the release files too.

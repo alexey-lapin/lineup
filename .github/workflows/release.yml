@@ -10,7 +10,7 @@ on:
         description: Existing tag to build, e.g. v0.1.0
         required: true
       cli:
-        description: Also build and attach the CLI archives
+        description: Also build the CLI archives and create or update the GitHub release
         type: boolean
         default: false
 
@@ -33,6 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -127,10 +128,32 @@ jobs:
           docker buildx imagetools create "${tags[@]}" "${refs[@]}"
       - run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
 
-  cli:
+  # The web UI is embedded in every binary; build it once.
+  web:
     needs: verify
-    # A manual rebuild redoes the CLI archives only when asked to.
     if: github.event_name == 'push' || inputs.cli
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 1
+
+  cli:
+    needs: web
     strategy:
       matrix:
         include:
@@ -147,19 +170,55 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ env.TAG }}
-      - uses: actions/setup-node@v4
+      - uses: actions/download-artifact@v4
         with:
-          node-version: 24
-      # Run pnpm inside web/ so corepack uses the version pinned in web/package.json.
-      - run: corepack enable
-      - working-directory: web
-        run: pnpm install --frozen-lockfile && pnpm build
+          name: web-dist
+          path: web/dist
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - run: cargo build --release --locked -p lineup --target ${{ matrix.target }}
       - run: tar -C target/${{ matrix.target }}/release -czf lineup-${{ env.TAG }}-${{ matrix.target }}.tar.gz lineup
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ env.TAG }}
-          files: lineup-${{ env.TAG }}-${{ matrix.target }}.tar.gz
+          name: cli-${{ matrix.target }}
+          path: lineup-${{ env.TAG }}-${{ matrix.target }}.tar.gz
+          retention-days: 1
+
+  # Published only once the image and every archive exist, so a release is never partial.
+  release:
+    needs: [manifest, cli]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0 # tags and history for the notes
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: dist
+          merge-multiple: true
+      - working-directory: dist
+        run: sha256sum lineup-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - run: .github/scripts/release-notes.sh "$TAG" "$IMAGE" > notes.md && cat notes.md
+      - name: Create or update the release
+        run: |
+          flags=()
+          [[ $TAG == *-* ]] && flags+=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A rebuild of an existing release: replace the files; fill in notes only if it has none.
+            gh release upload "$TAG" dist/* --clobber
+            if [[ -z $(gh release view "$TAG" --json body --jq .body) ]]; then
+              gh release edit "$TAG" --notes-file notes.md
+            fi
+          else
+            # Draft first, so the release appears complete or not at all.
+            gh release create "$TAG" --verify-tag --draft --title "lineup $TAG" --notes-file notes.md "${flags[@]}" dist/*
+            gh release edit "$TAG" --draft=false
+          fi
