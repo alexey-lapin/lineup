@@ -101,24 +101,41 @@ async fn logs_are_useful_and_secret_free() {
     assert!(has_line(&logs, "INFO", "GET /p/logged.m3u 200"), "{logs}");
     assert_secret_free(&logs, &["DOWNLOAD-SECRET"]);
 
-    // A guide source whose URL carries credentials; the fetch fails (nothing listens on port 1).
-    let source = store
-        .create_epg_source(
-            serde_json::from_value(json!({
-                "name": "Provider",
-                "url": "http://user:SOURCE-PASSWORD@127.0.0.1:1/xmltv/SOURCE-PATH-TOKEN?token=SOURCE-QUERY-TOKEN"
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    // Guide sources whose URLs carry credentials, unnamed so their names derive from the URLs; the
+    // fetches fail (nothing listens on port 1).
+    let urls = [
+        "http://user:SOURCE-PASSWORD@127.0.0.1:1/xmltv/SOURCE-PATH-TOKEN?token=SOURCE-QUERY-TOKEN",
+        "http://user:ROOT-PASSWORD@127.0.0.1:1/?token=ROOT-QUERY-TOKEN",
+    ];
+    let mut ids = vec![];
+    for url in urls {
+        let source = store
+            .create_epg_source(serde_json::from_value(json!({ "url": url })).unwrap())
+            .await
+            .unwrap();
+        ids.push(source.id);
+    }
     let dir = tempfile::tempdir().unwrap();
     let epg = Epg::new(store.clone(), dir.path());
-    epg.fetch(&[source.id]).await.unwrap();
+    epg.fetch(&ids).await.unwrap();
     let logs = capture.take();
-    assert!(has_line(&logs, "INFO", "guide source 1 (Provider): fetching"), "{logs}");
-    assert!(has_line(&logs, "WARN", "guide source 1 (Provider): "), "{logs}");
-    assert_secret_free(&logs, &["SOURCE-PASSWORD", "SOURCE-PATH-TOKEN", "SOURCE-QUERY-TOKEN"]);
+    for id in ids {
+        assert!(
+            has_line(&logs, "INFO", &format!("guide source {id}: fetching")),
+            "{logs}"
+        );
+        assert!(has_line(&logs, "WARN", &format!("guide source {id}: ")), "{logs}");
+    }
+    assert_secret_free(
+        &logs,
+        &[
+            "SOURCE-PASSWORD",
+            "SOURCE-PATH-TOKEN",
+            "SOURCE-QUERY-TOKEN",
+            "ROOT-PASSWORD",
+            "ROOT-QUERY-TOKEN",
+        ],
+    );
 
     // A webhook test against a URL with tokens: the outcome is logged, the URL is not.
     let hook = store

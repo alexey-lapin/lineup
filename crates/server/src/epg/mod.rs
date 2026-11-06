@@ -234,13 +234,14 @@ impl Epg {
             result.status = EpgFetchStatus::Disabled;
             return result;
         }
-        tracing::info!("guide source {} ({}): fetching", src.id, src.name);
+        // Sources are logged by id only: a URL, and a name derived from one, may hold credentials.
+        tracing::info!("guide source {}: fetching", src.id);
         let started = std::time::Instant::now();
         let fetched = self.download_and_publish(src).await;
         let secs = started.elapsed().as_secs_f32();
         match fetched {
             Ok(Fetched::NotModified) => {
-                tracing::info!("guide source {} ({}): not modified ({secs:.1} s)", src.id, src.name);
+                tracing::info!("guide source {}: not modified ({secs:.1} s)", src.id);
                 result.status = EpgFetchStatus::NotModified;
                 if let Err(e) = self
                     .store
@@ -252,9 +253,8 @@ impl Epg {
             }
             Ok(Fetched::Published { channels, programmes }) => {
                 tracing::info!(
-                    "guide source {} ({}): updated, {channels} channels, {programmes} programmes ({secs:.1} s)",
-                    src.id,
-                    src.name
+                    "guide source {}: updated, {channels} channels, {programmes} programmes ({secs:.1} s)",
+                    src.id
                 );
                 result.status = EpgFetchStatus::Updated;
                 result.channels = Some(channels as i64);
@@ -268,7 +268,7 @@ impl Epg {
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                tracing::warn!("guide source {} ({}): {msg}", src.id, src.name);
+                tracing::warn!("guide source {}: {msg}", src.id);
                 if let Err(e) = self
                     .store
                     .record_epg_fetch(src.id, &src.url, FetchOutcome::Error, Some(&msg))
