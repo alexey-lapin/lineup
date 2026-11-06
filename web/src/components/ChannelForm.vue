@@ -32,17 +32,30 @@ const resolveError = ref('')
 const saving = ref(false)
 const pickerOpen = ref(false)
 
-/** Values last filled in from a suggestion; a field still holding one may be replaced again. */
+/**
+ * Values last filled in from a suggestion. A field still holding its filled-in value (or empty)
+ * follows the next resolution, including being cleared when that one suggests nothing; a field
+ * the user edited is left alone.
+ */
 const autofilled = ref({ name: '', group_title: '', tvg_id: '', tvg_logo: '' })
 type AutoField = keyof typeof autofilled.value
+/** The event flag as last set from a suggestion; null until a suggestion set it. */
+const autoEvent = ref<boolean | null>(null)
 
 function fill(field: AutoField, value: string | null | undefined) {
-  if (!value) return
   const current = (state.value[field] ?? '') as string
-  if (current === '' || current === autofilled.value[field]) {
-    state.value[field] = value
-    autofilled.value[field] = value
-  }
+  const owned = current === '' || current === autofilled.value[field]
+  if (!owned) return
+  state.value[field] = value ?? ''
+  autofilled.value[field] = value ?? ''
+}
+
+function fillEvent(value: boolean) {
+  // Untouched: still the initial value, or what the previous suggestion set.
+  const owned = autoEvent.value === null ? !state.value.is_event : state.value.is_event === autoEvent.value
+  if (!owned) return
+  state.value.is_event = value
+  autoEvent.value = value
 }
 
 function useMatch(m: EpgChannel) {
@@ -95,6 +108,7 @@ watch(
     state.value.enabled = c?.enabled ?? true
     state.value.playlists = playlists.value?.length === 1 && !c ? [playlists.value[0]!.slug] : []
     autofilled.value = { name: '', group_title: '', tvg_id: '', tvg_logo: '' }
+    autoEvent.value = null
   },
   { immediate: true }
 )
@@ -125,7 +139,7 @@ async function resolveInput() {
       fill('group_title', s.group_title)
       fill('tvg_id', s.tvg_id)
       fill('tvg_logo', s.tvg_logo)
-      if (s.is_event) state.value.is_event = true
+      fillEvent(s.is_event)
     }
   } catch (e) {
     if (seq === resolveSeq) resolveError.value = (e as Error).message

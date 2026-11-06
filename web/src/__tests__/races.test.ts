@@ -181,3 +181,48 @@ describe('ImportPage', () => {
     expect(api.importM3u).toHaveBeenLastCalledWith('TEXT-B', 'b', false)
   })
 })
+
+describe('ChannelForm suggestions', () => {
+  const resolution = (input: string, suggestion: Record<string, unknown>) => ({
+    source: { kind: 'raw', url: input },
+    source_key: input,
+    stream_url: input,
+    duplicate_of: null,
+    matches: [],
+    warnings: [],
+    suggestion: { group_title: null, tvg_id: null, tvg_logo: null, is_event: false, ...suggestion }
+  })
+
+  it('replaces values it filled in, clears them when the next source suggests nothing, keeps edits', async () => {
+    const { list } = plugins()
+    const w = mount(ChannelForm, { props: { open: true }, shallow: true, global: { plugins: list } })
+    const vm = w.vm as any
+
+    api.resolve.mockResolvedValueOnce(
+      resolution('http://a', { name: 'VK 1_2', group_title: 'VK', tvg_id: 'A.uk', tvg_logo: 'http://l', is_event: true })
+    )
+    vm.state.input = 'http://a'
+    await vm.resolveInput()
+    expect([vm.state.group_title, vm.state.tvg_id, vm.state.is_event]).toEqual(['VK', 'A.uk', true])
+
+    // The user edits the logo; the next source suggests nothing beyond a name.
+    vm.state.tvg_logo = 'http://mine'
+    api.resolve.mockResolvedValueOnce(resolution('http://b', { name: 'b' }))
+    vm.state.input = 'http://b'
+    await flush()
+    await vm.resolveInput()
+    expect(vm.state.name).toBe('b')
+    expect(vm.state.group_title).toBe('')
+    expect(vm.state.tvg_id).toBe('')
+    expect(vm.state.is_event).toBe(false)
+    expect(vm.state.tvg_logo).toBe('http://mine')
+
+    // An event flag the user set by hand stays.
+    vm.state.is_event = true
+    api.resolve.mockResolvedValueOnce(resolution('http://c', { name: 'c' }))
+    vm.state.input = 'http://c'
+    await flush()
+    await vm.resolveInput()
+    expect(vm.state.is_event).toBe(true)
+  })
+})

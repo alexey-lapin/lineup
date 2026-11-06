@@ -74,7 +74,10 @@ impl Epg {
             .filter(|c| c.enabled)
             .collect();
         let rendered = Arc::new(self.build(channels, hour).await?);
-        self.xml_cache.lock().unwrap().insert(
+        let mut cache = self.xml_cache.lock().unwrap();
+        // Entries from older versions (including deleted playlists) would be rebuilt anyway.
+        cache.retain(|_, e| e.version == version);
+        cache.insert(
             slug.to_string(),
             CacheEntry {
                 version,

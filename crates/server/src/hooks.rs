@@ -43,6 +43,22 @@ impl Default for Timing {
     }
 }
 
+/// What the supervisor sends a worker.
+enum Msg {
+    Event(Stamped),
+    /// The hook was edited (and is still enabled).
+    Config(Box<Hook>),
+}
+
+struct Worker {
+    /// The configuration last sent to the worker; used for routing.
+    hook: Hook,
+    tx: mpsc::UnboundedSender<Msg>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+type Workers = HashMap<i64, Worker>;
+
 #[derive(Debug, Clone)]
 struct Stamped {
     event: Event,
@@ -95,17 +111,33 @@ impl Hooks {
         mut events: tokio::sync::broadcast::Receiver<Event>,
         mut watch: tokio::sync::watch::Receiver<u64>,
     ) {
-        let mut workers: HashMap<i64, (Hook, mpsc::UnboundedSender<Stamped>, tokio::task::JoinHandle<()>)> =
-            HashMap::new();
+        let mut workers: Workers = HashMap::new();
+        watch.borrow_and_update();
         self.reload(&mut workers).await;
         loop {
             tokio::select! {
+                // Configuration first: a change committed before an event was emitted is applied
+                // before that event is routed.
+                biased;
+                r = watch.changed() => {
+                    if r.is_err() {
+                        break;
+                    }
+                    watch.borrow_and_update();
+                    self.reload(&mut workers).await;
+                }
                 r = events.recv() => match r {
                     Ok(event) => {
+                        // A hook change and an event can become ready together; never route with a
+                        // configuration older than the event.
+                        if watch.has_changed().unwrap_or(false) {
+                            watch.borrow_and_update();
+                            self.reload(&mut workers).await;
+                        }
                         let stamped = Stamped { event, at: Utc::now() };
-                        for (hook, tx, _) in workers.values() {
-                            if hook.events.iter().any(|e| e == stamped.event.kind()) {
-                                let _ = tx.send(stamped.clone());
+                        for w in workers.values() {
+                            if w.hook.events.iter().any(|e| e == stamped.event.kind()) {
+                                let _ = w.tx.send(Msg::Event(stamped.clone()));
                             }
                         }
                     }
@@ -114,24 +146,17 @@ impl Hooks {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
-                r = watch.changed() => {
-                    if r.is_err() {
-                        break;
-                    }
-                    self.reload(&mut workers).await;
-                }
             }
         }
-        for (_, _, task) in workers.into_values() {
-            task.abort();
+        for w in workers.into_values() {
+            w.task.abort();
         }
     }
 
-    /// Restart workers whose hook changed, stop those of deleted or disabled hooks, start new ones.
-    async fn reload(
-        self: &Arc<Self>,
-        workers: &mut HashMap<i64, (Hook, mpsc::UnboundedSender<Stamped>, tokio::task::JoinHandle<()>)>,
-    ) {
+    /// Bring workers in line with the stored hooks. Changed hooks get their new configuration
+    /// without losing pending events or a scheduled follow-up; deleted or disabled hooks' workers
+    /// are stopped (dropping what they had pending), new ones started.
+    async fn reload(self: &Arc<Self>, workers: &mut Workers) {
         let version = *self.store.watch_hooks().borrow();
         let hooks = match self.store.hooks_with_secrets().await {
             Ok(h) => h,
@@ -141,55 +166,77 @@ impl Hooks {
             }
         };
         let wanted: HashMap<i64, Hook> = hooks.into_iter().filter(|h| h.enabled).map(|h| (h.id, h)).collect();
-        workers.retain(|id, (hook, _, task)| {
-            let keep = wanted.get(id).is_some_and(|w| w == hook);
+        workers.retain(|id, w| {
+            let keep = wanted.contains_key(id);
             if !keep {
-                task.abort();
+                w.task.abort();
             }
             keep
         });
         for (id, hook) in wanted {
-            if workers.contains_key(&id) {
-                continue;
+            match workers.get_mut(&id) {
+                Some(w) => {
+                    if w.hook != hook {
+                        let _ = w.tx.send(Msg::Config(Box::new(hook.clone())));
+                        w.hook = hook;
+                    }
+                }
+                None => {
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    let me = self.clone();
+                    let h = hook.clone();
+                    let task = tokio::spawn(async move { me.worker(h, rx).await });
+                    workers.insert(id, Worker { hook, tx, task });
+                }
             }
-            let (tx, rx) = mpsc::unbounded_channel();
-            let me = self.clone();
-            let h = hook.clone();
-            let task = tokio::spawn(async move { me.worker(h, rx).await });
-            workers.insert(id, (hook, tx, task));
         }
         self.applied.send_replace(Some(version));
     }
 
-    async fn worker(self: Arc<Self>, hook: Hook, mut rx: mpsc::UnboundedReceiver<Stamped>) {
-        let debounce = self.timing.second * hook.debounce_secs;
-        let max_wait = debounce * MAX_WAIT_FACTOR;
-        let followup = match &hook.config {
-            HookConfig::Jellyfin { followup_minutes, .. } if *followup_minutes > 0 => {
-                Some(self.timing.minute * *followup_minutes)
-            }
-            _ => None,
-        };
+    async fn worker(self: Arc<Self>, mut hook: Hook, mut rx: mpsc::UnboundedReceiver<Msg>) {
         let mut pending: Vec<Stamped> = Vec::new();
-        let mut fire_at: Option<Instant> = None;
-        let mut window_cap: Option<Instant> = None;
+        let mut window_start: Option<Instant> = None;
+        let mut last_event: Option<Instant> = None;
         let mut followup_at: Option<Instant> = None;
         let mut task_id: Option<String> = None;
         loop {
+            let debounce = self.timing.second * hook.debounce_secs;
+            let followup = match &hook.config {
+                HookConfig::Jellyfin { followup_minutes, .. } if *followup_minutes > 0 => {
+                    Some(self.timing.minute * *followup_minutes)
+                }
+                _ => None,
+            };
+            if followup.is_none() {
+                followup_at = None;
+            }
+            // Recomputed every turn so configuration changes apply to an open window.
+            let fire_at = match (window_start, last_event) {
+                (Some(start), Some(last)) => Some((last + debounce).min(start + debounce * MAX_WAIT_FACTOR)),
+                _ => None,
+            };
             let far = Instant::now() + Duration::from_secs(365 * 24 * 3600);
             tokio::select! {
-                msg = rx.recv() => {
-                    let Some(ev) = msg else { return };
-                    let now = Instant::now();
-                    if pending.is_empty() {
-                        window_cap = Some(now + max_wait);
+                msg = rx.recv() => match msg {
+                    None => return,
+                    Some(Msg::Config(h)) => {
+                        if h.config != hook.config {
+                            task_id = None;
+                        }
+                        hook = *h;
                     }
-                    pending.push(ev);
-                    fire_at = Some((now + debounce).min(window_cap.unwrap_or(now)));
-                }
+                    Some(Msg::Event(ev)) => {
+                        let now = Instant::now();
+                        if pending.is_empty() {
+                            window_start = Some(now);
+                        }
+                        last_event = Some(now);
+                        pending.push(ev);
+                    }
+                },
                 _ = tokio::time::sleep_until(fire_at.unwrap_or(far)), if fire_at.is_some() => {
-                    fire_at = None;
-                    window_cap = None;
+                    window_start = None;
+                    last_event = None;
                     let batch = std::mem::take(&mut pending);
                     let body = envelope(&batch);
                     let types = event_types(&batch);
@@ -238,7 +285,14 @@ impl Hooks {
         }
     }
 
-    async fn log(&self, hook_id: i64, types: &[String], trigger: DeliveryTrigger, attempt: u32, a: Attempt) {
+    async fn log(
+        &self,
+        hook_id: i64,
+        types: &[String],
+        trigger: DeliveryTrigger,
+        attempt: u32,
+        a: Attempt,
+    ) -> Option<HookDelivery> {
         let d = NewDelivery {
             hook_id,
             events: types,
@@ -248,8 +302,12 @@ impl Hooks {
             http_code: a.http_code,
             error: a.error,
         };
-        if let Err(e) = self.store.record_delivery(d).await {
-            tracing::warn!("recording hook delivery: {e}");
+        match self.store.record_delivery(d).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("recording hook delivery: {e}");
+                None
+            }
         }
     }
 
@@ -263,12 +321,10 @@ impl Hooks {
         });
         let types = vec!["hook.test".to_string()];
         let a = self.send(&hook, &mut None, &body).await;
-        self.log(id, &types, DeliveryTrigger::Test, 1, a).await;
-        self.store
-            .hook_deliveries(id, 1)
-            .await?
-            .pop()
-            .ok_or_else(|| Error::Internal("delivery was not recorded".into()))
+        // The row this attempt inserted, not merely the latest one.
+        self.log(id, &types, DeliveryTrigger::Test, 1, a)
+            .await
+            .ok_or_else(|| Error::NotFound(format!("hook {id} was deleted during the test")))
     }
 
     async fn send(&self, hook: &Hook, task_id: &mut Option<String>, body: &serde_json::Value) -> Attempt {

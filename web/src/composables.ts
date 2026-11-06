@@ -66,7 +66,7 @@ export function playerLinks(url: string) {
 }
 
 /**
- * Keep queries fresh from the server's event stream (`/api/v1/events`). After a reconnect, or when
+ * Keep queries fresh from the server's event stream (`/api/v1/events`). On (re)connecting, or when
  * the server says this client missed events, everything is refetched.
  */
 export function useLiveUpdates() {
@@ -78,11 +78,9 @@ export function useLiveUpdates() {
   onMounted(() => {
     if (typeof EventSource === 'undefined') return
     es = new EventSource('/api/v1/events')
-    let connected = false
-    es.addEventListener('ready', () => {
-      if (connected) everything()
-      connected = true
-    })
+    // Refetch on every (re)connect, the first included: a change between the initial queries and
+    // the subscription would otherwise go unnoticed.
+    es.addEventListener('ready', everything)
     es.addEventListener('resync', everything)
     es.addEventListener('playlist.changed', () => refetch('channels', 'playlists', 'playlist'))
     es.addEventListener('epg.updated', () => refetch('epg-sources'))

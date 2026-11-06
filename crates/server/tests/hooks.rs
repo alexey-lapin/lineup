@@ -296,3 +296,105 @@ async fn jellyfin_refresh_with_followup() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(rx.lock().unwrap().requests.len(), before);
 }
+
+#[tokio::test]
+async fn events_right_after_creation_are_delivered() {
+    let (url, rx) = receiver(vec![]).await;
+    let (store, hooks) = setup().await;
+    hooks.synced().await;
+    // No synced() between creating the hook and the change: the change must still be delivered.
+    store
+        .create_hook(HookCreate {
+            name: "w".into(),
+            config: HookConfig::Webhook {
+                method: "POST".into(),
+                url,
+                headers: Default::default(),
+            },
+            events: None,
+            debounce_secs: Some(0),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    make_changes(&store).await;
+    wait_for(&rx, 1).await;
+}
+
+#[tokio::test]
+async fn edits_keep_pending_events_and_the_followup() {
+    let (url, rx) = receiver(vec![]).await;
+    let (store, hooks) = setup().await;
+    let hook = store
+        .create_hook(HookCreate {
+            name: "jellyfin".into(),
+            config: HookConfig::Jellyfin {
+                base_url: url,
+                api_key: "k".into(),
+                task_id: Some("t".into()),
+                followup_minutes: 3,
+            },
+            events: None,
+            debounce_secs: Some(5),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    hooks.synced().await;
+    let rename = |n: &str| HookPatch {
+        name: Some(n.into()),
+        ..Default::default()
+    };
+    make_changes(&store).await;
+    // Renamed while the window is open: the events are still delivered.
+    store.patch_hook(hook.id, rename("a")).await.unwrap();
+    hooks.synced().await;
+    wait_for(&rx, 1).await;
+    // Renamed after the delivery: the follow-up still comes.
+    store.patch_hook(hook.id, rename("b")).await.unwrap();
+    hooks.synced().await;
+    wait_for(&rx, 2).await;
+    let log = store.hook_deliveries(hook.id, 10).await.unwrap();
+    let triggers: Vec<_> = log.iter().rev().map(|d| d.trigger).collect();
+    assert_eq!(triggers, [DeliveryTrigger::Events, DeliveryTrigger::Followup]);
+}
+
+#[tokio::test]
+async fn concurrent_delivery_logs_are_all_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&dir.path().join("db")).await.unwrap());
+    let hook = store
+        .create_hook(HookCreate {
+            name: "w".into(),
+            config: HookConfig::Webhook {
+                method: "POST".into(),
+                url: "http://127.0.0.1:1/".into(),
+                headers: Default::default(),
+            },
+            events: None,
+            debounce_secs: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    let rec = |attempt| {
+        let store = store.clone();
+        async move {
+            store
+                .record_delivery(lineup_server::store::NewDelivery {
+                    hook_id: hook.id,
+                    events: &[],
+                    trigger: DeliveryTrigger::Events,
+                    attempt,
+                    ok: true,
+                    http_code: Some(200),
+                    error: None,
+                })
+                .await
+        }
+    };
+    let results = futures_util::future::join_all((1..=8).map(rec)).await;
+    let ids: Vec<i64> = results.into_iter().map(|r| r.unwrap().unwrap().id).collect();
+    assert_eq!(ids.len(), 8);
+    assert_eq!(store.hook_deliveries(hook.id, 50).await.unwrap().len(), 8);
+}

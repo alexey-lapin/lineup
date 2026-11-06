@@ -117,6 +117,8 @@ impl Store {
             .await?;
             tx.commit().await?;
             self.hooks_changed();
+        } else {
+            drop(tx);
         }
         self.get_hook(id).await
     }
@@ -134,17 +136,20 @@ impl Store {
         Ok(())
     }
 
-    /// Record a delivery attempt and trim the hook's log. Ignored if the hook was deleted.
-    pub async fn record_delivery(&self, d: NewDelivery<'_>) -> Result<()> {
+    /// Record a delivery attempt and trim the hook's log; returns the recorded row, or `None` if the
+    /// hook was deleted. Serialized with other writes so concurrent workers never hit a busy writer.
+    pub async fn record_delivery(&self, d: NewDelivery<'_>) -> Result<Option<HookDelivery>> {
+        let _guard = self.write_lock.lock().await;
         let mut tx = self.pool.begin().await?;
         let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM hooks WHERE id=?")
             .bind(d.hook_id)
             .fetch_optional(&mut *tx)
             .await?;
         if exists.is_none() {
-            return Ok(());
+            return Ok(None);
         }
-        sqlx::query(
+        let at = now();
+        let id = sqlx::query(
             "INSERT INTO hook_deliveries(hook_id, events, trigger, attempt, ok, http_code, error, at)
              VALUES(?,?,?,?,?,?,?,?)",
         )
@@ -155,9 +160,10 @@ impl Store {
         .bind(d.ok)
         .bind(d.http_code)
         .bind(&d.error)
-        .bind(now())
+        .bind(&at)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .last_insert_rowid();
         sqlx::query(
             "DELETE FROM hook_deliveries WHERE hook_id=? AND id NOT IN
              (SELECT id FROM hook_deliveries WHERE hook_id=? ORDER BY id DESC LIMIT ?)",
@@ -168,7 +174,17 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(Some(HookDelivery {
+            id,
+            hook_id: d.hook_id,
+            events: d.events.to_vec(),
+            trigger: d.trigger,
+            attempt: d.attempt,
+            ok: d.ok,
+            http_code: d.http_code,
+            error: d.error,
+            at: parse_ts(&at)?,
+        }))
     }
 
     /// The most recent deliveries of a hook, newest first.
