@@ -236,7 +236,36 @@ impl Store {
 
     /// Must be called with `write_lock` held, after the transaction committed.
     pub(super) fn epg_changed_locked(&self, sources: Vec<i64>) {
+        self.bump_version();
         let _ = self.events.send(Event::EpgUpdated { sources });
+    }
+
+    /// For each of `ids`, the source that serves it: the highest-priority enabled source with a
+    /// published generation that has the id. Returns `id → (source_id, generation)`.
+    pub async fn epg_lookup(&self, ids: &[String]) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+        let mut out = std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        // Bound the number of SQL variables per statement.
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT c.xmltv_id, s.id, s.current_gen FROM epg_channels c JOIN epg_sources s ON s.id = c.source_id
+                 WHERE s.enabled AND s.current_gen IS NOT NULL AND c.xmltv_id IN ({marks})
+                 ORDER BY s.priority DESC, s.id"
+            );
+            // Only "?" placeholders are interpolated; values are bound.
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for id in chunk {
+                q = q.bind(id);
+            }
+            for r in q.fetch_all(&self.pool).await? {
+                let id: String = r.try_get("xmltv_id")?;
+                out.entry(id).or_insert((r.try_get("id")?, r.try_get("current_gen")?));
+            }
+        }
+        Ok(out)
     }
 }
 

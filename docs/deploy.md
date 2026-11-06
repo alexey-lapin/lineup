@@ -47,11 +47,31 @@ In Jellyfin, go to **Dashboard → Live TV → Tuner Devices → Add → M3U Tun
 http://media-host:9300/p/jellyfin.m3u
 ```
 
-`lineup playlist url jellyfin` prints it. The channel number in Jellyfin is the position in the playlist, so reordering in lineup reorders the guide. Until lineup serves the guide itself (see the roadmap in the spec), keep your existing XMLTV provider; the tvg-ids you set in lineup are what it matches on.
+`lineup playlist url jellyfin` prints it. The channel number in Jellyfin is the position in the playlist, so reordering in lineup reorders the guide.
 
 If you replace an existing tuner, Jellyfin may treat the channels as new, because channel ids depend partly on the tuner URL. Favourites can reset.
 
-After changing channels, run Jellyfin's **Refresh Guide** task. Automatic refresh arrives with hooks.
+## Guide data
+
+Add one or more XMLTV sources (plain or gzipped) under **EPG** in the UI, or with the CLI:
+
+```sh
+lineup epg sources add https://example.org/guide.xml.gz
+lineup epg sources ls          # last fetch status, channel count
+lineup epg search "sports one" # find the tvg-id for a channel
+```
+
+lineup downloads each source shortly after it is added, 3 minutes after every start, and then every `epg_refresh_hours` (default 6, `0` turns the schedule off). `lineup epg fetch` fetches now. When several sources carry the same channel id, the one with the higher priority wins.
+
+Each playlist gets its own guide with just its channels:
+
+```
+http://media-host:9300/p/jellyfin/epg.xml
+```
+
+In Jellyfin, go to **Dashboard → Live TV → TV Guide Data Providers → Add → XMLTV** and enter that URL. A channel gets guide data when its tvg-id matches a channel id in one of the sources. Channels marked as events get placeholder programmes ("Pre-match", the event, then "ended") built from their kickoff time, so they always show up in the guide.
+
+After changing channels, run Jellyfin's **Refresh Guide** task. Jellyfin keeps a downloaded guide for about an hour, so guide changes can take that long to appear. Automatic refresh arrives with hooks.
 
 ## Backups
 

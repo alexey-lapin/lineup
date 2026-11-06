@@ -45,6 +45,8 @@ pub struct Store {
     pool: SqlitePool,
     events: broadcast::Sender<Event>,
     write_lock: tokio::sync::Mutex<()>,
+    /// Bumped with every event; output caches key on it.
+    version: std::sync::atomic::AtomicU64,
 }
 
 const DEFAULT_ACEXY: &str = "http://127.0.0.1:8080";
@@ -82,6 +84,7 @@ impl Store {
             pool,
             events,
             write_lock: tokio::sync::Mutex::new(()),
+            version: std::sync::atomic::AtomicU64::new(0),
         };
         Ok(store)
     }
@@ -289,7 +292,17 @@ impl Store {
         }
         let affected: BTreeSet<String> = cur.playlists.iter().cloned().collect();
         tx.commit().await?;
+        // Guide-affecting fields: the tvg-id selects upstream data; event channels get placeholders
+        // built from their name and kickoff.
+        let guide_changed = next.tvg_id != cur.tvg_id
+            || next.is_event != cur.is_event
+            || next.kickoff_at != cur.kickoff_at
+            || (next.is_event && next.name != cur.name);
+        let in_playlists = !affected.is_empty();
         self.outputs_changed_locked(affected);
+        if guide_changed && in_playlists {
+            self.epg_changed_locked(vec![]);
+        }
         self.get_channel(id).await
     }
 
@@ -488,8 +501,18 @@ impl Store {
 
     /// Render `/p/<slug>.m3u`.
     pub async fn render_m3u(&self, slug: &str) -> Result<String> {
+        self.render_m3u_with(slug, None).await
+    }
+
+    /// Render `/p/<slug>.m3u` announcing `url_tvg` as the guide URL.
+    pub async fn render_m3u_with(&self, slug: &str, url_tvg: Option<&str>) -> Result<String> {
         let mut conn = self.pool.begin().await?; // read snapshot
-        render_m3u(&mut conn, slug).await
+        render_m3u(&mut conn, slug, url_tvg).await
+    }
+
+    /// Changes whenever any output may have changed (every emitted event bumps it).
+    pub fn output_version(&self) -> u64 {
+        self.version.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Re-emit change notifications for the given playlists, or all.
@@ -511,10 +534,15 @@ impl Store {
     /// Must be called with `write_lock` held, after the transaction committed.
     fn outputs_changed_locked(&self, slugs: BTreeSet<String>) {
         if !slugs.is_empty() {
+            self.bump_version();
             let _ = self.events.send(Event::PlaylistChanged {
                 slugs: slugs.into_iter().collect(),
             });
         }
+    }
+
+    fn bump_version(&self) {
+        self.version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     // ---------------------------------------------------------------- import
@@ -1076,7 +1104,7 @@ async fn get_playlist_detail(conn: &mut SqliteConnection, slug: &str) -> Result<
     Ok(PlaylistDetail { playlist, items })
 }
 
-async fn render_m3u(conn: &mut SqliteConnection, slug: &str) -> Result<String> {
+async fn render_m3u(conn: &mut SqliteConnection, slug: &str, url_tvg: Option<&str>) -> Result<String> {
     let detail = get_playlist_detail(conn, slug).await?;
     let ids: Vec<String> = detail.items.iter().map(|i| effective_tvg_id(&i.channel)).collect();
     let items: Vec<m3u::RenderItem<'_>> = detail
@@ -1093,7 +1121,7 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str) -> Result<String> {
             url: &i.channel.stream_url,
         })
         .collect();
-    Ok(m3u::render(&items))
+    Ok(m3u::render(&items, url_tvg))
 }
 
 mod epg;

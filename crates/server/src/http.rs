@@ -108,6 +108,7 @@ pub fn router_for(app: App) -> Router {
         .route("/api/openapi.json", get(move || async move { Json(doc) }))
         .route("/healthz", get(|| async { "ok" }))
         .route("/p/{file}", get(playlist_m3u))
+        .route("/p/{slug}/epg.xml", get(playlist_epg))
         .fallback(web::static_handler)
         .with_state(app)
 }
@@ -497,12 +498,45 @@ async fn playlist_m3u(State(s): State<AppState>, Path(file): Path<String>, heade
     let Some(slug) = file.strip_suffix(".m3u8").or_else(|| file.strip_suffix(".m3u")) else {
         return (StatusCode::NOT_FOUND, "not found\n").into_response();
     };
-    let body = match s.render_m3u(slug).await {
+    let url_tvg = public_base(&headers).map(|b| format!("{b}/p/{slug}/epg.xml"));
+    let body = match s.render_m3u_with(slug, url_tvg.as_deref()).await {
         Ok(b) => b,
         Err(Error::NotFound(m)) => return (StatusCode::NOT_FOUND, format!("{m}\n")).into_response(),
         Err(e) => return ApiError(e).into_response(),
     };
     let etag = format!("\"{:016x}\"", fnv1a64(body.as_bytes()));
+    conditional(&headers, etag, "audio/x-mpegurl; charset=utf-8", body.into())
+}
+
+async fn playlist_epg(State(s): State<AppState>, Path(slug): Path<String>, headers: HeaderMap) -> Response {
+    let r = match s.epg.playlist_xml(&slug).await {
+        Ok(r) => r,
+        Err(Error::NotFound(m)) => return (StatusCode::NOT_FOUND, format!("{m}\n")).into_response(),
+        Err(e) => return ApiError(e).into_response(),
+    };
+    conditional(
+        &headers,
+        r.etag.clone(),
+        "application/xml; charset=utf-8",
+        r.body.clone(),
+    )
+}
+
+/// `http(s)://host[:port]` as the client addressed us, for absolute URLs in outputs.
+fn public_base(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(header::HOST)?.to_str().ok()?;
+    if host.is_empty() || host.contains(['/', ' ', '"']) {
+        return None;
+    }
+    let proto = match headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) {
+        Some("https") => "https",
+        _ => "http",
+    };
+    Some(format!("{proto}://{host}"))
+}
+
+/// A body with an ETag, answering `If-None-Match` with 304.
+fn conditional(headers: &HeaderMap, etag: String, content_type: &'static str, body: axum::body::Bytes) -> Response {
     let etag_hv = HeaderValue::from_str(&etag).expect("etag is ascii");
     let mut res = if headers
         .get(header::IF_NONE_MATCH)
@@ -511,7 +545,7 @@ async fn playlist_m3u(State(s): State<AppState>, Path(file): Path<String>, heade
     {
         StatusCode::NOT_MODIFIED.into_response()
     } else {
-        ([(header::CONTENT_TYPE, "audio/x-mpegurl; charset=utf-8")], body).into_response()
+        ([(header::CONTENT_TYPE, content_type)], body).into_response()
     };
     res.headers_mut().insert(header::ETAG, etag_hv);
     res.headers_mut()
@@ -549,7 +583,7 @@ async fn backup(State(app): State<AppState>) -> Response {
     }
 }
 
-fn fnv1a64(data: &[u8]) -> u64 {
+pub(crate) fn fnv1a64(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in data {
         h ^= *b as u64;

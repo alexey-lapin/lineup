@@ -4,6 +4,7 @@
 //! `current_gen` names the generation being served. Fetches of all sources run one at a time under
 //! `fetch_lock`, which also guards deleting directories.
 
+pub mod output;
 pub mod xmltv;
 
 use std::collections::HashSet;
@@ -31,6 +32,11 @@ pub struct Epg {
     dir: PathBuf,
     client: reqwest::Client,
     fetch_lock: tokio::sync::Mutex<()>,
+    /// Readers of generation files hold it shared; removing generation directories holds it
+    /// exclusively.
+    files_lock: tokio::sync::RwLock<()>,
+    xml_cache: std::sync::Mutex<std::collections::HashMap<String, output::CacheEntry>>,
+    gen_cache: std::sync::Mutex<std::collections::HashMap<(i64, i64), Arc<output::GenData>>>,
 }
 
 impl Epg {
@@ -46,6 +52,9 @@ impl Epg {
             dir: data_dir.join("epg"),
             client,
             fetch_lock: tokio::sync::Mutex::new(()),
+            files_lock: tokio::sync::RwLock::new(()),
+            xml_cache: Default::default(),
+            gen_cache: Default::default(),
         })
     }
 
@@ -65,6 +74,7 @@ impl Epg {
     /// if a source's current generation is unusable, fall back to its previous one or to nothing.
     pub async fn recover(&self) -> anyhow::Result<()> {
         let _lock = self.fetch_lock.lock().await;
+        let _files = self.files_lock.write().await;
         tokio::fs::create_dir_all(&self.dir).await?;
         let rows = self.store.epg_generations().await?;
         let known: HashSet<String> = rows.iter().map(|(id, _, _)| id.to_string()).collect();
@@ -141,6 +151,7 @@ impl Epg {
         let me = self.clone();
         tokio::spawn(async move {
             let _lock = me.fetch_lock.lock().await;
+            let _files = me.files_lock.write().await;
             if matches!(me.store.get_epg_source(id).await, Err(Error::NotFound(_))) {
                 remove_dir(&me.source_dir(id)).await;
             }
@@ -309,6 +320,7 @@ impl Epg {
         }
         // Keep only the generation just published and the one it replaced.
         let keep = [Some(generation), src.current_gen];
+        let _files = self.files_lock.write().await;
         for (n, d) in list_gens(&source_dir) {
             if !keep.contains(&Some(n)) {
                 remove_dir(&d).await;

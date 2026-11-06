@@ -124,8 +124,12 @@ pub struct RenderItem<'a> {
     pub url: &'a str,
 }
 
-pub fn render(items: &[RenderItem<'_>]) -> String {
-    let mut out = String::from("#EXTM3U\n");
+/// `url_tvg`: the guide URL announced in the header.
+pub fn render(items: &[RenderItem<'_>], url_tvg: Option<&str>) -> String {
+    let mut out = match url_tvg {
+        Some(u) => format!("#EXTM3U url-tvg=\"{}\"\n", attr(u)),
+        None => String::from("#EXTM3U\n"),
+    };
     for it in items {
         out.push('\n');
         let _ = write!(
@@ -188,14 +192,17 @@ http://orphan\n";
 
     #[test]
     fn renders() {
-        let out = render(&[RenderItem {
-            tvg_id: "a.b",
-            chno: 3,
-            logo: None,
-            group: Some("Sp\"orts"),
-            name: "Name\nX",
-            url: "http://u",
-        }]);
+        let out = render(
+            &[RenderItem {
+                tvg_id: "a.b",
+                chno: 3,
+                logo: None,
+                group: Some("Sp\"orts"),
+                name: "Name\nX",
+                url: "http://u",
+            }],
+            None,
+        );
         assert_eq!(
             out,
             "#EXTM3U\n\n#EXTINF:-1 tvg-id=\"a.b\" tvg-chno=\"3\" group-title=\"Sp'orts\",Name X\nhttp://u\n"
