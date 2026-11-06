@@ -4,7 +4,7 @@ import { useQuery } from '@pinia/colada'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
-import { api, playlistUrl, sourceLabel, type PlaylistDetail } from '../api'
+import { api, guideUrl, playlistUrl, sourceLabel, type PlaylistDetail } from '../api'
 import { copy, useAction, useChannels, useInvalidateAll } from '../composables'
 
 const props = defineProps<{ slug: string }>()
@@ -131,8 +131,17 @@ async function deletePlaylist() {
             icon="i-lucide-link"
             color="neutral"
             variant="subtle"
-            label="M3U URL"
+            label="M3U"
+            aria-label="Copy M3U URL"
             @click="copy(playlistUrl(slug), toast)"
+          />
+          <UButton
+            icon="i-lucide-calendar-range"
+            color="neutral"
+            variant="subtle"
+            label="Guide"
+            aria-label="Copy guide URL"
+            @click="copy(guideUrl(slug), toast)"
           />
           <UButton icon="i-lucide-settings-2" color="neutral" variant="ghost" aria-label="Playlist settings" @click="settingsOpen = true" />
         </template>

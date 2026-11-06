@@ -2,7 +2,7 @@
 
 use api_types::{
     Channel, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource, ImportAction, ImportReport, Playlist,
-    PlaylistDetail, Settings, Source, Status,
+    PlaylistDetail, ResolveResponse, Settings, Source, Status,
 };
 
 pub fn source_label(s: &Source) -> String {
@@ -204,6 +204,39 @@ pub fn settings(s: &Settings) {
     println!("engine_base: {}", s.engine_base);
     println!("vk_base:     {}", s.vk_base);
     println!("epg_refresh_hours: {}", s.epg_refresh_hours);
+}
+
+/// The suggested metadata of a resolve, one field per line.
+pub fn suggestion(r: &ResolveResponse) {
+    let s = &r.suggestion;
+    println!("  name:     {}", s.name);
+    if let Some(g) = &s.group_title {
+        println!("  group:    {g}");
+    }
+    if let Some(t) = &s.tvg_id {
+        let score = r
+            .matches
+            .iter()
+            .find(|m| &m.xmltv_id == t)
+            .and_then(|m| m.score)
+            .map_or(String::new(), |sc| format!(" (match {sc:.2})"));
+        println!("  tvg-id:   {t}{score}");
+    }
+    if let Some(l) = &s.tvg_logo {
+        println!("  logo:     {l}");
+    }
+    if s.is_event {
+        println!("  event:    yes");
+    }
+    let others: Vec<String> = r
+        .matches
+        .iter()
+        .filter(|m| Some(&m.xmltv_id) != s.tvg_id.as_ref())
+        .map(|m| format!("{} ({:.2})", m.xmltv_id, m.score.unwrap_or(0.0)))
+        .collect();
+    if !others.is_empty() {
+        println!("  other matches: {}", others.join(", "));
+    }
 }
 
 pub fn epg_sources(list: &[EpgSource]) {

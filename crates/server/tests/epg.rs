@@ -389,6 +389,83 @@ mod output {
     }
 }
 
+mod resolve {
+    use super::*;
+    use api_types::SettingsPatch;
+
+    #[tokio::test]
+    async fn suggestions_from_engine_and_guide() {
+        let (base, _up) = upstream().await;
+        // A fake engine answering name lookups.
+        let engine = axum::Router::new().route(
+            "/server/api",
+            get(
+                |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    assert_eq!(q.0["method"], "get_media_files");
+                    axum::Json(serde_json::json!({"result": {"0": "Arena 1 Bar HD [DE]"}, "error": null}))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let engine_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, engine).await.unwrap() });
+
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&data.path().join("lineup.db")).await.unwrap());
+        let epg = Epg::new(store.clone(), data.path());
+        store
+            .patch_settings(SettingsPatch {
+                engine_base: Some(format!("http://{engine_addr}")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        store
+            .create_epg_source(EpgSourceCreate {
+                url: format!("{base}/guide.xml.gz"),
+                name: None,
+                priority: 0,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        epg.fetch(&[]).await.unwrap();
+
+        let ace = "41169a3f280a5537b0611b775e926852d372743d";
+        let r = lineup_server::resolve::resolve(&store, epg.client(), &format!("acestream://{ace}"))
+            .await
+            .unwrap();
+        assert_eq!(r.engine_name.as_deref(), Some("Arena 1 Bar HD [DE]"));
+        assert_eq!(r.suggestion.name, "Arena 1");
+        assert_eq!(r.suggestion.tvg_id.as_deref(), Some("Arena1.de"));
+        assert_eq!(r.suggestion.group_title.as_deref(), Some("Sports"));
+        assert_eq!(r.matches[0].xmltv_id, "Arena1.de");
+        assert!(r.warnings.is_empty());
+
+        // VK: event and group, no engine call.
+        let r = lineup_server::resolve::resolve(&store, epg.client(), "https://vk.com/video-1_2")
+            .await
+            .unwrap();
+        assert!(r.suggestion.is_event);
+        assert_eq!(r.suggestion.group_title.as_deref(), Some("VK"));
+        assert!(r.matches.is_empty());
+
+        // Engine down: a warning, and the placeholder name.
+        store
+            .patch_settings(SettingsPatch {
+                engine_base: Some("http://127.0.0.1:1".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let r = lineup_server::resolve::resolve(&store, epg.client(), ace)
+            .await
+            .unwrap();
+        assert_eq!(r.suggestion.name, "Acestream 41169a3f");
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    }
+}
+
 mod races {
     use super::*;
 

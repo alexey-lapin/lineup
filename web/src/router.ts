@@ -7,6 +7,7 @@ export const router = createRouter({
     { path: '/channels', component: () => import('./pages/ChannelsPage.vue') },
     { path: '/playlists', component: () => import('./pages/PlaylistsPage.vue') },
     { path: '/playlists/:slug', component: () => import('./pages/PlaylistPage.vue'), props: true },
+    { path: '/epg', component: () => import('./pages/EpgPage.vue') },
     { path: '/import', component: () => import('./pages/ImportPage.vue') },
     { path: '/settings', component: () => import('./pages/SettingsPage.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/channels' }

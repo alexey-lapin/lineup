@@ -54,13 +54,15 @@ fn similarity(q: &[String], c: &[String]) -> f64 {
     score
 }
 
-/// Candidate names of a guide channel: its display names and its id without the region suffix.
+/// Candidate names of a guide channel: its display names, its id, and its id without the region
+/// suffix.
 fn candidates(ch: &EpgChannel) -> Vec<Vec<String>> {
-    let id = match ch.xmltv_id.rsplit_once('.') {
-        Some((head, tail)) if (2..=3).contains(&tail.len()) && tail.chars().all(char::is_alphabetic) => head,
-        _ => ch.xmltv_id.as_str(),
+    let stripped = match ch.xmltv_id.rsplit_once('.') {
+        Some((head, tail)) if (2..=3).contains(&tail.len()) && tail.chars().all(char::is_alphabetic) => Some(head),
+        _ => None,
     };
-    std::iter::once(id)
+    std::iter::once(ch.xmltv_id.as_str())
+        .chain(stripped)
         .chain(ch.display_names.iter().map(String::as_str))
         .map(tokens)
         .filter(|t| !t.is_empty())
@@ -156,7 +158,9 @@ mod tests {
         assert!(r.iter().all(|c| c.xmltv_id != "Weather.us"));
         let r = rank(all.clone(), "Arena 1", Some("uk"), 5);
         assert_eq!(r[0].xmltv_id, "Arena1.uk");
-        let r = search(all, Some("weath"), 5);
+        let r = search(all.clone(), Some("weath"), 5);
         assert_eq!(r[0].xmltv_id, "Weather.us");
+        let r = search(all, Some("Arena1.de"), 5);
+        assert_eq!((r[0].xmltv_id.as_str(), r[0].score), ("Arena1.de", Some(1.0)));
     }
 }

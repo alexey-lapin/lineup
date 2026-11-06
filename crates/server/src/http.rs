@@ -261,7 +261,9 @@ async fn delete_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) ->
 #[utoipa::path(post, path = "/resolve", request_body = ResolveRequest,
     responses((status = 200, body = ResolveResponse), (status = 422, body = ErrorBody)))]
 async fn resolve(State(s): State<AppState>, Body(req): Body<ResolveRequest>) -> ApiResult<Json<ResolveResponse>> {
-    Ok(Json(s.resolve(&req.input).await?))
+    Ok(Json(
+        crate::resolve::resolve(&s.store, s.epg.client(), &req.input).await?,
+    ))
 }
 
 // -------------------------------------------------------------------- playlists

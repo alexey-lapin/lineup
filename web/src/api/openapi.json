@@ -1813,7 +1813,8 @@
         "required": [
           "source",
           "source_key",
-          "stream_url"
+          "stream_url",
+          "suggestion"
         ],
         "properties": {
           "duplicate_of": {
@@ -1824,6 +1825,20 @@
             "format": "int64",
             "description": "Existing channel with the same source, if any."
           },
+          "engine_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name the Acestream engine reports for this content id, as-is."
+          },
+          "matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EpgChannel"
+            },
+            "description": "Best guide channels for the suggested name, best first (up to 5)."
+          },
           "source": {
             "$ref": "#/components/schemas/Source"
           },
@@ -1832,6 +1847,17 @@
           },
           "stream_url": {
             "type": "string"
+          },
+          "suggestion": {
+            "$ref": "#/components/schemas/Suggestion",
+            "description": "Suggested values for a new channel; shown as editable defaults."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Problems that did not stop the resolve, such as an unreachable engine."
           }
         }
       },
@@ -1982,6 +2008,40 @@
         "properties": {
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "Suggestion": {
+        "type": "object",
+        "required": [
+          "name",
+          "is_event"
+        ],
+        "properties": {
+          "group_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_event": {
+            "type": "boolean",
+            "description": "VK links are usually one-off live events."
+          },
+          "name": {
+            "type": "string"
+          },
+          "tvg_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tvg_logo": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }

@@ -255,6 +255,27 @@ pub struct ResolveResponse {
     pub stream_url: String,
     /// Existing channel with the same source, if any.
     pub duplicate_of: Option<i64>,
+    /// Name the Acestream engine reports for this content id, as-is.
+    #[serde(default)]
+    pub engine_name: Option<String>,
+    /// Suggested values for a new channel; shown as editable defaults.
+    pub suggestion: Suggestion,
+    /// Best guide channels for the suggested name, best first (up to 5).
+    #[serde(default)]
+    pub matches: Vec<EpgChannel>,
+    /// Problems that did not stop the resolve, such as an unreachable engine.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Suggestion {
+    pub name: String,
+    pub group_title: Option<String>,
+    pub tvg_id: Option<String>,
+    pub tvg_logo: Option<String>,
+    /// VK links are usually one-off live events.
+    pub is_event: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

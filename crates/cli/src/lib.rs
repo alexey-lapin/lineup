@@ -56,7 +56,7 @@ pub enum Command {
         #[arg(required = true)]
         channels: Vec<String>,
     },
-    /// Parse an input and show the source, stream URL and any duplicate, without saving.
+    /// Parse an input and show the source, stream URL, any duplicate and suggestions, without saving.
     Resolve { input: String },
     /// Manage playlists.
     #[command(subcommand)]
@@ -120,6 +120,9 @@ pub struct AddArgs {
     /// Show what would be added without saving.
     #[arg(long)]
     pub dry_run: bool,
+    /// Accept the suggested group, tvg-id, logo and event flag without asking. Explicit flags win.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]

@@ -73,6 +73,18 @@ fn parse_input_inner(input: &str) -> Result<Source> {
     Ok(Source::Raw { url: s.to_string() })
 }
 
+/// A placeholder name derived from the source alone.
+pub fn default_name(s: &Source) -> String {
+    match s {
+        Source::Acestream { id } => format!("Acestream {}", &id[..8.min(id.len())]),
+        Source::Vk { owner_id, video_id, .. } => format!("VK {owner_id}_{video_id}"),
+        Source::Raw { url } => Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| url.clone()),
+    }
+}
+
 /// Validate and canonicalise a structured source (lowercase ace ids, trimmed URLs).
 pub fn normalize(source: Source) -> Result<Source> {
     match source {

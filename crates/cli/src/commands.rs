@@ -2,7 +2,7 @@ use api_types::{
     Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource,
     EpgSourceCreate, EpgSourcePatch, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate,
     PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings,
-    SettingsPatch, Source, Status,
+    SettingsPatch, Status,
 };
 use serde::Serialize;
 
@@ -111,17 +111,6 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-fn default_name(s: &Source) -> String {
-    match s {
-        Source::Acestream { id } => format!("Acestream {}", &id[..8]),
-        Source::Vk { owner_id, video_id, .. } => format!("VK {owner_id}_{video_id}"),
-        Source::Raw { url } => url::Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(str::to_string))
-            .unwrap_or_else(|| url.clone()),
-    }
-}
-
 pub async fn run(cli: Cli) -> R {
     let mut x = Ctx {
         c: Client::new(&server_url(cli.server)?)?,
@@ -175,6 +164,10 @@ pub async fn run(cli: Cli) -> R {
                     Some(id) => println!("duplicate:  yes, channel {id}"),
                     None => println!("duplicate:  no"),
                 }
+                if let Some(n) = &r.engine_name {
+                    println!("engine:     {n}");
+                }
+                output::suggestion(r);
             });
         }
 
@@ -578,14 +571,37 @@ async fn add_one(x: &Ctx, a: &crate::AddArgs, input: &str) -> R<AddOutcome> {
             message: format!("already exists as channel {id}"),
         });
     }
+    if !x.json {
+        for w in &r.warnings {
+            eprintln!("warning: {input}: {w}");
+        }
+    }
+    let s = &r.suggestion;
+    let has_extra = s.group_title.is_some() || s.tvg_id.is_some() || s.tvg_logo.is_some() || s.is_event;
+    // Suggestions beyond the name are applied with --yes, or after confirming on a terminal.
+    let accept = a.yes
+        || (has_extra && !x.json && !x.quiet && is_interactive() && {
+            println!("{input}:");
+            output::suggestion(&r);
+            confirm("Use these suggestions?")
+        });
+    if has_extra && !accept && !x.json && !x.quiet {
+        eprintln!("note: {input}: suggestions not applied (pass --yes to accept them)");
+    }
+    let pick = |explicit: &Option<String>, suggested: &Option<String>| {
+        explicit
+            .clone()
+            .or_else(|| if accept { suggested.clone() } else { None })
+    };
+    let is_event = a.event || a.kickoff.is_some() || (accept && s.is_event);
     let req = ChannelCreate {
-        name: a.name.clone().unwrap_or_else(|| default_name(&r.source)),
-        group_title: a.group.clone(),
-        tvg_id: a.tvg_id.clone(),
-        tvg_logo: a.logo.clone(),
+        name: a.name.clone().unwrap_or_else(|| s.name.clone()),
+        group_title: pick(&a.group, &s.group_title),
+        tvg_id: pick(&a.tvg_id, &s.tvg_id),
+        tvg_logo: pick(&a.logo, &s.tvg_logo),
         source: Some(r.source.clone()),
         input: None,
-        is_event: a.event || a.kickoff.is_some(),
+        is_event,
         kickoff_at: a.kickoff,
         enabled: !a.disabled,
         playlists: a.playlists.clone(),
@@ -594,4 +610,21 @@ async fn add_one(x: &Ctx, a: &crate::AddArgs, input: &str) -> R<AddOutcome> {
         return Ok(AddOutcome::WouldCreate(req, r.stream_url));
     }
     Ok(AddOutcome::Created(x.c.post("/channels", &req).await?))
+}
+
+fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// Ask a yes/no question on the terminal; Enter means yes.
+fn confirm(question: &str) -> bool {
+    use std::io::Write;
+    print!("{question} [Y/n] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes")
 }

@@ -519,9 +519,17 @@ export interface components {
              * @description Existing channel with the same source, if any.
              */
             duplicate_of?: number | null;
+            /** @description Name the Acestream engine reports for this content id, as-is. */
+            engine_name?: string | null;
+            /** @description Best guide channels for the suggested name, best first (up to 5). */
+            matches?: components["schemas"]["EpgChannel"][];
             source: components["schemas"]["Source"];
             source_key: string;
             stream_url: string;
+            /** @description Suggested values for a new channel; shown as editable defaults. */
+            suggestion: components["schemas"]["Suggestion"];
+            /** @description Problems that did not stop the resolve, such as an unreachable engine. */
+            warnings?: string[];
         };
         Settings: {
             acexy_base: string;
@@ -562,6 +570,14 @@ export interface components {
         SourceKind: "acestream" | "vk" | "raw";
         Status: {
             version: string;
+        };
+        Suggestion: {
+            group_title?: string | null;
+            /** @description VK links are usually one-off live events. */
+            is_event: boolean;
+            name: string;
+            tvg_id?: string | null;
+            tvg_logo?: string | null;
         };
     };
     responses: never;

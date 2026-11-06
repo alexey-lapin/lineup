@@ -134,3 +134,24 @@ async fn epg_commands() {
     assert_eq!(lineup(&s, &["settings", "set", "epg_refresh_hours", "x"]).await, 2);
     assert_eq!(lineup(&s, &["settings", "set", "epg_refresh_hours", "9999"]).await, 2);
 }
+
+#[tokio::test]
+async fn add_applies_suggestions_only_with_yes() {
+    let store = Arc::new(Store::open_memory().await.unwrap());
+    let s = serve(router(store.clone())).await;
+    assert_eq!(lineup(&s, &["add", "https://vk.com/video-1_2"]).await, 0);
+    let c = &store.list_channels(&Default::default()).await.unwrap()[0];
+    assert_eq!(
+        (c.name.as_str(), c.is_event, c.group_title.as_deref()),
+        ("VK -1_2", false, None)
+    );
+
+    assert_eq!(
+        lineup(&s, &["add", "-y", "https://vk.com/video-1_3", "--group", "Live"]).await,
+        0
+    );
+    let all = store.list_channels(&Default::default()).await.unwrap();
+    let c = all.iter().find(|c| c.source_key == "-1_3").unwrap();
+    assert!(c.is_event);
+    assert_eq!(c.group_title.as_deref(), Some("Live"), "explicit flags win");
+}

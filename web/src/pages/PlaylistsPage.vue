@@ -2,7 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, playlistUrl } from '../api'
+import { api, guideUrl, playlistUrl } from '../api'
 import { copy, useAction, useInvalidateAll, usePlaylists } from '../composables'
 
 const toast = useToast()
@@ -53,14 +53,24 @@ async function create() {
               <div class="font-semibold group-hover:text-primary truncate">{{ p.name }}</div>
               <div class="text-sm text-muted">{{ p.slug }} · {{ p.channel_count }} channels</div>
             </RouterLink>
-            <UButton
-              icon="i-lucide-link"
-              color="neutral"
-              variant="subtle"
-              size="sm"
-              label="M3U URL"
-              @click="copy(playlistUrl(p.slug), toast)"
-            />
+            <div class="flex gap-2 shrink-0">
+              <UButton
+                icon="i-lucide-link"
+                color="neutral"
+                variant="subtle"
+                size="sm"
+                label="M3U"
+                @click="copy(playlistUrl(p.slug), toast)"
+              />
+              <UButton
+                icon="i-lucide-calendar-range"
+                color="neutral"
+                variant="subtle"
+                size="sm"
+                label="Guide"
+                @click="copy(guideUrl(p.slug), toast)"
+              />
+            </div>
           </div>
         </UCard>
       </div>

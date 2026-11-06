@@ -173,9 +173,16 @@ impl Store {
         let duplicate_of = find_by_source(&mut conn, src.kind(), &key).await?;
         Ok(ResolveResponse {
             stream_url: source::stream_url(&src, &settings),
+            suggestion: api_types::Suggestion {
+                name: source::default_name(&src),
+                ..Default::default()
+            },
             source: src,
             source_key: key,
             duplicate_of,
+            engine_name: None,
+            matches: vec![],
+            warnings: vec![],
         })
     }
 

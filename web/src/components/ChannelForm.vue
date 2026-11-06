@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { api, sourceLabel, type Channel, type ResolveResponse } from '../api'
+import { api, sourceLabel, type Channel, type EpgChannel, type ResolveResponse } from '../api'
+import EpgSearch from './EpgSearch.vue'
 import { useAction, useChannels, useInvalidateAll, usePlaylists } from '../composables'
 
 const props = defineProps<{ channel?: Channel | null }>()
@@ -29,6 +30,26 @@ const resolved = ref<ResolveResponse | null>(null)
 const resolvedFor = ref('')
 const resolveError = ref('')
 const saving = ref(false)
+const pickerOpen = ref(false)
+
+/** Values last filled in from a suggestion; a field still holding one may be replaced again. */
+const autofilled = ref({ name: '', group_title: '', tvg_id: '', tvg_logo: '' })
+type AutoField = keyof typeof autofilled.value
+
+function fill(field: AutoField, value: string | null | undefined) {
+  if (!value) return
+  const current = (state.value[field] ?? '') as string
+  if (current === '' || current === autofilled.value[field]) {
+    state.value[field] = value
+    autofilled.value[field] = value
+  }
+}
+
+function useMatch(m: EpgChannel) {
+  state.value.tvg_id = m.xmltv_id
+  if (m.icon) state.value.tvg_logo = m.icon
+  pickerOpen.value = false
+}
 
 const groups = computed(() =>
   [...new Set((channels.value ?? []).map((c) => c.group_title).filter((g): g is string => !!g))].sort()
@@ -73,6 +94,7 @@ watch(
     state.value.kickoff = toLocalInput(c?.kickoff_at)
     state.value.enabled = c?.enabled ?? true
     state.value.playlists = playlists.value?.length === 1 && !c ? [playlists.value[0]!.slug] : []
+    autofilled.value = { name: '', group_title: '', tvg_id: '', tvg_logo: '' }
   },
   { immediate: true }
 )
@@ -97,14 +119,13 @@ async function resolveInput() {
     pendingFor = ''
     resolved.value = r
     resolvedFor.value = input
-    if (!state.value.name && !editing.value) {
-      if (r.source.kind === 'vk') {
-        state.value.name = `VK ${r.source.owner_id}_${r.source.video_id}`
-        state.value.is_event = true
-        state.value.group_title ||= 'VK'
-      } else if (r.source.kind === 'acestream') {
-        state.value.name = `Acestream ${r.source.id.slice(0, 8)}`
-      }
+    if (!editing.value) {
+      const s = r.suggestion
+      fill('name', s.name)
+      fill('group_title', s.group_title)
+      fill('tvg_id', s.tvg_id)
+      fill('tvg_logo', s.tvg_logo)
+      if (s.is_event) state.value.is_event = true
     }
   } catch (e) {
     if (seq === resolveSeq) resolveError.value = (e as Error).message
@@ -191,7 +212,13 @@ async function save() {
           :title="currentResolution.duplicate_of != null ? `Already exists as channel ${currentResolution.duplicate_of}` : sourceLabel(currentResolution.source)"
           :description="currentResolution.stream_url"
           :ui="{ description: 'break-all' }"
-        />
+        >
+          <template v-if="currentResolution.engine_name || currentResolution.warnings?.length" #description>
+            <div class="break-all">{{ currentResolution.stream_url }}</div>
+            <div v-if="currentResolution.engine_name" class="mt-1">Engine name: {{ currentResolution.engine_name }}</div>
+            <div v-for="w in currentResolution.warnings ?? []" :key="w" class="mt-1 text-warning">{{ w }}</div>
+          </template>
+        </UAlert>
 
         <UFormField label="Name" required>
           <UInput v-model="state.name" class="w-full" />
@@ -210,7 +237,18 @@ async function save() {
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <UFormField label="tvg-id" help="Matches the XMLTV guide channel">
-            <UInput v-model="state.tvg_id" class="w-full" autocapitalize="off" />
+            <UInput v-model="state.tvg_id" class="w-full" autocapitalize="off">
+              <template #trailing>
+                <UButton
+                  icon="i-lucide-search"
+                  color="neutral"
+                  variant="link"
+                  size="sm"
+                  aria-label="Search the guide"
+                  @click="pickerOpen = true"
+                />
+              </template>
+            </UInput>
           </UFormField>
           <UFormField label="Logo URL">
             <UInput v-model="state.tvg_logo" class="w-full" autocapitalize="off">
@@ -219,6 +257,19 @@ async function save() {
               </template>
             </UInput>
           </UFormField>
+        </div>
+
+        <div v-if="currentResolution?.matches?.length && !editing" class="flex flex-wrap items-center gap-1 -mt-2">
+          <span class="text-xs text-muted mr-1">Guide matches:</span>
+          <UButton
+            v-for="m in currentResolution.matches ?? []"
+            :key="m.xmltv_id"
+            size="xs"
+            :color="m.xmltv_id === state.tvg_id ? 'primary' : 'neutral'"
+            variant="subtle"
+            :label="`${m.xmltv_id} · ${(m.score ?? 0).toFixed(2)}`"
+            @click="useMatch(m)"
+          />
         </div>
 
         <USwitch v-model="state.is_event" label="Live event" description="A one-off match or stream (e.g. VK)" />
@@ -248,4 +299,15 @@ async function save() {
       </div>
     </template>
   </USlideover>
+
+  <UModal v-model:open="pickerOpen" title="Find the guide channel">
+    <template #body>
+      <EpgSearch
+        :initial="state.tvg_id || state.name"
+        action-label="Use this channel"
+        action-icon="i-lucide-check"
+        @select="useMatch"
+      />
+    </template>
+  </UModal>
 </template>

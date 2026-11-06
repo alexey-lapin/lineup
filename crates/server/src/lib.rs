@@ -1,6 +1,7 @@
 pub mod epg;
 pub mod error;
 pub mod m3u;
+pub mod resolve;
 pub mod source;
 pub mod store;
 pub mod suggest;

@@ -172,7 +172,7 @@ It returns the parsed source and a duplicate check (an existing channel with the
 - Fuzzy match the cleaned name against `epg_channels.display_names`, using normalized token similarity (strsim), with a bonus for a matching region suffix (`.de`, `.uk`, `.us`).
 - Return the top 5 `{xmltv_id, display_name, icon, score}`.
 
-Final suggestions: `name`, `tvg_id` and `tvg_logo` from the best match, and `group_title` from a heuristic (acestream → "Sports" if the name looks like sports, otherwise ask; vk → "VK"). The UI shows them as editable defaults. In the CLI, `--yes` accepts them.
+Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` from the best match when it scores at least 0.6, and `group_title` from a heuristic (acestream → "Sports" if the name looks like sports; vk → "VK", also marked as an event). Engine failures are reported as warnings and never fail the resolve. The UI fills empty fields with the suggestions and offers the other matches and a guide search. In the CLI, the suggested name is always used unless `--name` is given; the other suggestions are applied with `--yes`, or after a confirmation prompt on a terminal. Explicit flags always win.
 
 ## 8. Events and hooks
 
@@ -345,7 +345,7 @@ deploy/          example compose.yaml, restore.sh
 - CLI for all of these, a minimal UI (channels, playlists, import, settings), the Dockerfile, CI, and GHCR releases.
 - Usable on its own: point Jellyfin's M3U tuner at `/p/<slug>.m3u` and keep the existing guide source.
 
-**M2 EPG + add flow.**
+**M2 EPG + add flow** (done).
 - Sources, scheduled fetch with raw retention and indexes, per-playlist epg.xml, VK placeholders, resolve/suggestions, the add flow in UI and CLI.
 - Jellyfin setup doc: one XMLTV provider pointing at `/p/<slug>/epg.xml`. Note that Jellyfin derives channel ids partly from the tuner URL, so switching an existing tuner to lineup can reset favourites.
 

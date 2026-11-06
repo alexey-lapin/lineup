@@ -12,6 +12,12 @@ export type SettingsPatch = components['schemas']['SettingsPatch']
 export type ImportReport = components['schemas']['ImportReport']
 export type ResolveResponse = components['schemas']['ResolveResponse']
 export type Status = components['schemas']['Status']
+export type Suggestion = components['schemas']['Suggestion']
+export type EpgSource = components['schemas']['EpgSource']
+export type EpgSourceCreate = components['schemas']['EpgSourceCreate']
+export type EpgSourcePatch = components['schemas']['EpgSourcePatch']
+export type EpgChannel = components['schemas']['EpgChannel']
+export type EpgFetchResult = components['schemas']['EpgFetchResult']
 
 export const client = createClient<paths>({ baseUrl: '/api/v1' })
 
@@ -80,12 +86,26 @@ export const api = {
   patchSettings: (body: SettingsPatch) => unwrap(client.PATCH('/settings', { body })),
   importM3u: (m3u_text: string, playlist_slug: string, dry_run: boolean) =>
     unwrap(client.POST('/import', { body: { m3u_text, playlist_slug, dry_run } })),
-  refresh: (slugs: string[] = []) => unwrap(client.POST('/refresh', { body: { slugs } }))
+  refresh: (slugs: string[] = []) => unwrap(client.POST('/refresh', { body: { slugs } })),
+
+  epgSources: () => unwrap(client.GET('/epg/sources')),
+  createEpgSource: (body: EpgSourceCreate) => unwrap(client.POST('/epg/sources', { body })),
+  patchEpgSource: (id: number, body: EpgSourcePatch) =>
+    unwrap(client.PATCH('/epg/sources/{id}', { params: { path: { id } }, body })),
+  deleteEpgSource: (id: number) => unwrap(client.DELETE('/epg/sources/{id}', { params: { path: { id } } })),
+  fetchEpg: (source_ids: number[] = []) => unwrap(client.POST('/epg/fetch', { body: { source_ids } })),
+  epgChannels: (q?: string, limit?: number) =>
+    unwrap(client.GET('/epg/channels', { params: { query: { q: q || undefined, limit } } }))
 }
 
 /** Absolute URL of a playlist as Jellyfin should be configured with it. */
 export function playlistUrl(slug: string): string {
   return `${window.location.origin}/p/${encodeURIComponent(slug)}.m3u`
+}
+
+/** Absolute URL of a playlist's XMLTV guide. */
+export function guideUrl(slug: string): string {
+  return `${window.location.origin}/p/${encodeURIComponent(slug)}/epg.xml`
 }
 
 export function sourceLabel(s: Source): string {
