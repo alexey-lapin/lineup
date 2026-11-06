@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod m3u;
 pub mod probe;
 pub mod resolve;
+pub mod settings_test;
 pub mod source;
 pub mod store;
 pub mod suggest;

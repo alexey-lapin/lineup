@@ -304,6 +304,38 @@ pub struct SettingsPatch {
     pub probe_interval_hours: Option<u32>,
 }
 
+/// A service whose base URL can be tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingsTestTarget {
+    Acexy,
+    Engine,
+    Vk,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SettingsTestRequest {
+    pub target: SettingsTestTarget,
+    /// A base URL to test instead of the saved one (e.g. an unsaved edit).
+    #[serde(default)]
+    pub base: Option<String>,
+}
+
+/// Outcome of a connection test, run from the lineup server (it cannot show whether Jellyfin or a
+/// phone reaches the same address).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SettingsTestResult {
+    pub ok: bool,
+    /// The URL that was requested.
+    pub url: String,
+    /// What the answer shows, or why the test failed.
+    pub detail: String,
+    pub http_status: Option<u16>,
+    /// Engine version, when testing the engine.
+    pub version: Option<String>,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolveRequest {
     pub input: String,

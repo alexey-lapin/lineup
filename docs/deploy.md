@@ -18,6 +18,8 @@ Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, 
 | `engine_base` | the Acestream engine, used for name lookups and (later) health checks | `http://media-host:6878` |
 | `vk_base` | a VK proxy that serves `/vk/{owner}_{video}[?list=…]` | `http://media-host:8099` |
 
+Each has a **Test** button (or `lineup settings test acexy|engine|vk [--base URL]`) that checks, from the lineup server, that the service answers: acexy's status endpoint, the engine's version, or any HTTP answer from the VK proxy. It tests the URL as typed, before you save it. A passing test does not prove Jellyfin or a phone can reach the address, only that lineup can.
+
 ## Point the CLI at it
 
 ```sh

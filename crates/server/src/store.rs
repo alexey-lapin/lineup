@@ -46,6 +46,10 @@ pub enum Event {
     ChannelProbed {
         channel_id: i64,
     },
+    /// Settings changed (live UI updates only; `keys` are the settings whose values changed).
+    SettingsChanged {
+        keys: Vec<String>,
+    },
 }
 
 impl Event {
@@ -57,6 +61,7 @@ impl Event {
             Event::ChannelUnhealthy { .. } => "channel.unhealthy",
             Event::ChannelRecovered { .. } => "channel.recovered",
             Event::ChannelProbed { .. } => "channel.probed",
+            Event::SettingsChanged { .. } => "settings.changed",
         }
     }
 
@@ -73,6 +78,7 @@ impl Event {
                 serde_json::json!({ "channel_id": channel_id, "name": name })
             }
             Event::ChannelProbed { channel_id } => serde_json::json!({ "channel_id": channel_id }),
+            Event::SettingsChanged { keys } => serde_json::json!({ "keys": keys }),
         }
     }
 }
@@ -191,6 +197,25 @@ impl Store {
         tx.commit().await?;
 
         self.outputs_changed_locked(affected);
+        let mut keys = Vec::new();
+        for (k, changed) in [
+            ("acexy_base", new.acexy_base != old.acexy_base),
+            ("engine_base", new.engine_base != old.engine_base),
+            ("vk_base", new.vk_base != old.vk_base),
+            ("epg_refresh_hours", new.epg_refresh_hours != old.epg_refresh_hours),
+            (
+                "probe_interval_hours",
+                new.probe_interval_hours != old.probe_interval_hours,
+            ),
+        ] {
+            if changed {
+                keys.push(k.to_string());
+            }
+        }
+        if !keys.is_empty() {
+            // For open UIs only: outputs are covered by playlist.changed, and hooks cannot subscribe.
+            let _ = self.events.send(Event::SettingsChanged { keys });
+        }
         Ok(new)
     }
 

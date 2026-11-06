@@ -389,12 +389,27 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("expected Name=value, got {s:?}"))
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum TestTarget {
+    Acexy,
+    Engine,
+    Vk,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum SettingsCmd {
     /// Show all settings.
     Get,
     /// Set one setting: acexy_base, engine_base, vk_base, epg_refresh_hours or probe_interval_hours.
     Set { key: String, value: String },
+    /// Check that a service answers at its base URL (from the lineup server). Exits 1 if not.
+    Test {
+        #[arg(value_enum)]
+        target: TestTarget,
+        /// Try this base URL instead of the saved one.
+        #[arg(long)]
+        base: Option<String>,
+    },
 }
 
 /// What the binary should do after parsing.

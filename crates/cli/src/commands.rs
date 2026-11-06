@@ -2,7 +2,8 @@ use api_types::{
     Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource,
     EpgSourceCreate, EpgSourcePatch, Hook, HookConfig, HookCreate, HookDelivery, HookPatch, ImportReport,
     ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeRequest,
-    ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch, Status,
+    ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch,
+    SettingsTestRequest, SettingsTestResult, SettingsTestTarget, Status,
 };
 use serde::Serialize;
 
@@ -362,6 +363,23 @@ pub async fn run(cli: Cli) -> R {
             x.emit(&r, |r| println!("refreshed: {}", r.slugs.join(", ")));
         }
 
+        Command::Settings(SettingsCmd::Test { target, base }) => {
+            let target = match target {
+                crate::TestTarget::Acexy => SettingsTestTarget::Acexy,
+                crate::TestTarget::Engine => SettingsTestTarget::Engine,
+                crate::TestTarget::Vk => SettingsTestTarget::Vk,
+            };
+            let r: SettingsTestResult =
+                x.c.post("/settings/test", &SettingsTestRequest { target, base })
+                    .await?;
+            x.emit(&r, |r| {
+                println!("{}: {}", if r.ok { "ok" } else { "failed" }, r.detail);
+                println!("url: {} ({} ms, from the lineup server)", r.url, r.elapsed_ms);
+            });
+            if !r.ok {
+                return Err(CliError::Reported(1));
+            }
+        }
         Command::Settings(SettingsCmd::Get) => {
             let s: Settings = x.c.get("/settings").await?;
             x.emit(&s, output::settings);

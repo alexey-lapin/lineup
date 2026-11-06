@@ -197,14 +197,26 @@ async fn events_follow_the_mutation_table() {
             slugs: vec!["vk".into()]
         }
     );
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Event::SettingsChanged {
+            keys: vec!["vk_base".into()]
+        }
+    );
 
-    // engine_base does not affect output
+    // engine_base does not affect output: only the UI notice
     s.patch_settings(SettingsPatch {
         engine_base: Some("http://10.0.0.1:6878".into()),
         ..Default::default()
     })
     .await
     .unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Event::SettingsChanged {
+            keys: vec!["engine_base".into()]
+        }
+    );
     assert!(rx.try_recv().is_err());
 
     s.delete_channel(a.id).await.unwrap();

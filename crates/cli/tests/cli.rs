@@ -198,3 +198,24 @@ async fn hook_commands() {
     assert_eq!(lineup(&s, &["hook", "rm", "1"]).await, 0);
     assert_eq!(lineup(&s, &["hook", "test", "1"]).await, 3);
 }
+
+#[tokio::test]
+async fn settings_test_command() {
+    let s = real_server().await;
+    // Nothing listens on port 1: a completed negative test exits 1.
+    assert_eq!(
+        lineup(&s, &["settings", "test", "engine", "--base", "http://127.0.0.1:1"]).await,
+        1
+    );
+    assert_eq!(
+        lineup(
+            &s,
+            &["--json", "settings", "test", "vk", "--base", "http://127.0.0.1:1"]
+        )
+        .await,
+        1
+    );
+    // An invalid URL is a usage error; the server itself answers as an HTTP service.
+    assert_eq!(lineup(&s, &["settings", "test", "vk", "--base", "ftp://x"]).await, 2);
+    assert_eq!(lineup(&s, &["settings", "test", "vk", "--base", &s]).await, 0);
+}

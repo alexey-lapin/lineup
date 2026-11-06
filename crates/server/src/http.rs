@@ -7,7 +7,7 @@ use api_types::{
     EpgSourcePatch, ErrorBody, ErrorDetail, Hook, HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest,
     ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeOutcome, ProbeRequest,
     ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch,
-    SourceKind, Status,
+    SettingsTestRequest, SettingsTestResult, SourceKind, Status,
 };
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
@@ -96,6 +96,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(remove_item))
         .routes(routes!(move_item))
         .routes(routes!(get_settings, patch_settings))
+        .routes(routes!(test_settings))
         .routes(routes!(import))
         .routes(routes!(refresh))
         .routes(routes!(list_epg_sources, create_epg_source))
@@ -423,6 +424,19 @@ async fn get_settings(State(s): State<AppState>) -> ApiResult<Json<Settings>> {
     responses((status = 200, body = Settings), (status = 422, body = ErrorBody)))]
 async fn patch_settings(State(s): State<AppState>, Body(req): Body<SettingsPatch>) -> ApiResult<Json<Settings>> {
     Ok(Json(s.patch_settings(req).await?))
+}
+
+/// Check that a service answers at a base URL (the saved one, or `base` to try an unsaved value).
+/// Runs from the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
+#[utoipa::path(post, path = "/settings/test", request_body = SettingsTestRequest,
+    responses((status = 200, body = SettingsTestResult), (status = 422, body = ErrorBody)))]
+async fn test_settings(
+    State(s): State<AppState>,
+    Body(req): Body<SettingsTestRequest>,
+) -> ApiResult<Json<SettingsTestResult>> {
+    Ok(Json(
+        crate::settings_test::test(&s.store, s.epg.client(), req.target, req.base.as_deref()).await?,
+    ))
 }
 
 #[utoipa::path(post, path = "/import", request_body = ImportRequest,

@@ -343,6 +343,26 @@ export interface paths {
         patch: operations["patch_settings"];
         trace?: never;
     };
+    "/settings/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check that a service answers at a base URL (the saved one, or `base` to try an unsaved value).
+         *     Runs from the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
+         */
+        post: operations["test_settings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/status": {
         parameters: {
             query?: never;
@@ -767,6 +787,33 @@ export interface components {
             probe_interval_hours?: number | null;
             vk_base?: string | null;
         };
+        SettingsTestRequest: {
+            /** @description A base URL to test instead of the saved one (e.g. an unsaved edit). */
+            base?: string | null;
+            target: components["schemas"]["SettingsTestTarget"];
+        };
+        /**
+         * @description Outcome of a connection test, run from the lineup server (it cannot show whether Jellyfin or a
+         *     phone reaches the same address).
+         */
+        SettingsTestResult: {
+            /** @description What the answer shows, or why the test failed. */
+            detail: string;
+            /** Format: int64 */
+            elapsed_ms: number;
+            /** Format: int32 */
+            http_status?: number | null;
+            ok: boolean;
+            /** @description The URL that was requested. */
+            url: string;
+            /** @description Engine version, when testing the engine. */
+            version?: string | null;
+        };
+        /**
+         * @description A service whose base URL can be tested.
+         * @enum {string}
+         */
+        SettingsTestTarget: "acexy" | "engine" | "vk";
         /** @description A channel's stream source. The full URL is built from the per-kind base URL in settings. */
         Source: {
             id: string;
@@ -1832,6 +1879,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Settings"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    test_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SettingsTestRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsTestResult"];
                 };
             };
             422: {

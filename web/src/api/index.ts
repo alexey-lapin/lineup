@@ -12,6 +12,8 @@ export type SettingsPatch = components['schemas']['SettingsPatch']
 export type ImportReport = components['schemas']['ImportReport']
 export type ResolveResponse = components['schemas']['ResolveResponse']
 export type Status = components['schemas']['Status']
+export type SettingsTestTarget = components['schemas']['SettingsTestTarget']
+export type SettingsTestResult = components['schemas']['SettingsTestResult']
 export type Suggestion = components['schemas']['Suggestion']
 export type EpgSource = components['schemas']['EpgSource']
 export type EpgSourceCreate = components['schemas']['EpgSourceCreate']
@@ -95,6 +97,8 @@ export const api = {
 
   settings: () => unwrap(client.GET('/settings')),
   patchSettings: (body: SettingsPatch) => unwrap(client.PATCH('/settings', { body })),
+  testSetting: (target: SettingsTestTarget, base?: string) =>
+    unwrap(client.POST('/settings/test', { body: { target, base: base ?? null } })),
   importM3u: (m3u_text: string, playlist_slug: string, dry_run: boolean) =>
     unwrap(client.POST('/import', { body: { m3u_text, playlist_slug, dry_run } })),
   refresh: (slugs: string[] = []) => unwrap(client.POST('/refresh', { body: { slugs } })),

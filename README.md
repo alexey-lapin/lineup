@@ -29,7 +29,7 @@ lineup import <file|url|-> -p <slug> [--dry-run]
 lineup epg sources ls|add|edit|rm ; epg fetch [id...] ; epg search <query>
 lineup hook ls|add jellyfin|add webhook|enable|disable|rm|test|deliveries
 lineup probe [channel...] [--force]
-lineup settings get | settings set <key> <value>
+lineup settings get | settings set <key> <value> | settings test acexy|engine|vk [--base URL]
 lineup refresh [slug...]
 lineup status
 lineup backup <file>                            # consistent SQLite snapshot of the server DB

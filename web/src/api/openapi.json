@@ -1291,6 +1291,42 @@
         }
       }
     },
+    "/settings/test": {
+      "post": {
+        "summary": "Check that a service answers at a base URL (the saved one, or `base` to try an unsaved value).\nRuns from the lineup server; a failed connection is `ok: false`, an invalid URL is 422.",
+        "operationId": "test_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsTestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/status": {
       "get": {
         "operationId": "status",
@@ -2639,6 +2675,76 @@
             ]
           }
         }
+      },
+      "SettingsTestRequest": {
+        "type": "object",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "base": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A base URL to test instead of the saved one (e.g. an unsaved edit)."
+          },
+          "target": {
+            "$ref": "#/components/schemas/SettingsTestTarget"
+          }
+        }
+      },
+      "SettingsTestResult": {
+        "type": "object",
+        "description": "Outcome of a connection test, run from the lineup server (it cannot show whether Jellyfin or a\nphone reaches the same address).",
+        "required": [
+          "ok",
+          "url",
+          "detail",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "What the answer shows, or why the test failed."
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string",
+            "description": "The URL that was requested."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Engine version, when testing the engine."
+          }
+        }
+      },
+      "SettingsTestTarget": {
+        "type": "string",
+        "description": "A service whose base URL can be tested.",
+        "enum": [
+          "acexy",
+          "engine",
+          "vk"
+        ]
       },
       "Source": {
         "oneOf": [

@@ -285,3 +285,128 @@ async fn event_stream() {
         "{ev}"
     );
 }
+
+async fn fake_services() -> String {
+    use axum::routing::get;
+    let app = axum::Router::new()
+        .route("/ace/status", get(|| async { axum::Json(json!({ "streams": 0 })) }))
+        .route(
+            "/webui/api/service",
+            get(
+                |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    assert_eq!(q.0["method"], "get_version");
+                    axum::Json(
+                        json!({ "result": { "code": 3, "platform": "linux", "version": "3.2.3" }, "error": null }),
+                    )
+                },
+            ),
+        )
+        .route(
+            "/slow/ace/status",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                "late"
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn settings_connection_test() {
+    let base = fake_services().await;
+    let app = app().await;
+    let t = |target: &str, b: Option<String>| json!({ "target": target, "base": b });
+
+    let (s, _, r) = call(
+        &app,
+        "POST",
+        "/api/v1/settings/test",
+        Some(t("engine", Some(base.clone()))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["version"], "3.2.3");
+    assert_eq!(r["url"], format!("{base}/webui/api/service?method=get_version"));
+
+    let (_, _, r) = call(
+        &app,
+        "POST",
+        "/api/v1/settings/test",
+        Some(t("acexy", Some(format!("{base}/")))),
+    )
+    .await;
+    assert_eq!(
+        (r["ok"].clone(), r["url"].clone()),
+        (json!(true), json!(format!("{base}/ace/status")))
+    );
+
+    // The VK proxy root answers 404 here: something listens, and that is all it shows.
+    let (_, _, r) = call(&app, "POST", "/api/v1/settings/test", Some(t("vk", Some(base.clone())))).await;
+    assert_eq!((r["ok"].clone(), r["http_status"].clone()), (json!(true), json!(404)));
+
+    // Nothing listening, or too slow: a negative result, not an error.
+    let (s, _, r) = call(
+        &app,
+        "POST",
+        "/api/v1/settings/test",
+        Some(t("engine", Some("http://127.0.0.1:1".into()))),
+    )
+    .await;
+    assert_eq!((s, r["ok"].clone()), (StatusCode::OK, json!(false)));
+    let (_, _, r) = call(
+        &app,
+        "POST",
+        "/api/v1/settings/test",
+        Some(t("acexy", Some(format!("{base}/slow")))),
+    )
+    .await;
+    assert_eq!(r["ok"], false);
+    assert!(r["detail"].as_str().unwrap().contains("timed out"), "{r}");
+
+    // An invalid URL is a 422; without `base` the saved value is used.
+    let (s, _, _) = call(
+        &app,
+        "POST",
+        "/api/v1/settings/test",
+        Some(t("vk", Some("ftp://x".into()))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, _, r) = call(
+        &app,
+        "POST",
+        "/api/v1/settings/test",
+        Some(json!({ "target": "acexy" })),
+    )
+    .await;
+    assert_eq!(r["url"], "http://127.0.0.1:8080/ace/status");
+}
+
+#[tokio::test]
+async fn settings_changes_are_announced() {
+    let store = Arc::new(Store::open_memory().await.unwrap());
+    let mut events = store.subscribe();
+    let patch = |v: Value| serde_json::from_value::<api_types::SettingsPatch>(v).unwrap();
+    store
+        .patch_settings(patch(
+            json!({ "engine_base": "http://e:6878", "probe_interval_hours": 6 }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        events.try_recv().unwrap(),
+        lineup_server::Event::SettingsChanged {
+            keys: vec!["engine_base".into(), "probe_interval_hours".into()]
+        }
+    );
+    // Same values again: nothing.
+    store
+        .patch_settings(patch(json!({ "engine_base": "http://e:6878/" })))
+        .await
+        .unwrap();
+    assert!(events.try_recv().is_err());
+}
