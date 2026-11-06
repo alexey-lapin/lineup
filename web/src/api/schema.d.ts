@@ -36,6 +36,80 @@ export interface paths {
         patch: operations["patch_channel"];
         trace?: never;
     };
+    "/epg/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Channels offered by the enabled sources. With `q`, the best matches first. */
+        get: operations["search_epg_channels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/epg/fetch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fetch sources now and wait for the result. Fetches run one at a time, so this waits for any fetch
+         *     already running.
+         */
+        post: operations["fetch_epg"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/epg/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_epg_sources"];
+        put?: never;
+        /** Adds a source and starts fetching it in the background. */
+        post: operations["create_epg_source"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/epg/sources/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_epg_source"];
+        options?: never;
+        head?: never;
+        /**
+         * A URL change keeps the current guide data until the new URL's first successful fetch, which starts
+         *     immediately.
+         */
+        patch: operations["patch_epg_source"];
+        trace?: never;
+    };
     "/import": {
         parameters: {
             query?: never;
@@ -250,6 +324,89 @@ export interface components {
             tvg_id?: string | null;
             tvg_logo?: string | null;
         };
+        /** @description A channel offered by a guide source. */
+        EpgChannel: {
+            display_names: string[];
+            icon?: string | null;
+            /**
+             * Format: double
+             * @description Match score in [0, 1] when the list came from a search.
+             */
+            score?: number | null;
+            /** Format: int64 */
+            source_id: number;
+            xmltv_id: string;
+        };
+        EpgFetchRequest: {
+            /** @description Sources to fetch; all enabled sources when empty. */
+            source_ids?: number[];
+        };
+        EpgFetchResult: {
+            /**
+             * Format: int64
+             * @description Channels in the published generation (when updated).
+             */
+            channels?: number | null;
+            error?: string | null;
+            /**
+             * Format: int64
+             * @description Programmes kept in the published generation (when updated).
+             */
+            programmes?: number | null;
+            /** Format: int64 */
+            source_id: number;
+            status: components["schemas"]["EpgFetchStatus"];
+        };
+        /** @enum {string} */
+        EpgFetchStatus: "updated" | "not_modified" | "disabled" | "error";
+        /** @description An XMLTV guide source. */
+        EpgSource: {
+            /**
+             * Format: int64
+             * @description Channels in the served generation.
+             */
+            channel_count: number;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: int64
+             * @description Generation being served; null until the first successful fetch.
+             */
+            current_gen?: number | null;
+            enabled: boolean;
+            /** Format: int64 */
+            id: number;
+            last_error?: string | null;
+            /** Format: date-time */
+            last_fetch_at?: string | null;
+            /** @description `ok`, `not_modified` or `error`. */
+            last_status?: string | null;
+            name: string;
+            /**
+             * Format: int64
+             * @description When several sources carry the same channel id, the highest priority wins.
+             */
+            priority: number;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description XMLTV URL, plain or gzipped. */
+            url: string;
+        };
+        EpgSourceCreate: {
+            enabled?: boolean;
+            /** @description Defaults to the URL's host. */
+            name?: string | null;
+            /** Format: int64 */
+            priority?: number;
+            url: string;
+        };
+        EpgSourcePatch: {
+            enabled?: boolean | null;
+            name?: string | null;
+            /** Format: int64 */
+            priority?: number | null;
+            url?: string | null;
+        };
         ErrorBody: {
             error: components["schemas"]["ErrorDetail"];
         };
@@ -369,11 +526,18 @@ export interface components {
         Settings: {
             acexy_base: string;
             engine_base: string;
+            /**
+             * Format: int32
+             * @description Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
+             */
+            epg_refresh_hours: number;
             vk_base: string;
         };
         SettingsPatch: {
             acexy_base?: string | null;
             engine_base?: string | null;
+            /** Format: int32 */
+            epg_refresh_hours?: number | null;
             vk_base?: string | null;
         };
         /** @description A channel's stream source. The full URL is built from the per-kind base URL in settings. */
@@ -562,6 +726,179 @@ export interface operations {
                 };
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    search_epg_channels: {
+        parameters: {
+            query?: {
+                /** @description Search text: matched against channel ids and display names. */
+                q?: string;
+                /** @description Maximum results (default 50). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpgChannel"][];
+                };
+            };
+        };
+    };
+    fetch_epg: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EpgFetchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpgFetchResult"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_epg_sources: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpgSource"][];
+                };
+            };
+        };
+    };
+    create_epg_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EpgSourceCreate"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpgSource"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete_epg_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    patch_epg_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EpgSourcePatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EpgSource"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

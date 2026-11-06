@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use api_types::{
-    Channel, ChannelCreate, ChannelPatch, ErrorBody, ErrorDetail, ImportReport, ImportRequest, ItemAdd, ItemsReplace,
-    Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest,
-    ResolveResponse, Settings, SettingsPatch, SourceKind, Status,
+    Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgSource, EpgSourceCreate,
+    EpgSourcePatch, ErrorBody, ErrorDetail, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist,
+    PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse,
+    Settings, SettingsPatch, SourceKind, Status,
 };
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
@@ -19,10 +20,38 @@ use utoipa::{IntoParams, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::epg::Epg;
 use crate::store::{ChannelFilter, Store};
 use crate::{Error, web};
 
-pub type AppState = Arc<Store>;
+/// Shared state of the HTTP layer. Derefs to the [`Store`].
+#[derive(Clone)]
+pub struct App {
+    pub store: Arc<Store>,
+    pub epg: Arc<Epg>,
+    /// Where temporary files (backups) are written; the data dir in production.
+    scratch: std::path::PathBuf,
+}
+
+impl App {
+    /// `data_dir` holds the EPG cache and backup scratch files.
+    pub fn new(store: Arc<Store>, data_dir: &std::path::Path) -> Self {
+        App {
+            epg: Epg::new(store.clone(), data_dir),
+            store,
+            scratch: data_dir.to_path_buf(),
+        }
+    }
+}
+
+impl std::ops::Deref for App {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        &self.store
+    }
+}
+
+pub type AppState = App;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -45,6 +74,10 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(get_settings, patch_settings))
         .routes(routes!(import))
         .routes(routes!(refresh))
+        .routes(routes!(list_epg_sources, create_epg_source))
+        .routes(routes!(patch_epg_source, delete_epg_source))
+        .routes(routes!(fetch_epg))
+        .routes(routes!(search_epg_channels))
 }
 
 /// The OpenAPI document (paths are relative to `/api/v1`).
@@ -54,21 +87,21 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     api
 }
 
-pub fn router(store: AppState) -> Router {
-    router_with_scratch(store, std::env::temp_dir())
+/// Router over a fresh [`App`] whose files live in a new directory under the system temp dir (tests).
+pub fn router(store: Arc<Store>) -> Router {
+    let dir = std::env::temp_dir().join(format!(
+        "lineup-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).expect("creating a temp dir");
+    router_for(App::new(store, &dir))
 }
 
-/// `scratch` is where temporary files (backups) are written; use the data dir in production.
-pub fn router_with_scratch(store: AppState, scratch: std::path::PathBuf) -> Router {
+pub fn router_for(app: App) -> Router {
     let (api, _) = api_router().split_for_parts();
     // Not in OpenAPI: it returns a binary file.
-    let api = api.route(
-        "/backup",
-        get(move |State(store): State<AppState>| {
-            let scratch = scratch.clone();
-            async move { backup(store, scratch).await }
-        }),
-    );
+    let api = api.route("/backup", get(backup));
     let doc = openapi();
     Router::new()
         .nest("/api/v1", api.fallback(api_not_found))
@@ -76,7 +109,7 @@ pub fn router_with_scratch(store: AppState, scratch: std::path::PathBuf) -> Rout
         .route("/healthz", get(|| async { "ok" }))
         .route("/p/{file}", get(playlist_m3u))
         .fallback(web::static_handler)
-        .with_state(store)
+        .with_state(app)
 }
 
 // -------------------------------------------------------------------- plumbing
@@ -382,6 +415,82 @@ async fn refresh(State(s): State<AppState>, Body(req): Body<RefreshRequest>) -> 
     }))
 }
 
+// -------------------------------------------------------------------- EPG
+
+#[utoipa::path(get, path = "/epg/sources", responses((status = 200, body = Vec<EpgSource>)))]
+async fn list_epg_sources(State(s): State<AppState>) -> ApiResult<Json<Vec<EpgSource>>> {
+    Ok(Json(s.list_epg_sources().await?))
+}
+
+/// Adds a source and starts fetching it in the background.
+#[utoipa::path(post, path = "/epg/sources", request_body = EpgSourceCreate,
+    responses((status = 201, body = EpgSource), (status = 422, body = ErrorBody)))]
+async fn create_epg_source(
+    State(s): State<AppState>,
+    Body(req): Body<EpgSourceCreate>,
+) -> ApiResult<(StatusCode, Json<EpgSource>)> {
+    let src = s.create_epg_source(req).await?;
+    if src.enabled {
+        s.epg.spawn_fetch(src.id);
+    }
+    Ok((StatusCode::CREATED, Json(src)))
+}
+
+/// A URL change keeps the current guide data until the new URL's first successful fetch, which starts
+/// immediately.
+#[utoipa::path(patch, path = "/epg/sources/{id}", params(("id" = i64, Path)), request_body = EpgSourcePatch,
+    responses((status = 200, body = EpgSource), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
+async fn patch_epg_source(
+    State(s): State<AppState>,
+    ApiPath(id): ApiPath<i64>,
+    Body(req): Body<EpgSourcePatch>,
+) -> ApiResult<Json<EpgSource>> {
+    let p = s.patch_epg_source(id, req).await?;
+    if p.source.enabled && (p.url_changed || p.source.current_gen.is_none()) {
+        s.epg.spawn_fetch(id);
+    }
+    Ok(Json(p.source))
+}
+
+#[utoipa::path(delete, path = "/epg/sources/{id}", params(("id" = i64, Path)),
+    responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn delete_epg_source(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
+    s.delete_epg_source(id).await?;
+    s.epg.spawn_forget(id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Fetch sources now and wait for the result. Fetches run one at a time, so this waits for any fetch
+/// already running.
+#[utoipa::path(post, path = "/epg/fetch", request_body = EpgFetchRequest,
+    responses((status = 200, body = Vec<EpgFetchResult>), (status = 404, body = ErrorBody)))]
+async fn fetch_epg(
+    State(s): State<AppState>,
+    Body(req): Body<EpgFetchRequest>,
+) -> ApiResult<Json<Vec<EpgFetchResult>>> {
+    Ok(Json(s.epg.fetch(&req.source_ids).await?))
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct EpgChannelQuery {
+    /// Search text: matched against channel ids and display names.
+    q: Option<String>,
+    /// Maximum results (default 50).
+    limit: Option<usize>,
+}
+
+/// Channels offered by the enabled sources. With `q`, the best matches first.
+#[utoipa::path(get, path = "/epg/channels", params(EpgChannelQuery), responses((status = 200, body = Vec<EpgChannel>)))]
+async fn search_epg_channels(
+    State(s): State<AppState>,
+    ApiQuery(q): ApiQuery<EpgChannelQuery>,
+) -> ApiResult<Json<Vec<EpgChannel>>> {
+    let all = s.epg_channels().await?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    Ok(Json(crate::suggest::search(all, q.q.as_deref(), limit)))
+}
+
 // -------------------------------------------------------------------- playlist output
 
 async fn playlist_m3u(State(s): State<AppState>, Path(file): Path<String>, headers: HeaderMap) -> Response {
@@ -411,7 +520,8 @@ async fn playlist_m3u(State(s): State<AppState>, Path(file): Path<String>, heade
 }
 
 /// `GET /api/v1/backup`: a consistent SQLite snapshot (`VACUUM INTO`), streamed as a file.
-async fn backup(store: AppState, scratch: std::path::PathBuf) -> Response {
+async fn backup(State(app): State<AppState>) -> Response {
+    let (store, scratch) = (&app.store, &app.scratch);
     let name = format!(
         ".lineup-backup-{}-{}.db",
         std::process::id(),

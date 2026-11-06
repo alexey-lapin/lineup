@@ -227,6 +227,8 @@ pub struct Settings {
     pub acexy_base: String,
     pub engine_base: String,
     pub vk_base: String,
+    /// Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
+    pub epg_refresh_hours: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -237,6 +239,8 @@ pub struct SettingsPatch {
     pub engine_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vk_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epg_refresh_hours: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -319,6 +323,93 @@ pub struct RefreshRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RefreshResponse {
     pub slugs: Vec<String>,
+}
+
+/// An XMLTV guide source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EpgSource {
+    pub id: i64,
+    pub name: String,
+    /// XMLTV URL, plain or gzipped.
+    pub url: String,
+    /// When several sources carry the same channel id, the highest priority wins.
+    pub priority: i64,
+    pub enabled: bool,
+    /// Generation being served; null until the first successful fetch.
+    pub current_gen: Option<i64>,
+    pub last_fetch_at: Option<DateTime<Utc>>,
+    /// `ok`, `not_modified` or `error`.
+    pub last_status: Option<String>,
+    pub last_error: Option<String>,
+    /// Channels in the served generation.
+    pub channel_count: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EpgSourceCreate {
+    pub url: String,
+    /// Defaults to the URL's host.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct EpgSourcePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct EpgFetchRequest {
+    /// Sources to fetch; all enabled sources when empty.
+    #[serde(default)]
+    pub source_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EpgFetchStatus {
+    /// A new generation was downloaded and published.
+    Updated,
+    /// The server answered 304; the current generation stays.
+    NotModified,
+    /// The source is disabled and was not fetched.
+    Disabled,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EpgFetchResult {
+    pub source_id: i64,
+    pub status: EpgFetchStatus,
+    pub error: Option<String>,
+    /// Channels in the published generation (when updated).
+    pub channels: Option<i64>,
+    /// Programmes kept in the published generation (when updated).
+    pub programmes: Option<i64>,
+}
+
+/// A channel offered by a guide source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct EpgChannel {
+    pub source_id: i64,
+    pub xmltv_id: String,
+    pub display_names: Vec<String>,
+    pub icon: Option<String>,
+    /// Match score in [0, 1] when the list came from a search.
+    pub score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

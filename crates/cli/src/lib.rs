@@ -63,6 +63,9 @@ pub enum Command {
     Playlist(PlaylistCmd),
     /// Import an m3u file (path, URL, or - for stdin) into a playlist.
     Import(ImportArgs),
+    /// Manage guide (XMLTV) sources and search their channels.
+    #[command(subcommand)]
+    Epg(EpgCmd),
     /// Re-emit change notifications for playlists (all when none are given).
     Refresh { slugs: Vec<String> },
     /// Show or change settings.
@@ -239,10 +242,56 @@ pub struct ImportArgs {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum EpgCmd {
+    /// Fetch sources now (all enabled ones when no ids are given) and wait for the result.
+    Fetch { ids: Vec<i64> },
+    /// Manage sources.
+    #[command(subcommand)]
+    Sources(EpgSourcesCmd),
+    /// Search the sources' channels by name or id (for picking a tvg-id).
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EpgSourcesCmd {
+    /// List sources with their last fetch status.
+    Ls,
+    /// Add an XMLTV URL (plain or gzipped). The first fetch starts right away.
+    Add {
+        url: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Higher wins when sources carry the same channel id.
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+    },
+    /// Change a source.
+    Edit {
+        id: i64,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        priority: Option<i64>,
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+    },
+    /// Delete a source and its downloaded data.
+    Rm { id: i64 },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum SettingsCmd {
     /// Show all settings.
     Get,
-    /// Set one setting: acexy_base, engine_base or vk_base.
+    /// Set one setting: acexy_base, engine_base, vk_base or epg_refresh_hours.
     Set { key: String, value: String },
 }
 

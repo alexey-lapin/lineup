@@ -132,6 +132,16 @@ impl Client {
         self.send(Method::POST, path, Some(body)).await
     }
 
+    /// POST without the default timeout, for requests that wait on slow work (EPG downloads).
+    pub async fn post_slow<T: DeserializeOwned, B: Serialize>(&self, path: &str, body: &B) -> Result<T, CliError> {
+        let req = self
+            .http
+            .post(self.url(path))
+            .json(body)
+            .timeout(std::time::Duration::from_secs(60 * 60));
+        self.finish(path, req).await
+    }
+
     pub async fn patch<T: DeserializeOwned, B: Serialize>(&self, path: &str, body: &B) -> Result<T, CliError> {
         self.send(Method::PATCH, path, Some(body)).await
     }

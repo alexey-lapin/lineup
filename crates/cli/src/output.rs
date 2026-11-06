@@ -1,6 +1,9 @@
 //! Human-readable rendering.
 
-use api_types::{Channel, ImportAction, ImportReport, Playlist, PlaylistDetail, Settings, Source, Status};
+use api_types::{
+    Channel, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource, ImportAction, ImportReport, Playlist,
+    PlaylistDetail, Settings, Source, Status,
+};
 
 pub fn source_label(s: &Source) -> String {
     match s {
@@ -200,6 +203,80 @@ pub fn settings(s: &Settings) {
     println!("acexy_base:  {}", s.acexy_base);
     println!("engine_base: {}", s.engine_base);
     println!("vk_base:     {}", s.vk_base);
+    println!("epg_refresh_hours: {}", s.epg_refresh_hours);
+}
+
+pub fn epg_sources(list: &[EpgSource]) {
+    if list.is_empty() {
+        println!("(no EPG sources)");
+        return;
+    }
+    table(
+        &["ID", "NAME", "PRIO", "CHANNELS", "LAST FETCH", "STATUS", "URL"],
+        list.iter()
+            .map(|s| {
+                let name = if s.enabled {
+                    s.name.clone()
+                } else {
+                    format!("{} (disabled)", s.name)
+                };
+                let status = match (&s.last_status, &s.last_error) {
+                    (Some(st), Some(e)) if st == "error" => format!("error: {}", truncate(e, 60)),
+                    (Some(st), _) => st.clone(),
+                    (None, _) => "-".into(),
+                };
+                vec![
+                    s.id.to_string(),
+                    name,
+                    s.priority.to_string(),
+                    s.channel_count.to_string(),
+                    s.last_fetch_at
+                        .map_or("-".into(), |t| t.format("%Y-%m-%d %H:%M").to_string()),
+                    status,
+                    s.url.clone(),
+                ]
+            })
+            .collect(),
+    );
+}
+
+pub fn epg_fetch(list: &[EpgFetchResult]) {
+    if list.is_empty() {
+        println!("(no EPG sources)");
+    }
+    for r in list {
+        match r.status {
+            EpgFetchStatus::Updated => println!(
+                "source {}: updated, {} channels, {} programmes",
+                r.source_id,
+                r.channels.unwrap_or(0),
+                r.programmes.unwrap_or(0)
+            ),
+            EpgFetchStatus::NotModified => println!("source {}: not modified", r.source_id),
+            EpgFetchStatus::Disabled => println!("source {}: disabled, skipped", r.source_id),
+            EpgFetchStatus::Error => println!("source {}: error: {}", r.source_id, r.error.as_deref().unwrap_or("?")),
+        }
+    }
+}
+
+pub fn epg_channels(list: &[EpgChannel]) {
+    if list.is_empty() {
+        println!("(no matches)");
+        return;
+    }
+    table(
+        &["TVG-ID", "NAME", "SCORE", "SOURCE"],
+        list.iter()
+            .map(|c| {
+                vec![
+                    c.xmltv_id.clone(),
+                    c.display_names.first().cloned().unwrap_or_default(),
+                    c.score.map_or(String::new(), |s| format!("{s:.2}")),
+                    c.source_id.to_string(),
+                ]
+            })
+            .collect(),
+    );
 }
 
 pub fn status(s: &Status, server: &str) {

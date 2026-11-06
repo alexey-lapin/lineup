@@ -24,7 +24,13 @@ use crate::{m3u, source};
 /// Change notifications (consumed by SSE and, later, hooks).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    PlaylistChanged { slugs: Vec<String> },
+    PlaylistChanged {
+        slugs: Vec<String>,
+    },
+    /// Guide content may have changed (`sources`: the sources whose data changed; empty = unspecified).
+    EpgUpdated {
+        sources: Vec<i64>,
+    },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -44,6 +50,9 @@ pub struct Store {
 const DEFAULT_ACEXY: &str = "http://127.0.0.1:8080";
 const DEFAULT_ENGINE: &str = "http://127.0.0.1:6878";
 const DEFAULT_VK: &str = "http://127.0.0.1:8099";
+const DEFAULT_EPG_REFRESH_HOURS: u32 = 6;
+/// Upper bound for `epg_refresh_hours` (one week).
+const MAX_EPG_REFRESH_HOURS: u32 = 24 * 7;
 
 impl Store {
     /// Open (creating if needed) the database file and run migrations.
@@ -101,6 +110,14 @@ impl Store {
         }
         if let Some(v) = patch.vk_base {
             new.vk_base = source::normalize_base("vk_base", &v)?;
+        }
+        if let Some(v) = patch.epg_refresh_hours {
+            if v > MAX_EPG_REFRESH_HOURS {
+                return Err(invalid(format!(
+                    "epg_refresh_hours must be at most {MAX_EPG_REFRESH_HOURS}"
+                )));
+            }
+            new.epg_refresh_hours = v;
         }
         save_settings(&mut tx, &new).await?;
 
@@ -771,6 +788,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
         acexy_base: DEFAULT_ACEXY.into(),
         engine_base: DEFAULT_ENGINE.into(),
         vk_base: DEFAULT_VK.into(),
+        epg_refresh_hours: DEFAULT_EPG_REFRESH_HOURS,
     };
     for r in rows {
         let key: String = r.try_get("key")?;
@@ -779,6 +797,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
             "acexy_base" => s.acexy_base = serde_json::from_str(&value)?,
             "engine_base" => s.engine_base = serde_json::from_str(&value)?,
             "vk_base" => s.vk_base = serde_json::from_str(&value)?,
+            "epg_refresh_hours" => s.epg_refresh_hours = serde_json::from_str(&value)?,
             _ => {}
         }
     }
@@ -790,6 +809,7 @@ async fn save_settings(conn: &mut SqliteConnection, s: &Settings) -> Result<()> 
         ("acexy_base", serde_json::to_string(&s.acexy_base)?),
         ("engine_base", serde_json::to_string(&s.engine_base)?),
         ("vk_base", serde_json::to_string(&s.vk_base)?),
+        ("epg_refresh_hours", serde_json::to_string(&s.epg_refresh_hours)?),
     ];
     for (k, v) in pairs {
         sqlx::query(
@@ -1075,6 +1095,9 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str) -> Result<String> {
         .collect();
     Ok(m3u::render(&items))
 }
+
+mod epg;
+pub use epg::{FetchOutcome, IndexedChannel, PatchedSource};
 
 #[cfg(test)]
 mod tests;

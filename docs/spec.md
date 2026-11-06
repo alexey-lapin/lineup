@@ -124,16 +124,18 @@ Built per request from the per-source caches. Output order is all `<channel>` el
 ## 6. EPG ingestion
 
 - `epg_sources` starts empty. You add XMLTV URLs (plain or gzipped), for example regional files from a public EPG provider.
-- Schedule: 3 minutes after start, then every 6h (configurable). A fetch can also be started from the UI or CLI.
+- Schedule: 3 minutes after start, then every `epg_refresh_hours` (default 6; 0 turns it off). The scheduler compares wall-clock time every 10 minutes, so a host that slept catches up soon after it wakes. A fetch can also be started from the UI or CLI, and adding a source or changing its URL fetches it right away.
 - The **unfiltered raw download is kept**. A regional guide is tens of MB gzipped, which is fine. Because filtering happens when the response is served (§5), adding a tvg-id never needs a re-download.
 
 **Generations.** Each source has a directory `/data/epg/<source_id>/`, and each successful download becomes a generation directory `gen-<n>/` inside it. A generation holds:
-- `raw.xml.gz`
-- `programmes.idx`: for each channel id, a list of (start, stop, byte range) entries pointing into `programmes.xml`.
-- `programmes.xml`: each kept `<programme>` fragment, copied verbatim, so no metadata is dropped.
-- `channels.json`: the `<channel>` fragments plus display names and icon.
+- `raw`: the download as received, plain or gzipped (detected by its magic bytes).
+- `programmes.xml`: each kept `<programme>` element, re-emitted from the source event by event so no metadata is dropped, grouped by channel and sorted by start.
+- `programmes.idx`: for each channel id, the byte range of its block in `programmes.xml`.
+- `channels.json`: the `<channel>` elements plus display names and icon. Ids that only appear in programmes get an entry without an element.
 - `meta.json`: `{url, etag, last_modified, fetched_at}`. These are the validators returned with this download, together with the URL they came from.
 - `COMPLETE`: a marker file written last.
+
+A download is accepted only if it parses as a whole document, including the closing `</tv>`, so a truncated transfer never replaces good data.
 
 `epg_sources.current_gen` points at the generation being served. Validators are read from the current generation's directory, never stored separately.
 
@@ -141,7 +143,7 @@ Built per request from the per-source caches. Output order is all `<channel>` el
 1. Send validators only when the current generation is complete *and* its `meta.url` equals the source's configured URL. Otherwise send none. So after a URL change, every attempt stays unconditional until a generation for the new URL is published, including across restarts.
 2. On `304`: if the current generation is complete, there is nothing to do. If it is incomplete or missing, rebuild it from the raw file inside it; if that fails, fetch again unconditionally.
 3. On `200`:
-   1. Stream the body into `gen-<n+1>/raw.xml.gz`.
+   1. Stream the body into `gen-<n+1>/raw` (at most 1 GiB).
    2. Parse it and write `programmes.*` and `channels.json`, dropping programmes that ended more than 6h ago.
    3. Write `meta.json`, then fsync, then write `COMPLETE`.
    - `n+1` is always max(existing dirs)+1, so a leftover complete candidate is never overwritten in place.

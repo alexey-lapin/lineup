@@ -221,6 +221,7 @@ mod tests {
             acexy_base: "http://10.0.0.5:8080".into(),
             engine_base: "http://10.0.0.5:6878".into(),
             vk_base: "http://10.0.0.5:8099/".into(),
+            epg_refresh_hours: 6,
         }
     }
 

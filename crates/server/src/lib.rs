@@ -1,7 +1,9 @@
+pub mod epg;
 pub mod error;
 pub mod m3u;
 pub mod source;
 pub mod store;
+pub mod suggest;
 
 pub use error::{Error, Result};
 pub use store::{ChannelFilter, Event, Store};
@@ -23,7 +25,10 @@ pub struct Config {
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&cfg.data_dir).await?;
     let store = Arc::new(Store::open(&cfg.data_dir.join("lineup.db")).await?);
-    let app = http::router_with_scratch(store, cfg.data_dir.clone());
+    let app = http::App::new(store, &cfg.data_dir);
+    app.epg.recover().await?;
+    app.epg.spawn_scheduler();
+    let app = http::router_for(app);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     tracing::info!("lineup listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).with_graceful_shutdown(shutdown()).await?;

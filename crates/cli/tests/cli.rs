@@ -109,3 +109,28 @@ async fn backup_never_overwrites() {
     assert_eq!(lineup(&s, &["backup", out.to_str().unwrap()]).await, 2);
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "keep me");
 }
+
+#[tokio::test]
+async fn epg_commands() {
+    let s = real_server().await;
+    assert_eq!(lineup(&s, &["epg", "sources", "ls"]).await, 0);
+    assert_eq!(lineup(&s, &["epg", "sources", "add", "not a url"]).await, 2);
+    // Disabled straight away, so the background fetch has nothing to reach.
+    assert_eq!(
+        lineup(&s, &["epg", "sources", "add", "http://127.0.0.1:1/guide.xml"]).await,
+        0
+    );
+    assert_eq!(lineup(&s, &["epg", "sources", "edit", "1", "--disable"]).await, 0);
+    assert_eq!(
+        lineup(&s, &["epg", "fetch", "1"]).await,
+        0,
+        "disabled: skipped, not an error"
+    );
+    assert_eq!(lineup(&s, &["epg", "fetch", "7"]).await, 3);
+    assert_eq!(lineup(&s, &["epg", "search", "sports"]).await, 0);
+    assert_eq!(lineup(&s, &["epg", "sources", "rm", "1"]).await, 0);
+    assert_eq!(lineup(&s, &["epg", "sources", "rm", "1"]).await, 3);
+    assert_eq!(lineup(&s, &["settings", "set", "epg_refresh_hours", "0"]).await, 0);
+    assert_eq!(lineup(&s, &["settings", "set", "epg_refresh_hours", "x"]).await, 2);
+    assert_eq!(lineup(&s, &["settings", "set", "epg_refresh_hours", "9999"]).await, 2);
+}

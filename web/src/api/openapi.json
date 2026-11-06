@@ -228,6 +228,221 @@
         }
       }
     },
+    "/epg/channels": {
+      "get": {
+        "summary": "Channels offered by the enabled sources. With `q`, the best matches first.",
+        "operationId": "search_epg_channels",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search text: matched against channel ids and display names.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum results (default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EpgChannel"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/epg/fetch": {
+      "post": {
+        "summary": "Fetch sources now and wait for the result. Fetches run one at a time, so this waits for any fetch\nalready running.",
+        "operationId": "fetch_epg",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpgFetchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EpgFetchResult"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/epg/sources": {
+      "get": {
+        "operationId": "list_epg_sources",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EpgSource"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Adds a source and starts fetching it in the background.",
+        "operationId": "create_epg_source",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpgSourceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpgSource"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/epg/sources/{id}": {
+      "delete": {
+        "operationId": "delete_epg_source",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "A URL change keeps the current guide data until the new URL's first successful fetch, which starts\nimmediately.",
+        "operationId": "patch_epg_source",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpgSourcePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EpgSource"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/import": {
       "post": {
         "operationId": "import",
@@ -990,6 +1205,235 @@
           }
         }
       },
+      "EpgChannel": {
+        "type": "object",
+        "description": "A channel offered by a guide source.",
+        "required": [
+          "source_id",
+          "xmltv_id",
+          "display_names"
+        ],
+        "properties": {
+          "display_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Match score in [0, 1] when the list came from a search."
+          },
+          "source_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "xmltv_id": {
+            "type": "string"
+          }
+        }
+      },
+      "EpgFetchRequest": {
+        "type": "object",
+        "properties": {
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Sources to fetch; all enabled sources when empty."
+          }
+        }
+      },
+      "EpgFetchResult": {
+        "type": "object",
+        "required": [
+          "source_id",
+          "status"
+        ],
+        "properties": {
+          "channels": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Channels in the published generation (when updated)."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "programmes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Programmes kept in the published generation (when updated)."
+          },
+          "source_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "$ref": "#/components/schemas/EpgFetchStatus"
+          }
+        }
+      },
+      "EpgFetchStatus": {
+        "type": "string",
+        "enum": [
+          "updated",
+          "not_modified",
+          "disabled",
+          "error"
+        ]
+      },
+      "EpgSource": {
+        "type": "object",
+        "description": "An XMLTV guide source.",
+        "required": [
+          "id",
+          "name",
+          "url",
+          "priority",
+          "enabled",
+          "channel_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "channel_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Channels in the served generation."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "current_gen": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Generation being served; null until the first successful fetch."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_fetch_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ok`, `not_modified` or `error`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When several sources carry the same channel id, the highest priority wins."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "url": {
+            "type": "string",
+            "description": "XMLTV URL, plain or gzipped."
+          }
+        }
+      },
+      "EpgSourceCreate": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to the URL's host."
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "EpgSourcePatch": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ErrorBody": {
         "type": "object",
         "required": [
@@ -1396,7 +1840,8 @@
         "required": [
           "acexy_base",
           "engine_base",
-          "vk_base"
+          "vk_base",
+          "epg_refresh_hours"
         ],
         "properties": {
           "acexy_base": {
@@ -1404,6 +1849,12 @@
           },
           "engine_base": {
             "type": "string"
+          },
+          "epg_refresh_hours": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.",
+            "minimum": 0
           },
           "vk_base": {
             "type": "string"
@@ -1424,6 +1875,14 @@
               "string",
               "null"
             ]
+          },
+          "epg_refresh_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
           },
           "vk_base": {
             "type": [

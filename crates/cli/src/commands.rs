@@ -1,12 +1,13 @@
 use api_types::{
-    Channel, ChannelCreate, ChannelPatch, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate,
+    Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource,
+    EpgSourceCreate, EpgSourcePatch, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate,
     PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings,
     SettingsPatch, Source, Status,
 };
 use serde::Serialize;
 
 use crate::client::{CliError, Client};
-use crate::{Cli, Command, PlaylistCmd, SettingsCmd, output};
+use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, PlaylistCmd, SettingsCmd, output};
 
 type R<T = ()> = Result<T, CliError>;
 
@@ -340,6 +341,8 @@ pub async fn run(cli: Cli) -> R {
             x.emit(&r, output::import);
         }
 
+        Command::Epg(cmd) => epg(&mut x, cmd).await?,
+
         Command::Refresh { slugs } => {
             let r: RefreshResponse = x.c.post("/refresh", &RefreshRequest { slugs }).await?;
             x.emit(&r, |r| println!("refreshed: {}", r.slugs.join(", ")));
@@ -355,10 +358,83 @@ pub async fn run(cli: Cli) -> R {
                 "acexy_base" => patch.acexy_base = Some(value),
                 "engine_base" => patch.engine_base = Some(value),
                 "vk_base" => patch.vk_base = Some(value),
+                "epg_refresh_hours" => {
+                    patch.epg_refresh_hours = Some(
+                        value
+                            .parse()
+                            .map_err(|_| CliError::Usage(format!("epg_refresh_hours: not a number: {value:?}")))?,
+                    )
+                }
                 other => return Err(CliError::Usage(format!("unknown setting {other:?}"))),
             }
             let s: Settings = x.c.patch("/settings", &patch).await?;
             x.emit(&s, output::settings);
+        }
+    }
+    Ok(())
+}
+
+async fn epg(x: &mut Ctx, cmd: EpgCmd) -> R {
+    match cmd {
+        EpgCmd::Fetch { ids } => {
+            let r: Vec<EpgFetchResult> =
+                x.c.post_slow("/epg/fetch", &EpgFetchRequest { source_ids: ids })
+                    .await?;
+            x.emit(&r, |r| output::epg_fetch(r));
+            if r.iter().any(|r| r.status == EpgFetchStatus::Error) {
+                return Err(CliError::Reported(1));
+            }
+        }
+        EpgCmd::Sources(EpgSourcesCmd::Ls) => {
+            let l: Vec<EpgSource> = x.c.get("/epg/sources").await?;
+            x.emit(&l, |l| output::epg_sources(l));
+        }
+        EpgCmd::Sources(EpgSourcesCmd::Add { url, name, priority }) => {
+            let req = EpgSourceCreate {
+                url,
+                name,
+                priority,
+                enabled: true,
+            };
+            let s: EpgSource = x.c.post("/epg/sources", &req).await?;
+            x.emit(&s, |s| println!("added EPG source {} ({}); fetching now", s.id, s.name));
+        }
+        EpgCmd::Sources(EpgSourcesCmd::Edit {
+            id,
+            name,
+            url,
+            priority,
+            enable,
+            disable,
+        }) => {
+            let patch = EpgSourcePatch {
+                name,
+                url,
+                priority,
+                enabled: if enable {
+                    Some(true)
+                } else if disable {
+                    Some(false)
+                } else {
+                    None
+                },
+            };
+            let s: EpgSource = x.c.patch(&format!("/epg/sources/{id}"), &patch).await?;
+            x.emit(&s, |s| output::epg_sources(std::slice::from_ref(s)));
+        }
+        EpgCmd::Sources(EpgSourcesCmd::Rm { id }) => {
+            let _: () = x.c.delete(&format!("/epg/sources/{id}")).await?;
+            if x.json {
+                println!("{}", serde_json::json!({ "deleted": id }));
+            } else if !x.quiet {
+                println!("deleted EPG source {id}");
+            }
+        }
+        EpgCmd::Search { query, limit } => {
+            let l: Vec<EpgChannel> =
+                x.c.get_query("/epg/channels", &[("q", query), ("limit", limit.to_string())])
+                    .await?;
+            x.emit(&l, |l| output::epg_channels(l));
         }
     }
     Ok(())
