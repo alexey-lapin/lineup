@@ -33,6 +33,23 @@ pub enum Event {
     },
 }
 
+impl Event {
+    /// Wire name, as used for SSE and (later) hooks.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Event::PlaylistChanged { .. } => "playlist.changed",
+            Event::EpgUpdated { .. } => "epg.updated",
+        }
+    }
+
+    pub fn payload(&self) -> serde_json::Value {
+        match self {
+            Event::PlaylistChanged { slugs } => serde_json::json!({ "slugs": slugs }),
+            Event::EpgUpdated { sources } => serde_json::json!({ "sources": sources }),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ChannelFilter {
     pub group: Option<String>,

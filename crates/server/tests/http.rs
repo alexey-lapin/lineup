@@ -251,3 +251,37 @@ async fn import_by_url_is_size_capped() {
     let (_, _, l) = call(&app, "GET", "/api/v1/playlists", None).await;
     assert_eq!(l, json!([]), "nothing was created");
 }
+
+#[tokio::test]
+async fn event_stream() {
+    let store = Arc::new(Store::open_memory().await.unwrap());
+    let app = router(store.clone());
+    let res = app
+        .clone()
+        .oneshot(Request::builder().uri("/api/v1/events").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
+    let mut body = res.into_body();
+    let mut next = async || -> String {
+        let f = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        String::from_utf8(f.into_data().unwrap().to_vec()).unwrap()
+    };
+    assert!(next().await.starts_with("event: ready\n"));
+    call(&app, "POST", "/api/v1/playlists", Some(json!({"slug": "jf"}))).await;
+    let ev = next().await;
+    assert!(
+        ev.starts_with("event: playlist.changed\ndata: {\"slugs\":[\"jf\"]}"),
+        "{ev}"
+    );
+}

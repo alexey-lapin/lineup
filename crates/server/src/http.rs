@@ -31,16 +31,27 @@ pub struct App {
     pub epg: Arc<Epg>,
     /// Where temporary files (backups) are written; the data dir in production.
     scratch: std::path::PathBuf,
+    /// Flips to true on shutdown, ending open event streams so the server can stop.
+    shutdown: tokio::sync::watch::Receiver<bool>,
+    shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl App {
     /// `data_dir` holds the EPG cache and backup scratch files.
     pub fn new(store: Arc<Store>, data_dir: &std::path::Path) -> Self {
+        let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
         App {
             epg: Epg::new(store.clone(), data_dir),
             store,
             scratch: data_dir.to_path_buf(),
+            shutdown,
+            shutdown_tx: Arc::new(shutdown_tx),
         }
+    }
+
+    /// End open event streams (call when the server starts shutting down).
+    pub fn begin_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
     }
 }
 
@@ -100,8 +111,8 @@ pub fn router(store: Arc<Store>) -> Router {
 
 pub fn router_for(app: App) -> Router {
     let (api, _) = api_router().split_for_parts();
-    // Not in OpenAPI: it returns a binary file.
-    let api = api.route("/backup", get(backup));
+    // Not in OpenAPI: a binary file and an event stream.
+    let api = api.route("/backup", get(backup)).route("/events", get(events));
     let doc = openapi();
     Router::new()
         .nest("/api/v1", api.fallback(api_not_found))
@@ -553,6 +564,36 @@ fn conditional(headers: &HeaderMap, etag: String, content_type: &'static str, bo
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     res
+}
+
+/// `GET /api/v1/events`: server-sent events. Each event's name is its type (`playlist.changed`,
+/// `epg.updated`, ...) and its data the JSON payload. `ready` is sent on connect, and `resync` when
+/// this client fell behind and missed events (refetch everything).
+async fn events(State(app): State<AppState>) -> impl IntoResponse {
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    use tokio::sync::broadcast::error::RecvError;
+
+    let rx = app.store.subscribe();
+    let shutdown = app.shutdown.clone();
+    let ready = futures_util::stream::once(async {
+        Ok::<_, std::convert::Infallible>(SseEvent::default().event("ready").data("{}"))
+    });
+    let updates = futures_util::stream::unfold((rx, shutdown), |(mut rx, mut shutdown)| async move {
+        if *shutdown.borrow() {
+            return None;
+        }
+        let ev = tokio::select! {
+            r = rx.recv() => match r {
+                Ok(e) => SseEvent::default().event(e.kind()).data(e.payload().to_string()),
+                Err(RecvError::Lagged(_)) => SseEvent::default().event("resync").data("{}"),
+                Err(RecvError::Closed) => return None,
+            },
+            _ = shutdown.changed() => return None,
+        };
+        Some((Ok(ev), (rx, shutdown)))
+    });
+    use futures_util::StreamExt;
+    Sse::new(ready.chain(updates)).keep_alive(KeepAlive::default())
 }
 
 /// `GET /api/v1/backup`: a consistent SQLite snapshot (`VACUUM INTO`), streamed as a file.

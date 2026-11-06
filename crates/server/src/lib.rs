@@ -29,10 +29,16 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let app = http::App::new(store, &cfg.data_dir);
     app.epg.recover().await?;
     app.epg.spawn_scheduler();
-    let app = http::router_for(app);
+    let handle = app.clone();
+    let router = http::router_for(app);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     tracing::info!("lineup listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, app).with_graceful_shutdown(shutdown()).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            shutdown().await;
+            handle.begin_shutdown();
+        })
+        .await?;
     Ok(())
 }
 

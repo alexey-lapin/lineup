@@ -1,4 +1,5 @@
 import { useQuery, useQueryCache } from '@pinia/colada'
+import { onBeforeUnmount, onMounted } from 'vue'
 import { useToast } from '@nuxt/ui/composables'
 import { api, ApiError } from './api'
 
@@ -62,4 +63,29 @@ export function playerLinks(url: string) {
     vlc: `vlc-x-callback://x-callback-url/stream?url=${e}`,
     infuse: `infuse://x-callback-url/play?url=${e}`
   }
+}
+
+/**
+ * Keep queries fresh from the server's event stream (`/api/v1/events`). After a reconnect, or when
+ * the server says this client missed events, everything is refetched.
+ */
+export function useLiveUpdates() {
+  const cache = useQueryCache()
+  const refetch = (...keys: string[]) =>
+    Promise.allSettled(keys.map((k) => cache.invalidateQueries({ key: [k] })))
+  const everything = () => refetch('channels', 'playlists', 'playlist', 'epg-sources', 'settings', 'status')
+  let es: EventSource | undefined
+  onMounted(() => {
+    if (typeof EventSource === 'undefined') return
+    es = new EventSource('/api/v1/events')
+    let connected = false
+    es.addEventListener('ready', () => {
+      if (connected) everything()
+      connected = true
+    })
+    es.addEventListener('resync', everything)
+    es.addEventListener('playlist.changed', () => refetch('channels', 'playlists', 'playlist'))
+    es.addEventListener('epg.updated', () => refetch('epg-sources'))
+  })
+  onBeforeUnmount(() => es?.close())
 }

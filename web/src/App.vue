@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import type { NavigationMenuItem } from '@nuxt/ui'
+import { useLiveUpdates } from './composables'
+
+useLiveUpdates()
 
 const items: NavigationMenuItem[][] = [
   [
