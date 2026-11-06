@@ -100,6 +100,15 @@ describe('saving with newer server changes', () => {
     expect([vk.dirty, vk.conflict]).toEqual([false, true])
   })
 
+  it('keeps the saved values when the fresh read fails', async () => {
+    const settings = ref<Settings | undefined>({ ...base })
+    const vk = useSettingsSection(['vk_base'], settings, { reload: async () => undefined })
+    vk.draft.vk_base = 'http://mine:8099'
+    api.patchSettings.mockResolvedValueOnce({ ...base, vk_base: 'http://mine:8099' })
+    expect(await vk.save()).toBe(true)
+    expect([vk.draft.vk_base, vk.dirty, vk.conflict]).toEqual(['http://mine:8099', false, false])
+  })
+
   it('does not save an invalid draft', async () => {
     const settings = ref<Settings | undefined>({ ...base })
     const vk = useSettingsSection(['vk_base'], settings, { validate: (d) => baseUrlError(d.vk_base) })

@@ -21,7 +21,8 @@ const {
   refetch: refetchSources
 } = useQuery({ key: ['epg-sources'], query: () => api.epgSources() })
 
-const reload = () => refetch().then((r) => r.data)
+/** A fresh read, or undefined if it failed (refetch then still resolves, with the old cached data). */
+const reload = () => refetch().then((r) => (r.error || r.status !== 'success' ? undefined : r.data))
 const hours = (v: number) => (Number.isInteger(v) && v >= 0 && v <= 168 ? null : 'Enter whole hours from 0 to 168')
 const cards = {
   acexy: useSettingsSection(['acexy_base'], settings, { reload, validate: (d) => baseUrlError(d.acexy_base) }),
