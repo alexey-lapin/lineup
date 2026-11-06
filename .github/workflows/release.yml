@@ -195,10 +195,11 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # The workflow's own commit (it carries the notes script), with all history and tags so the
+      # notes can be computed for TAG even when rebuilding an older release.
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ env.TAG }}
-          fetch-depth: 0 # tags and history for the notes
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: cli-*
