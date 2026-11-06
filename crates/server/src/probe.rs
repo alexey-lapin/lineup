@@ -12,7 +12,7 @@ use api_types::{ProbeOutcome, ProbeResult, Source, SourceKind};
 use serde_json::{Value, json};
 
 use crate::error::{Result, invalid};
-use crate::store::{ChannelFilter, Store};
+use crate::store::{ChannelFilter, ProbeIdentity, Store};
 
 /// Timing, shortened in tests.
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +38,27 @@ impl Default for ProbeTiming {
             busy_retry: Duration::from_secs(1800),
             tick: Duration::from_secs(60),
         }
+    }
+}
+
+/// A channel to probe, as it was when the probe was requested.
+struct Target {
+    channel_id: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    ace: String,
+}
+
+enum Attempt {
+    Done(ProbeResult),
+    /// The guard stopped the run at this channel.
+    Stop(ProbeResult, String),
+}
+
+fn skipped(channel_id: i64, why: &str) -> ProbeResult {
+    ProbeResult {
+        channel_id,
+        outcome: ProbeOutcome::Skipped,
+        detail: Some(json!({ "reason": why, "recorded": false })),
     }
 }
 
@@ -71,12 +92,16 @@ impl Prober {
     /// Probe the given channels (they must be acestream) now, one at a time, and return the results.
     /// Runs never overlap. Unless `force`, the activity guard applies; if it stops the run, the
     /// remaining channels are reported (not recorded) as skipped.
-    pub async fn probe(&self, ids: &[i64], force: bool) -> Result<Vec<ProbeResult>> {
+    pub async fn probe(self: &Arc<Self>, ids: &[i64], force: bool) -> Result<Vec<ProbeResult>> {
         let mut targets = Vec::new();
         for id in ids {
             let c = self.store.get_channel(*id).await?;
             match c.source {
-                Source::Acestream { id: ace } => targets.push((c.id, ace)),
+                Source::Acestream { id: ace } => targets.push(Target {
+                    channel_id: c.id,
+                    created_at: c.created_at,
+                    ace,
+                }),
                 _ => return Err(invalid(format!("channel {} is not an acestream channel", c.id))),
             }
         }
@@ -84,7 +109,7 @@ impl Prober {
     }
 
     /// All enabled acestream channels. Returns whether the guard stopped the run early.
-    pub async fn probe_all(&self, force: bool) -> Result<(Vec<ProbeResult>, bool)> {
+    pub async fn probe_all(self: &Arc<Self>, force: bool) -> Result<(Vec<ProbeResult>, bool)> {
         let channels = self
             .store
             .list_channels(&ChannelFilter {
@@ -96,7 +121,11 @@ impl Prober {
             .into_iter()
             .filter(|c| c.enabled)
             .filter_map(|c| match c.source {
-                Source::Acestream { id } => Some((c.id, id)),
+                Source::Acestream { id } => Some(Target {
+                    channel_id: c.id,
+                    created_at: c.created_at,
+                    ace: id,
+                }),
                 _ => None,
             })
             .collect();
@@ -139,53 +168,84 @@ impl Prober {
         });
     }
 
-    async fn run(&self, targets: Vec<(i64, String)>, force: bool) -> (Vec<ProbeResult>, bool) {
+    async fn run(self: &Arc<Self>, targets: Vec<Target>, force: bool) -> (Vec<ProbeResult>, bool) {
         let _lock = self.run_lock.lock().await;
         let mut results = Vec::new();
         let mut stopped: Option<String> = None;
-        for (channel_id, ace) in targets {
+        for t in targets {
+            let not_recorded = |reason: &str| ProbeResult {
+                channel_id: t.channel_id,
+                outcome: ProbeOutcome::Skipped,
+                detail: Some(json!({ "reason": reason, "recorded": false })),
+            };
             if let Some(reason) = &stopped {
-                results.push(ProbeResult {
-                    channel_id,
-                    outcome: ProbeOutcome::Skipped,
-                    detail: Some(json!({ "reason": reason, "recorded": false })),
-                });
+                results.push(not_recorded(reason));
                 continue;
             }
-            let settings = match self.store.settings().await {
-                Ok(s) => s,
-                Err(e) => {
-                    stopped = Some(format!("reading settings: {e}"));
-                    continue;
-                }
-            };
-            let (outcome, detail) = if force {
-                self.probe_one(&settings.engine_base, &ace).await
-            } else {
-                match self.guard(&settings.acexy_base, &ace).await {
-                    Guard::Go => self.probe_one(&settings.engine_base, &ace).await,
-                    Guard::Skip(why) => (ProbeOutcome::Skipped, json!({ "reason": why })),
-                    Guard::Stop(why) => {
-                        results.push(ProbeResult {
-                            channel_id,
-                            outcome: ProbeOutcome::Skipped,
-                            detail: Some(json!({ "reason": why, "recorded": false })),
-                        });
-                        stopped = Some(why);
-                        continue;
-                    }
-                }
-            };
-            if let Err(e) = self.store.record_probe(channel_id, outcome, Some(detail.clone())).await {
-                tracing::warn!("recording probe of channel {channel_id}: {e}");
+            // The target may have waited for the lock: probe only the channel and source it named.
+            if !self.still_current(&t).await {
+                results.push(not_recorded("the channel or its source changed"));
+                continue;
             }
-            results.push(ProbeResult {
-                channel_id,
-                outcome,
-                detail: Some(detail),
-            });
+            // The attempt runs in its own task so a started session is always stopped and its result
+            // recorded, even if this request is cancelled.
+            let me = self.clone();
+            let task = tokio::spawn(async move { me.attempt(t, force).await });
+            match task.await {
+                Ok(Attempt::Done(r)) => results.push(r),
+                Ok(Attempt::Stop(r, why)) => {
+                    results.push(r);
+                    stopped = Some(why);
+                }
+                Err(e) => {
+                    stopped = Some(format!("probe task failed: {e}"));
+                }
+            }
         }
         (results, stopped.is_some())
+    }
+
+    async fn still_current(&self, t: &Target) -> bool {
+        match self.store.get_channel(t.channel_id).await {
+            Ok(c) => c.created_at == t.created_at && matches!(&c.source, Source::Acestream { id } if *id == t.ace),
+            Err(_) => false,
+        }
+    }
+
+    /// Guard, probe and record one target.
+    async fn attempt(&self, t: Target, force: bool) -> Attempt {
+        let settings = match self.store.settings().await {
+            Ok(s) => s,
+            Err(e) => {
+                let why = format!("reading settings: {e}");
+                return Attempt::Stop(skipped(t.channel_id, &why), why);
+            }
+        };
+        let (outcome, detail) = if force {
+            self.probe_one(&settings.engine_base, &t.ace).await
+        } else {
+            match self.guard(&settings.acexy_base, &t.ace).await {
+                Guard::Go => self.probe_one(&settings.engine_base, &t.ace).await,
+                Guard::Skip(why) => (ProbeOutcome::Skipped, json!({ "reason": why })),
+                Guard::Stop(why) => return Attempt::Stop(skipped(t.channel_id, &why), why),
+            }
+        };
+        let identity = ProbeIdentity {
+            channel_id: t.channel_id,
+            created_at: t.created_at,
+            ace: &t.ace,
+        };
+        let mut detail = detail;
+        match self.store.record_probe(identity, outcome, Some(detail.clone())).await {
+            Ok(true) => {}
+            Ok(false) => detail["recorded"] = json!(false),
+            Err(e) => tracing::warn!("recording probe of channel {}: {e}", t.channel_id),
+        }
+        Attempt::Done(ProbeResult {
+            channel_id: t.channel_id,
+            outcome,
+            detail: Some(detail),
+        })
     }
 
     /// Ask acexy whether `id` is being watched. A per-id status (404 = not active) decides for that
@@ -266,50 +326,60 @@ impl Prober {
             .get("command_url")
             .and_then(Value::as_str)
             .and_then(|u| rebase(u, base));
+        // Without a command URL the session cannot be stopped; do not keep it open to measure it.
+        let Some(command_url) = command_url else {
+            return unknown("engine response has no command_url".into());
+        };
         let Some(stat_url) = stat_url else {
-            if let Some(c) = &command_url {
-                self.stop(c).await;
-            }
+            self.stop(&command_url).await;
             return unknown("engine response has no stat_url".into());
         };
 
         let deadline = tokio::time::Instant::now() + self.timing.give_up_after;
-        let mut last: Option<Value>;
-        let mut outcome = None;
+        let mut samples = 0u32;
+        let mut failures: Vec<String> = Vec::new();
+        let mut last: Value = Value::Null;
+        let mut healthy = false;
         loop {
             match self.stat(&stat_url).await {
                 Ok(s) => {
+                    samples += 1;
                     let peers = s.get("peers").and_then(Value::as_u64).unwrap_or(0);
-                    let status = s.get("status").and_then(Value::as_str).unwrap_or("");
-                    if peers > 0 || status == "dl" {
-                        outcome = Some(ProbeOutcome::Ok);
-                        last = Some(s);
+                    let downloading = s.get("status").and_then(Value::as_str) == Some("dl");
+                    last = s;
+                    if peers > 0 || downloading {
+                        healthy = true;
                         break;
                     }
-                    last = Some(s);
                 }
-                Err(e) => last = Some(json!({ "error": e })),
+                Err(e) => failures.push(e),
             }
             if tokio::time::Instant::now() + self.timing.poll_every > deadline {
                 break;
             }
             tokio::time::sleep(self.timing.poll_every).await;
         }
-        if let Some(c) = &command_url {
-            self.stop(c).await;
-        }
-        let last = last.unwrap_or(Value::Null);
-        let outcome = outcome.unwrap_or_else(|| {
-            // Dead only if the session really started and sat in prebuffering without peers.
-            let status = last.get("status").and_then(Value::as_str).unwrap_or("");
-            let peers = last.get("peers").and_then(Value::as_u64);
-            if status == "prebuf" && peers == Some(0) {
+        self.stop(&command_url).await;
+        let outcome = if healthy {
+            ProbeOutcome::Ok
+        } else {
+            // Dead only if every sample came back and showed prebuffering with no peers; any failed
+            // or unexpected sample leaves the window incomplete.
+            let all_prebuf = samples > 0
+                && failures.is_empty()
+                && last.get("status").and_then(Value::as_str) == Some("prebuf")
+                && last.get("peers").and_then(Value::as_u64) == Some(0);
+            if all_prebuf {
                 ProbeOutcome::Dead
             } else {
                 ProbeOutcome::Unknown
             }
-        });
-        (outcome, json!({ "stat": last }))
+        };
+        let mut detail = json!({ "stat": last, "samples": samples });
+        if !failures.is_empty() {
+            detail["errors"] = json!(failures);
+        }
+        (outcome, detail)
     }
 
     async fn stat(&self, url: &str) -> std::result::Result<Value, String> {

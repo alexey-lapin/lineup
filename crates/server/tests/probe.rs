@@ -17,6 +17,10 @@ const OK: &str = "1111111111111111111111111111111111111111";
 const DEAD: &str = "2222222222222222222222222222222222222222";
 const WATCHED: &str = "3333333333333333333333333333333333333333";
 const BROKEN: &str = "4444444444444444444444444444444444444444";
+/// The first stat request fails, later ones report prebuffering.
+const FLAKY: &str = "5555555555555555555555555555555555555555";
+/// The engine returns no command_url.
+const NOCMD: &str = "6666666666666666666666666666666666666666";
 
 #[derive(Default)]
 struct Fake {
@@ -26,6 +30,7 @@ struct Fake {
     /// acexy: None = per-id status unsupported (400); Some(ids) = ids being watched.
     watched: Option<Vec<String>>,
     global_streams: u64,
+    stat_calls: HashMap<String, u32>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -38,6 +43,13 @@ async fn getstream(State(f): State<Shared>, Query(q): Query<HashMap<String, Stri
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     let _ = f;
+    if id == NOCMD {
+        return axum::Json(json!({
+            "response": { "stat_url": format!("http://127.0.0.1:1/ace/stat/{id}/s") },
+            "error": null
+        }))
+        .into_response();
+    }
     // The engine reports its own loopback address and port; lineup rebases these.
     axum::Json(json!({
         "response": {
@@ -50,7 +62,15 @@ async fn getstream(State(f): State<Shared>, Query(q): Query<HashMap<String, Stri
 }
 
 async fn stat(State(f): State<Shared>, Path(id): Path<String>) -> axum::response::Response {
-    let f = f.lock().unwrap();
+    let mut f = f.lock().unwrap();
+    let n = {
+        let c = f.stat_calls.entry(id.clone()).or_default();
+        *c += 1;
+        *c
+    };
+    if id == FLAKY && n == 1 {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
     let (status, peers) = f.swarm.get(&id).cloned().unwrap_or(("prebuf".into(), 0));
     axum::Json(json!({ "response": { "status": status, "peers": peers }, "error": null })).into_response()
 }
@@ -213,4 +233,82 @@ async fn probes_record_health_and_emit_transitions() {
     fake.lock().unwrap().global_streams = 0;
     let (_, stopped) = prober.probe_all(false).await.unwrap();
     assert!(!stopped);
+}
+
+#[tokio::test]
+async fn probes_are_bound_to_their_channel_and_session() {
+    let (base, fake) = fake().await;
+    let store = Arc::new(Store::open_memory().await.unwrap());
+    store
+        .patch_settings(SettingsPatch {
+            engine_base: Some(base.clone()),
+            acexy_base: Some(base.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let add = |name: &str, ace: &str| {
+        let store = store.clone();
+        let (name, ace) = (name.to_string(), ace.to_string());
+        async move {
+            store
+                .create_channel(ChannelCreate {
+                    name,
+                    input: Some(ace),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let prober = Prober::new(store.clone(), reqwest::Client::new(), TIMING);
+
+    // A failed sample makes the window incomplete: unknown, not dead, and the error is kept.
+    let flaky = add("flaky", FLAKY).await;
+    let r = prober.probe(&[flaky.id], true).await.unwrap();
+    assert_eq!(r[0].outcome, ProbeOutcome::Unknown, "{:?}", r[0].detail);
+    assert!(r[0].detail.as_ref().unwrap()["errors"].is_array());
+
+    // No command_url: the session cannot be stopped, so it is not measured.
+    let nocmd = add("nocmd", NOCMD).await;
+    let r = prober.probe(&[nocmd.id], true).await.unwrap();
+    assert_eq!(r[0].outcome, ProbeOutcome::Unknown);
+    assert_eq!(fake.lock().unwrap().stat_calls.get(NOCMD), None);
+
+    // Changing the source drops health measured for the old one.
+    let dead = add("dead", DEAD).await;
+    prober.probe(&[dead.id], true).await.unwrap();
+    assert!(store.get_channel(dead.id).await.unwrap().health.is_some());
+    store
+        .patch_channel(
+            dead.id,
+            api_types::ChannelPatch {
+                input: Some("http://example.org/stream".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(store.get_channel(dead.id).await.unwrap().health.is_none());
+
+    // A result for an older incarnation of the id is not recorded.
+    let ok = add("ok", OK).await;
+    let stale = lineup_server::store::ProbeIdentity {
+        channel_id: ok.id,
+        created_at: ok.created_at - chrono::Duration::seconds(1),
+        ace: OK,
+    };
+    assert!(!store.record_probe(stale, ProbeOutcome::Dead, None).await.unwrap());
+    assert!(store.get_channel(ok.id).await.unwrap().health.is_none());
+
+    // A cancelled request still stops the session it started.
+    let again = add("again", DEAD).await;
+    fake.lock().unwrap().stops.clear();
+    let _ = tokio::time::timeout(Duration::from_millis(25), prober.probe(&[again.id], true)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(fake.lock().unwrap().stops, [DEAD]);
+    assert!(
+        store.get_channel(again.id).await.unwrap().health.is_some(),
+        "and records its result"
+    );
 }

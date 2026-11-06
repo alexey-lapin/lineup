@@ -27,22 +27,39 @@ fn parse_outcome(s: &str) -> ProbeOutcome {
     }
 }
 
+/// Which channel incarnation and source a probe measured.
+pub struct ProbeIdentity<'a> {
+    pub channel_id: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// The acestream content id that was probed.
+    pub ace: &'a str,
+}
+
 impl Store {
     /// Record a probe attempt. Emits `channel.unhealthy` on `null|ok → dead`, `channel.recovered` on
-    /// `dead → ok`, and `channel.probed` otherwise. Ignored if the channel was deleted meanwhile.
+    /// `dead → ok`, and `channel.probed` otherwise. Returns false, recording nothing, if the channel
+    /// was deleted (even if its id was reused) or no longer has the probed source.
     pub async fn record_probe(
         &self,
-        channel_id: i64,
+        who: ProbeIdentity<'_>,
         outcome: ProbeOutcome,
         detail: Option<serde_json::Value>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let _guard = self.write_lock.lock().await;
+        let channel_id = who.channel_id;
         let mut tx = self.pool.begin().await?;
-        let name: Option<String> = sqlx::query_scalar("SELECT name FROM channels WHERE id=?")
+        let row = sqlx::query("SELECT name, created_at, source_kind, source_key FROM channels WHERE id=?")
             .bind(channel_id)
             .fetch_optional(&mut *tx)
             .await?;
-        let Some(name) = name else { return Ok(()) };
+        let Some(row) = row else { return Ok(false) };
+        let same = parse_ts(&row.try_get::<String, _>("created_at")?)? == who.created_at
+            && row.try_get::<String, _>("source_kind")? == "acestream"
+            && row.try_get::<String, _>("source_key")? == who.ace;
+        if !same {
+            return Ok(false);
+        }
+        let name: String = row.try_get("name")?;
         let prev: Option<String> = sqlx::query_scalar("SELECT conclusive FROM channel_health WHERE channel_id=?")
             .bind(channel_id)
             .fetch_optional(&mut *tx)
@@ -93,7 +110,7 @@ impl Store {
         };
         // Health never changes playlist or guide output, so the output version stays.
         let _ = self.events.send(event);
-        Ok(())
+        Ok(true)
     }
 }
 

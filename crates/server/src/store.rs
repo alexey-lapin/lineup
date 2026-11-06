@@ -357,6 +357,13 @@ impl Store {
             }
             return Err(e.into());
         }
+        if next.source != cur.source {
+            // Health describes the old source.
+            sqlx::query("DELETE FROM channel_health WHERE channel_id=?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         let affected: BTreeSet<String> = cur.playlists.iter().cloned().collect();
         tx.commit().await?;
         // Guide-affecting fields: the tvg-id selects upstream data; event channels get placeholders
@@ -1200,6 +1207,7 @@ mod epg;
 mod health;
 mod hooks;
 pub use epg::{FetchOutcome, IndexedChannel, PatchedSource};
+pub use health::ProbeIdentity;
 pub use hooks::{DELIVERIES_KEPT, NewDelivery};
 
 #[cfg(test)]
