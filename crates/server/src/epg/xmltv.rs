@@ -71,6 +71,85 @@ pub const MAX_XML_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// Largest single `<channel>` or `<programme>` element accepted.
 pub const MAX_ELEMENT_BYTES: usize = 1024 * 1024;
 
+/// Document context that copied fragments need to stay meaningful on their own.
+#[derive(Debug, Default)]
+struct Doc {
+    /// Internal general entities declared in the DOCTYPE; substituted as text when copying.
+    entities: HashMap<String, String>,
+    /// Namespace declarations on `<tv>`; added to each copied top-level element.
+    namespaces: Vec<(String, String)>,
+}
+
+impl Doc {
+    /// The replacement text for a custom entity reference, `None` for predefined and character
+    /// references (kept as they are), or an error for undeclared ones.
+    fn resolve(&self, name: &str) -> anyhow::Result<Option<&str>> {
+        if name.starts_with('#') || matches!(name, "amp" | "lt" | "gt" | "quot" | "apos") {
+            return Ok(None);
+        }
+        match self.entities.get(name) {
+            Some(v) => Ok(Some(v)),
+            None => anyhow::bail!("undeclared entity &{name};"),
+        }
+    }
+
+    /// Write an event of a copied fragment, making it self-contained.
+    fn write<W: Write>(&self, w: &mut Writer<W>, ev: Event<'_>, top: bool) -> anyhow::Result<()> {
+        match ev {
+            Event::GeneralRef(ref r) => match self.resolve(r)? {
+                Some(text) => w.write_event(Event::Text(quick_xml::events::BytesText::new(text)))?,
+                None => w.write_event(ev)?,
+            },
+            Event::Start(ref e) | Event::Empty(ref e) if top && !self.namespaces.is_empty() => {
+                let mut e2 = e.clone().into_owned();
+                let present: Vec<String> = e.attributes().flatten().map(|a| a.key.as_ref().to_string()).collect();
+                for (k, v) in &self.namespaces {
+                    if !present.contains(k) {
+                        e2.push_attribute((k.as_str(), v.as_str()));
+                    }
+                }
+                w.write_event(if matches!(ev, Event::Start(_)) {
+                    Event::Start(e2)
+                } else {
+                    Event::Empty(e2)
+                })?
+            }
+            ev => w.write_event(ev)?,
+        }
+        Ok(())
+    }
+}
+
+/// `<!ENTITY name "value">` declarations of a DOCTYPE's internal subset. Parameter entities and
+/// external entities are skipped (references to them are then rejected as undeclared).
+fn parse_entities(doctype: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut rest = doctype;
+    while let Some(i) = rest.find("<!ENTITY") {
+        rest = rest[i + "<!ENTITY".len()..].trim_start();
+        if rest.starts_with('%') {
+            continue;
+        }
+        let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let name = rest[..name_end].to_string();
+        rest = rest[name_end..].trim_start();
+        let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        let Some(end) = rest[1..].find(q) else { break };
+        let raw = &rest[1..1 + end];
+        rest = &rest[1 + end + 1..];
+        // The value may itself use predefined or character references.
+        let value = quick_xml::escape::unescape(raw)
+            .map(|v| v.into_owned())
+            .unwrap_or_else(|_| raw.to_string());
+        if !name.is_empty() {
+            out.entry(name).or_insert(value);
+        }
+    }
+    out
+}
+
 /// Parse `dir/raw` and write `programmes.*` and `channels.json`. `now` is unix seconds.
 ///
 /// The document must be well-formed with a single `<tv>` root that is closed before the end, so a
@@ -92,6 +171,7 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
     let mut seen_channel: HashMap<String, usize> = HashMap::new();
     let cutoff = now - KEEP_PAST_SECS;
 
+    let mut doc = Doc::default();
     // 0: before the root, 1: inside <tv>, >1: inside other elements of <tv>.
     let mut depth = 0usize;
     let mut root_done = false;
@@ -106,7 +186,11 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
             Event::Start(ref e) | Event::Empty(ref e) if depth == 0 => {
                 anyhow::ensure!(!root_done, "content after the closing </tv>");
                 anyhow::ensure!(e.name().as_ref() == "tv", "root element is <{}>, not <tv>", &**e);
-                attrs_of(e)?;
+                doc.namespaces = attrs_of(e)?
+                    .into_iter()
+                    .filter(|(k, _)| k == "xmlns" || k.starts_with("xmlns:"))
+                    .collect();
+                doc.namespaces.sort();
                 if matches!(ev, Event::Start(_)) {
                     depth = 1;
                 } else {
@@ -115,7 +199,7 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
             }
             Event::Start(ref e) if depth == 1 && e.name().as_ref() == "channel" => {
                 let start = e.clone().into_owned();
-                if let Some(ch) = read_channel(&mut reader, start)?
+                if let Some(ch) = read_channel(&mut reader, start, &doc)?
                     && !seen_channel.contains_key(&ch.id)
                 {
                     // Duplicate <channel>: the first one is kept.
@@ -126,7 +210,7 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
             Event::Start(ref e) if depth == 1 && e.name().as_ref() == "programme" => {
                 let start_ev = e.clone().into_owned();
                 let attrs = attrs_of(&start_ev)?;
-                let xml = capture(&mut reader, Event::Start(start_ev))?;
+                let xml = capture(&mut reader, Event::Start(start_ev), &doc)?;
                 if let Some((chan, start, stop)) = programme_key(&attrs)
                     && stop.unwrap_or(start) >= cutoff
                 {
@@ -142,7 +226,7 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
                     && !seen_channel.contains_key(&id)
                 {
                     seen_channel.insert(id.clone(), channels.len());
-                    let xml = capture_one(Event::Empty(start))?;
+                    let xml = capture_one(Event::Empty(start), &doc)?;
                     channels.push(ChannelEntry {
                         id,
                         display_names: vec![],
@@ -168,6 +252,10 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
             }
             Event::Text(ref t) if depth == 0 => {
                 anyhow::ensure!(t.trim().is_empty(), "text outside the <tv> element");
+            }
+            Event::DocType(ref t) if depth == 0 => doc.entities = parse_entities(t),
+            Event::GeneralRef(ref r) if depth > 0 => {
+                doc.resolve(r)?;
             }
             Event::CData(_) | Event::GeneralRef(_) if depth == 0 => {
                 anyhow::bail!("content outside the <tv> element")
@@ -367,9 +455,9 @@ pub fn parse_time(s: &str) -> Option<i64> {
 }
 
 /// Copy the element that `start` opened (through its matching end) into a byte buffer.
-fn capture<R: BufRead>(reader: &mut Reader<R>, start: Event<'static>) -> anyhow::Result<Vec<u8>> {
+fn capture<R: BufRead>(reader: &mut Reader<R>, start: Event<'static>, doc: &Doc) -> anyhow::Result<Vec<u8>> {
     let mut w = Writer::new(Vec::new());
-    w.write_event(start)?;
+    doc.write(&mut w, start, true)?;
     let mut depth = 1usize;
     let mut buf = Vec::new();
     while depth > 0 {
@@ -386,7 +474,7 @@ fn capture<R: BufRead>(reader: &mut Reader<R>, start: Event<'static>) -> anyhow:
             Event::Eof => anyhow::bail!("unexpected end of file inside an element"),
             _ => {}
         }
-        w.write_event(ev)?;
+        doc.write(&mut w, ev, false)?;
         anyhow::ensure!(
             w.get_ref().len() <= MAX_ELEMENT_BYTES,
             "element larger than {MAX_ELEMENT_BYTES} bytes"
@@ -396,9 +484,9 @@ fn capture<R: BufRead>(reader: &mut Reader<R>, start: Event<'static>) -> anyhow:
     Ok(w.into_inner())
 }
 
-fn capture_one(ev: Event<'static>) -> anyhow::Result<String> {
+fn capture_one(ev: Event<'static>, doc: &Doc) -> anyhow::Result<String> {
     let mut w = Writer::new(Vec::new());
-    w.write_event(ev)?;
+    doc.write(&mut w, ev, true)?;
     Ok(String::from_utf8(w.into_inner())?)
 }
 
@@ -406,10 +494,11 @@ fn capture_one(ev: Event<'static>) -> anyhow::Result<String> {
 fn read_channel<R: BufRead>(
     reader: &mut Reader<R>,
     start: BytesStart<'static>,
+    doc: &Doc,
 ) -> anyhow::Result<Option<ChannelEntry>> {
     let id = attrs_of(&start)?.get("id").cloned().unwrap_or_default();
     let mut w = Writer::new(Vec::new());
-    w.write_event(Event::Start(start))?;
+    doc.write(&mut w, Event::Start(start), true)?;
     let mut depth = 1usize;
     let mut buf = Vec::new();
     let mut display_names = Vec::new();
@@ -447,10 +536,16 @@ fn read_channel<R: BufRead>(
                 }
             }
             Event::GeneralRef(r) => {
+                let custom = doc.resolve(r)?;
                 if let Some(s) = text.as_mut() {
-                    s.push('&');
-                    s.push_str(r);
-                    s.push(';');
+                    match custom {
+                        Some(v) => s.push_str(&quick_xml::escape::escape(v)),
+                        None => {
+                            s.push('&');
+                            s.push_str(r);
+                            s.push(';');
+                        }
+                    }
                 }
             }
             Event::End(e) => {
@@ -469,7 +564,7 @@ fn read_channel<R: BufRead>(
             Event::Eof => anyhow::bail!("unexpected end of file inside <channel>"),
             _ => {}
         }
-        w.write_event(ev)?;
+        doc.write(&mut w, ev, false)?;
         anyhow::ensure!(
             w.get_ref().len() <= MAX_ELEMENT_BYTES,
             "element larger than {MAX_ELEMENT_BYTES} bytes"
@@ -599,6 +694,46 @@ mod tests {
         for good in ["<tv/>", "<?xml version=\"1.0\"?>\n<!-- c -->\n<tv></tv>\n"] {
             assert!(build_str(good).is_ok(), "rejected: {good:?}");
         }
+    }
+
+    #[test]
+    fn fragments_are_self_contained() {
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE tv SYSTEM "xmltv.dtd" [
+  <!ENTITY team "Cup &amp; Final">
+  <!ENTITY % param "x">
+]>
+<tv xmlns:ext="urn:example">
+  <channel id="a"><display-name>&team;</display-name></channel>
+  <programme start="20990101000000" channel="a"><title>&team; &lt;live&gt;</title><ext:rating>5</ext:rating></programme>
+</tv>"#;
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(RAW), xml).unwrap();
+        let b = build(dir.path(), now()).unwrap();
+        assert_eq!(b.channels[0].display_names, ["Cup & Final"]);
+        let ch = b.channels[0].xml.as_deref().unwrap();
+        assert!(ch.contains("<display-name>Cup &amp; Final</display-name>"), "{ch}");
+        assert!(ch.contains("xmlns:ext=\"urn:example\""), "{ch}");
+        let progs = fs::read_to_string(dir.path().join(PROGRAMMES)).unwrap();
+        assert!(progs.contains("<title>Cup &amp; Final &lt;live&gt;</title>"), "{progs}");
+        assert!(
+            progs.starts_with("<programme start=\"20990101000000\" channel=\"a\" xmlns:ext=\"urn:example\">"),
+            "{progs}"
+        );
+        // Every copied fragment parses on its own.
+        for frag in [ch, progs.trim()] {
+            let mut r = Reader::from_str(frag);
+            loop {
+                match r.read_event().unwrap() {
+                    Event::Eof => break,
+                    Event::GeneralRef(g) => assert!(Doc::default().resolve(&g).unwrap().is_none()),
+                    _ => {}
+                }
+            }
+        }
+        // Undeclared entities, and custom entities in attributes, are rejected.
+        assert!(build_str("<tv><channel id=\"a\"><display-name>&nope;</display-name></channel></tv>").is_err());
+        assert!(build_str("<!DOCTYPE tv [<!ENTITY e \"x\">]><tv><channel id=\"&e;\"/></tv>").is_err());
     }
 
     #[test]

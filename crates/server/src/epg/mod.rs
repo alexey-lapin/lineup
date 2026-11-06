@@ -175,6 +175,7 @@ impl Epg {
             let _lock = me.fetch_lock.lock().await;
             let _files = me.files_lock.write().await;
             if matches!(me.store.get_epg_source(id).await, Err(Error::NotFound(_))) {
+                me.gen_cache.lock().unwrap().retain(|(s, _), _| *s != id);
                 remove_dir(&me.source_dir(id)).await;
             }
         });
@@ -361,6 +362,10 @@ impl Epg {
         // Keep only the generation just published and the one it replaced.
         let keep = [Some(generation), src.current_gen];
         let _files = self.files_lock.write().await;
+        self.gen_cache
+            .lock()
+            .unwrap()
+            .retain(|(s, g), _| *s != src.id || keep.contains(&Some(*g)));
         for (n, d) in list_gens(&source_dir) {
             if !keep.contains(&Some(n)) {
                 remove_dir(&d).await;

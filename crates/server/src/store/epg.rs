@@ -260,7 +260,9 @@ impl Store {
         if ids.is_empty() {
             return Ok(out);
         }
-        // Bound the number of SQL variables per statement.
+        // Bound the number of SQL variables per statement; one transaction keeps every batch on the
+        // same snapshot.
+        let mut tx = self.pool.begin().await?;
         for chunk in ids.chunks(500) {
             let marks = vec!["?"; chunk.len()].join(",");
             let sql = format!(
@@ -273,7 +275,7 @@ impl Store {
             for id in chunk {
                 q = q.bind(id);
             }
-            for r in q.fetch_all(&self.pool).await? {
+            for r in q.fetch_all(&mut *tx).await? {
                 let id: String = r.try_get("xmltv_id")?;
                 out.entry(id).or_insert((r.try_get("id")?, r.try_get("current_gen")?));
             }

@@ -60,7 +60,13 @@ impl Epg {
         {
             return Ok(e.rendered.clone());
         }
-        let detail = self.store.get_playlist(slug).await?;
+        let detail = match self.store.get_playlist(slug).await {
+            Ok(d) => d,
+            Err(e) => {
+                self.xml_cache.lock().unwrap().remove(slug);
+                return Err(e);
+            }
+        };
         let channels: Vec<Channel> = detail
             .items
             .into_iter()
@@ -97,10 +103,9 @@ impl Epg {
             }
         }
         let upstream_ids: Vec<String> = order.iter().filter(|id| !by_id[*id].is_event).cloned().collect();
-        let lookup = self.store.epg_lookup(&upstream_ids).await?;
-
-        // Hold off generation cleanup while reading files.
+        // Hold off generation cleanup from before the generations are chosen until the files are read.
         let _files = self.files_lock.read().await;
+        let lookup = self.store.epg_lookup(&upstream_ids).await?;
         let mut gens: HashMap<(i64, i64), Arc<GenData>> = HashMap::new();
         let wanted: std::collections::BTreeSet<(i64, i64)> = lookup.values().copied().collect();
         for (source, generation) in wanted {
