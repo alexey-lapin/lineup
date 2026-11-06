@@ -9,6 +9,10 @@ on:
       tag:
         description: Existing tag to build, e.g. v0.1.0
         required: true
+      cli:
+        description: Also build and attach the CLI archives
+        type: boolean
+        default: false
 
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
@@ -125,8 +129,8 @@ jobs:
 
   cli:
     needs: verify
-    # A manual rebuild only redoes the image; the CLI archives are already attached.
-    if: github.event_name == 'push'
+    # A manual rebuild redoes the CLI archives only when asked to.
+    if: github.event_name == 'push' || inputs.cli
     strategy:
       matrix:
         include:
@@ -146,12 +150,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: corepack enable && pnpm -C web install --frozen-lockfile && pnpm -C web build
+      # Run pnpm inside web/ so corepack uses the version pinned in web/package.json.
+      - run: corepack enable
+      - working-directory: web
+        run: pnpm install --frozen-lockfile && pnpm build
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --locked -p lineup --target ${{ matrix.target }}
-      - run: tar -C target/${{ matrix.target }}/release -czf lineup-${{ github.ref_name }}-${{ matrix.target }}.tar.gz lineup
+      - run: tar -C target/${{ matrix.target }}/release -czf lineup-${{ env.TAG }}-${{ matrix.target }}.tar.gz lineup
       - uses: softprops/action-gh-release@v2
         with:
-          files: lineup-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          tag_name: ${{ env.TAG }}
+          files: lineup-${{ env.TAG }}-${{ matrix.target }}.tar.gz
