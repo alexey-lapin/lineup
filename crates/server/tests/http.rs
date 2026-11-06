@@ -410,3 +410,33 @@ async fn settings_changes_are_announced() {
         .unwrap();
     assert!(events.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn vk_test_needs_only_headers() {
+    // Headers of a 404 arrive, then the body breaks off: something answered, and that is enough.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf).await;
+        let _ = sock
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 100\r\nLocation: http://127.0.0.1:1/\r\n\r\nx")
+            .await;
+        drop(sock);
+    });
+    let app = app().await;
+    let (_, _, r) = call(
+        &app,
+        "POST",
+        "/api/v1/settings/test",
+        Some(json!({ "target": "vk", "base": format!("http://{addr}") })),
+    )
+    .await;
+    assert_eq!(
+        (r["ok"].clone(), r["http_status"].clone()),
+        (json!(true), json!(404)),
+        "{r}"
+    );
+}

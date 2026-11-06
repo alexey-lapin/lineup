@@ -2,7 +2,14 @@
 import { ref, watch } from 'vue'
 import { api, type SettingsTestResult, type SettingsTestTarget } from '../../api'
 
-const props = defineProps<{ label: string; help: string; target: SettingsTestTarget; placeholder: string }>()
+const props = defineProps<{
+  label: string
+  help: string
+  target: SettingsTestTarget
+  placeholder: string
+  /** Why the typed URL is not usable, if it is not. */
+  error?: string | null
+}>()
 const model = defineModel<string>({ required: true })
 
 const testing = ref(false)
@@ -36,7 +43,7 @@ async function test() {
 </script>
 
 <template>
-  <UFormField :label="label" :help="help">
+  <UFormField :label="label" :help="help" :error="error || undefined">
     <div class="flex flex-col sm:flex-row gap-2">
       <UInput
         v-model="model"
@@ -48,6 +55,7 @@ async function test() {
         :placeholder="placeholder"
         class="flex-1 min-w-0"
         size="lg"
+        :ui="{ base: 'min-h-11' }"
       />
       <UButton
         icon="i-lucide-plug-zap"
@@ -56,8 +64,8 @@ async function test() {
         size="lg"
         label="Test"
         :loading="testing"
-        :disabled="!model.trim()"
-        class="justify-center"
+        :disabled="!!error"
+        class="justify-center min-h-11"
         @click="test"
       />
     </div>

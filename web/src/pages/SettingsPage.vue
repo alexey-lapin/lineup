@@ -7,21 +7,30 @@ import { api } from '../api'
 import { useAction, useChannels } from '../composables'
 import BaseUrlField from '../components/settings/BaseUrlField.vue'
 import SettingsCard from '../components/settings/SettingsCard.vue'
-import { useSettingsSection } from '../components/settings/section'
+import { baseUrlError, useSettingsSection } from '../components/settings/section'
 
 const run = useAction()
 const toast = useToast()
 const cache = useQueryCache()
 const { data: settings, error, refetch } = useQuery({ key: ['settings'], query: () => api.settings() })
 const { data: status } = useQuery({ key: ['status'], query: () => api.status() })
-const { data: channels } = useChannels()
-const { data: sources } = useQuery({ key: ['epg-sources'], query: () => api.epgSources() })
+const { data: channels, error: channelsError, refetch: refetchChannels } = useChannels()
+const {
+  data: sources,
+  error: sourcesError,
+  refetch: refetchSources
+} = useQuery({ key: ['epg-sources'], query: () => api.epgSources() })
 
+const reload = () => refetch().then((r) => r.data)
+const hours = (v: number) => (Number.isInteger(v) && v >= 0 && v <= 168 ? null : 'Enter whole hours from 0 to 168')
 const cards = {
-  acexy: useSettingsSection(['acexy_base'], settings),
-  engine: useSettingsSection(['engine_base', 'probe_interval_hours'], settings),
-  vk: useSettingsSection(['vk_base'], settings),
-  guide: useSettingsSection(['epg_refresh_hours'], settings)
+  acexy: useSettingsSection(['acexy_base'], settings, { reload, validate: (d) => baseUrlError(d.acexy_base) }),
+  engine: useSettingsSection(['engine_base', 'probe_interval_hours'], settings, {
+    reload,
+    validate: (d) => baseUrlError(d.engine_base) ?? hours(d.probe_interval_hours)
+  }),
+  vk: useSettingsSection(['vk_base'], settings, { reload, validate: (d) => baseUrlError(d.vk_base) }),
+  guide: useSettingsSection(['epg_refresh_hours'], settings, { reload, validate: (d) => hours(d.epg_refresh_hours) })
 }
 const sections = Object.values(cards)
 
@@ -79,16 +88,24 @@ function saved() {
 
 const count = (kind: string) => (channels.value ?? []).filter((c) => c.source.kind === kind).length
 const channelsLine = (kind: string) => {
+  if (channelsError.value && !channels.value) return 'Channel count unavailable.'
   if (!channels.value) return undefined
   const n = count(kind)
   return n === 1 ? 'Used by 1 channel.' : `Used by ${n} channels.`
 }
 const guideSummary = computed(() => {
-  if (!sources.value) return 'Loading guide sources…'
-  const n = sources.value.length
-  if (!n) return 'No guide sources yet.'
-  const failed = sources.value.filter((s) => s.enabled && s.last_status === 'error').length
-  return `${n} source${n > 1 ? 's' : ''}${failed ? `, ${failed} failing` : ', all fine'}.`
+  if (!sources.value) return sourcesError.value ? 'Could not load guide sources.' : 'Loading guide sources…'
+  const list = sources.value
+  if (!list.length) return 'No guide sources yet.'
+  const enabled = list.filter((s) => s.enabled)
+  const parts = [
+    [enabled.filter((s) => s.last_status === 'ok' || s.last_status === 'not_modified').length, 'working'],
+    [enabled.filter((s) => s.last_status === 'error').length, 'failing'],
+    [enabled.filter((s) => !s.last_status).length, 'not fetched yet'],
+    [list.length - enabled.length, 'disabled']
+  ] as const
+  const detail = parts.filter(([n]) => n > 0).map(([n, what]) => `${n} ${what}`)
+  return `${list.length} source${list.length > 1 ? 's' : ''}: ${detail.join(', ')}.`
 })
 
 // ---------------------------------------------------------------- actions on saved settings
@@ -151,6 +168,14 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
         <section class="flex flex-col gap-4">
           <div>
             <h2 class="text-lg font-semibold">Sources</h2>
+            <UAlert
+              v-if="channelsError && !channels"
+              class="my-2"
+              color="warning"
+              variant="subtle"
+              title="Could not load channels, so channel counts are missing"
+              :actions="[{ label: 'Retry', onClick: () => refetchChannels() }]"
+            />
             <p class="text-sm text-muted">
               Playlists send Jellyfin and your players to acexy and the VK proxy, so use addresses they can reach,
               not localhost. Only the lineup server talks to the Acestream engine.
@@ -173,6 +198,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
               :help="c.help"
               :target="c.target"
               :placeholder="c.placeholder"
+              :error="baseUrlError(draftOf(c.section, c.field))"
               @update:model-value="(v: string) => setDraft(c.section, c.field, v)"
             />
             <UFormField
@@ -196,6 +222,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
                 color="neutral"
                 variant="subtle"
                 size="lg"
+                class="min-h-11"
                 label="Check all now"
                 :loading="probing"
                 :disabled="cards.engine.dirty || loading"
@@ -208,6 +235,13 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
 
         <section class="flex flex-col gap-4">
           <h2 class="text-lg font-semibold">Guide</h2>
+          <UAlert
+            v-if="sourcesError && !sources"
+            color="warning"
+            variant="subtle"
+            title="Could not load guide sources"
+            :actions="[{ label: 'Retry', onClick: () => refetchSources() }]"
+          />
           <SettingsCard title="Guide data" icon="i-lucide-calendar-range" :description="guideSummary" :section="cards.guide" :loading="loading">
             <UFormField
               label="Refresh every (hours)"
@@ -222,12 +256,14 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
                 color="neutral"
                 variant="subtle"
                 size="lg"
+                class="min-h-11"
                 label="Fetch all now"
                 :loading="fetching"
                 :disabled="cards.guide.dirty || loading || !sources?.length"
                 @click="fetchAll"
               />
-              <UButton color="neutral" variant="ghost" size="lg" label="Manage sources" trailing-icon="i-lucide-arrow-right" to="/epg" />
+              <UButton color="neutral" variant="ghost" size="lg" class="min-h-11"
+                label="Manage sources" trailing-icon="i-lucide-arrow-right" to="/epg" />
             </template>
           </SettingsCard>
         </section>

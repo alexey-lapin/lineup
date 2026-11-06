@@ -7,7 +7,8 @@ const api = vi.hoisted(() => ({ patchSettings: vi.fn(), testSetting: vi.fn() }))
 vi.mock('../api', async (orig) => ({ ...(await orig<typeof import('../api')>()), api }))
 
 import { ApiError, type Settings } from '../api'
-import { useSettingsSection } from '../components/settings/section'
+import { baseUrlError, useSettingsSection } from '../components/settings/section'
+import SettingsCard from '../components/settings/SettingsCard.vue'
 import BaseUrlField from '../components/settings/BaseUrlField.vue'
 
 const base: Settings = {
@@ -77,6 +78,57 @@ describe('useSettingsSection', () => {
     expect(vk.error).toContain('must be an http(s) URL')
     expect(vk.draft.vk_base).toBe('ftp://x')
     expect(vk.dirty).toBe(true)
+  })
+})
+
+describe('saving with newer server changes', () => {
+  it('shows a newer value seen during the save instead of the older response, and says so', async () => {
+    const settings = ref<Settings | undefined>({ ...base })
+    const server = { current: { ...base } }
+    const vk = useSettingsSection(['vk_base'], settings, { reload: async () => ({ ...server.current }) })
+    vk.draft.vk_base = 'http://mine:8099'
+    const pending = deferred<Settings>()
+    api.patchSettings.mockReturnValueOnce(pending.promise)
+    const saving = vk.save()
+    // Our write commits, then another client's, before our response arrives.
+    server.current = { ...base, vk_base: 'http://newer:8099' }
+    settings.value = { ...server.current }
+    await nextTick()
+    pending.resolve({ ...base, vk_base: 'http://mine:8099' })
+    expect(await saving).toBe(true)
+    expect(vk.draft.vk_base).toBe('http://newer:8099')
+    expect([vk.dirty, vk.conflict]).toEqual([false, true])
+  })
+
+  it('does not save an invalid draft', async () => {
+    const settings = ref<Settings | undefined>({ ...base })
+    const vk = useSettingsSection(['vk_base'], settings, { validate: (d) => baseUrlError(d.vk_base) })
+    vk.draft.vk_base = 'http://x/?a=1'
+    expect(vk.invalid).toBe('Must not contain a query or fragment')
+    expect(await vk.save()).toBe(false)
+    expect(api.patchSettings).not.toHaveBeenCalled()
+  })
+
+  it('disables Reset while a save is pending', async () => {
+    const section = { dirty: true, invalid: null, pending: true, conflict: false, error: '', reset: vi.fn(), save: vi.fn() }
+    const UButton = { props: ['label', 'disabled'], template: '<button :disabled="disabled">{{ label }}</button>' }
+    const w = mount(SettingsCard, {
+      props: { title: 't', icon: 'i', section },
+      global: { stubs: { UButton, UCard: { template: '<div><slot /></div>' } } }
+    })
+    const reset = w.findAll('button').find((b) => b.text() === 'Reset')
+    expect(reset?.attributes('disabled')).toBeDefined()
+  })
+})
+
+describe('baseUrlError', () => {
+  it('mirrors the server rules', () => {
+    expect(baseUrlError('http://media-host:8080')).toBeNull()
+    expect(baseUrlError('https://h/prefix/')).toBeNull()
+    expect(baseUrlError('')).toBe('Required')
+    expect(baseUrlError('ftp://h')).toMatch(/http/)
+    expect(baseUrlError('http://h#x')).toMatch(/query or fragment/)
+    expect(baseUrlError('nope')).toBe('Not a valid URL')
   })
 })
 

@@ -14,12 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// Answers are small; anything larger is cut off here.
 const MAX_BODY: usize = 64 * 1024;
 
-pub async fn test(
-    store: &Store,
-    client: &reqwest::Client,
-    target: SettingsTestTarget,
-    base: Option<&str>,
-) -> Result<SettingsTestResult> {
+pub async fn test(store: &Store, target: SettingsTestTarget, base: Option<&str>) -> Result<SettingsTestResult> {
     let (field, saved) = {
         let s = store.settings().await?;
         match target {
@@ -43,7 +38,9 @@ pub async fn test(
         version: None,
         elapsed_ms: 0,
     };
-    match fetch(client, &url).await {
+    // Body only where it is judged: the VK check is complete once response headers arrive.
+    let read_body = !matches!(target, SettingsTestTarget::Vk);
+    match fetch(&url, read_body).await {
         Err(e) => result.detail = format!("no answer: {e}"),
         Ok((status, body)) => {
             result.http_status = Some(status);
@@ -104,12 +101,20 @@ fn text(v: &Value) -> String {
     v.as_str().map_or_else(|| v.to_string(), str::to_string)
 }
 
-/// GET with a deadline, reading at most `MAX_BODY` bytes.
-async fn fetch(client: &reqwest::Client, url: &str) -> std::result::Result<(u16, Vec<u8>), String> {
+/// GET with a deadline, not following redirects (the answer of the address itself counts), reading
+/// at most `MAX_BODY` bytes of the body when asked to.
+async fn fetch(url: &str, read_body: bool) -> std::result::Result<(u16, Vec<u8>), String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
     let work = async {
         let mut res = client.get(url).send().await.map_err(|e| e.to_string())?;
         let status = res.status().as_u16();
         let mut body = Vec::new();
+        if !read_body {
+            return Ok((status, body));
+        }
         while let Some(chunk) = res.chunk().await.map_err(|e| e.to_string())? {
             let room = MAX_BODY - body.len();
             body.extend_from_slice(&chunk[..chunk.len().min(room)]);

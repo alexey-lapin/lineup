@@ -435,7 +435,7 @@ async fn test_settings(
     Body(req): Body<SettingsTestRequest>,
 ) -> ApiResult<Json<SettingsTestResult>> {
     Ok(Json(
-        crate::settings_test::test(&s.store, s.epg.client(), req.target, req.base.as_deref()).await?,
+        crate::settings_test::test(&s.store, req.target, req.base.as_deref()).await?,
     ))
 }
 

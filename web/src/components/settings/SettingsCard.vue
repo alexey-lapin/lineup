@@ -27,8 +27,12 @@ const emit = defineEmits<{ saved: [] }>()
       color="warning"
       variant="subtle"
       icon="i-lucide-refresh-ccw"
-      title="Changed on the server while you were editing"
-      description="Reset to see the current values, or save to keep yours."
+      title="Changed on the server"
+      :description="
+        section.dirty
+          ? 'Someone changed this while you were editing. Reset to see the current values, or save to keep yours.'
+          : 'Someone changed this after your save; these are the current values.'
+      "
     />
     <UAlert v-if="section.error" color="error" variant="subtle" icon="i-lucide-circle-x" :title="section.error" />
 
@@ -42,14 +46,16 @@ const emit = defineEmits<{ saved: [] }>()
           variant="ghost"
           label="Reset"
           size="lg"
-          :disabled="!section.dirty && !section.conflict"
+          class="min-h-11"
+          :disabled="section.pending || (!section.dirty && !section.conflict)"
           @click="section.reset()"
         />
         <UButton
           label="Save"
           size="lg"
+          class="min-h-11"
           :loading="section.pending"
-          :disabled="!section.dirty"
+          :disabled="!section.dirty || !!section.invalid"
           @click="section.save().then((ok) => ok && emit('saved'))"
         />
       </div>
