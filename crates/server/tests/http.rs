@@ -400,15 +400,24 @@ async fn settings_changes_are_announced() {
     assert_eq!(
         events.try_recv().unwrap(),
         lineup_server::Event::SettingsChanged {
-            keys: vec!["engine_base".into(), "probe_interval_hours".into()]
+            keys: vec!["engine_base".into(), "probe_interval_hours".into()],
+            revision: 1
         }
     );
-    // Same values again: nothing.
-    store
+    assert_eq!(store.settings().await.unwrap().revision, 1);
+    // Same values again: nothing, and the revision stays.
+    let same = store
         .patch_settings(patch(json!({ "engine_base": "http://e:6878/" })))
         .await
         .unwrap();
     assert!(events.try_recv().is_err());
+    assert_eq!(same.revision, 1);
+    // The revision is read-only: a client cannot set it.
+    let s = store
+        .patch_settings(patch(json!({ "vk_base": "http://v:8099", "revision": 99 })))
+        .await
+        .unwrap();
+    assert_eq!(s.revision, 2);
 }
 
 #[tokio::test]

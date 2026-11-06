@@ -21,17 +21,14 @@ const {
   refetch: refetchSources
 } = useQuery({ key: ['epg-sources'], query: () => api.epgSources() })
 
-/** A fresh read, or undefined if it failed (refetch then still resolves, with the old cached data). */
-const reload = () => refetch().then((r) => (r.error || r.status !== 'success' ? undefined : r.data))
 const hours = (v: number) => (Number.isInteger(v) && v >= 0 && v <= 168 ? null : 'Enter whole hours from 0 to 168')
 const cards = {
-  acexy: useSettingsSection(['acexy_base'], settings, { reload, validate: (d) => baseUrlError(d.acexy_base) }),
+  acexy: useSettingsSection(['acexy_base'], settings, { validate: (d) => baseUrlError(d.acexy_base) }),
   engine: useSettingsSection(['engine_base', 'probe_interval_hours'], settings, {
-    reload,
     validate: (d) => baseUrlError(d.engine_base) ?? hours(d.probe_interval_hours)
   }),
-  vk: useSettingsSection(['vk_base'], settings, { reload, validate: (d) => baseUrlError(d.vk_base) }),
-  guide: useSettingsSection(['epg_refresh_hours'], settings, { reload, validate: (d) => hours(d.epg_refresh_hours) })
+  vk: useSettingsSection(['vk_base'], settings, { validate: (d) => baseUrlError(d.vk_base) }),
+  guide: useSettingsSection(['epg_refresh_hours'], settings, { validate: (d) => hours(d.epg_refresh_hours) })
 }
 const sections = Object.values(cards)
 

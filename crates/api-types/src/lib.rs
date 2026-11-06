@@ -288,6 +288,10 @@ pub struct Settings {
     /// Hours between scheduled health probes of all acestream channels (the first runs 10 minutes
     /// after start); 0, the default, turns them off.
     pub probe_interval_hours: u32,
+    /// Increases with every change; of two copies of the settings, the higher revision is newer.
+    /// Read-only.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

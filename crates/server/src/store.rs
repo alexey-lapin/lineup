@@ -49,6 +49,7 @@ pub enum Event {
     /// Settings changed (live UI updates only; `keys` are the settings whose values changed).
     SettingsChanged {
         keys: Vec<String>,
+        revision: u64,
     },
 }
 
@@ -78,7 +79,7 @@ impl Event {
                 serde_json::json!({ "channel_id": channel_id, "name": name })
             }
             Event::ChannelProbed { channel_id } => serde_json::json!({ "channel_id": channel_id }),
-            Event::SettingsChanged { keys } => serde_json::json!({ "keys": keys }),
+            Event::SettingsChanged { keys, revision } => serde_json::json!({ "keys": keys, "revision": revision }),
         }
     }
 }
@@ -185,18 +186,6 @@ impl Store {
             }
             new.probe_interval_hours = v;
         }
-        save_settings(&mut tx, &new).await?;
-
-        let mut affected = BTreeSet::new();
-        if new.acexy_base != old.acexy_base {
-            affected.extend(slugs_with_kind(&mut tx, SourceKind::Acestream).await?);
-        }
-        if new.vk_base != old.vk_base {
-            affected.extend(slugs_with_kind(&mut tx, SourceKind::Vk).await?);
-        }
-        tx.commit().await?;
-
-        self.outputs_changed_locked(affected);
         let mut keys = Vec::new();
         for (k, changed) in [
             ("acexy_base", new.acexy_base != old.acexy_base),
@@ -212,10 +201,27 @@ impl Store {
                 keys.push(k.to_string());
             }
         }
-        if !keys.is_empty() {
-            // For open UIs only: outputs are covered by playlist.changed, and hooks cannot subscribe.
-            let _ = self.events.send(Event::SettingsChanged { keys });
+        if keys.is_empty() {
+            return Ok(old);
         }
+        new.revision = old.revision + 1;
+        save_settings(&mut tx, &new).await?;
+
+        let mut affected = BTreeSet::new();
+        if new.acexy_base != old.acexy_base {
+            affected.extend(slugs_with_kind(&mut tx, SourceKind::Acestream).await?);
+        }
+        if new.vk_base != old.vk_base {
+            affected.extend(slugs_with_kind(&mut tx, SourceKind::Vk).await?);
+        }
+        tx.commit().await?;
+
+        self.outputs_changed_locked(affected);
+        // For open UIs only: outputs are covered by playlist.changed, and hooks cannot subscribe.
+        let _ = self.events.send(Event::SettingsChanged {
+            keys,
+            revision: new.revision,
+        });
         Ok(new)
     }
 
@@ -917,6 +923,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
         vk_base: DEFAULT_VK.into(),
         epg_refresh_hours: DEFAULT_EPG_REFRESH_HOURS,
         probe_interval_hours: 0,
+        revision: 0,
     };
     for r in rows {
         let key: String = r.try_get("key")?;
@@ -927,6 +934,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
             "vk_base" => s.vk_base = serde_json::from_str(&value)?,
             "epg_refresh_hours" => s.epg_refresh_hours = serde_json::from_str(&value)?,
             "probe_interval_hours" => s.probe_interval_hours = serde_json::from_str(&value)?,
+            "revision" => s.revision = serde_json::from_str(&value)?,
             _ => {}
         }
     }
@@ -940,6 +948,7 @@ async fn save_settings(conn: &mut SqliteConnection, s: &Settings) -> Result<()> 
         ("vk_base", serde_json::to_string(&s.vk_base)?),
         ("epg_refresh_hours", serde_json::to_string(&s.epg_refresh_hours)?),
         ("probe_interval_hours", serde_json::to_string(&s.probe_interval_hours)?),
+        ("revision", serde_json::to_string(&s.revision)?),
     ];
     for (k, v) in pairs {
         sqlx::query(

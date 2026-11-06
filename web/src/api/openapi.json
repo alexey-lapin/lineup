@@ -2632,6 +2632,12 @@
             "description": "Hours between scheduled health probes of all acestream channels (the first runs 10 minutes\nafter start); 0, the default, turns them off.",
             "minimum": 0
           },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Increases with every change; of two copies of the settings, the higher revision is newer.\nRead-only.",
+            "minimum": 0
+          },
           "vk_base": {
             "type": "string"
           }

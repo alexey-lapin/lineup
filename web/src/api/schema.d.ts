@@ -776,6 +776,12 @@ export interface components {
              *     after start); 0, the default, turns them off.
              */
             probe_interval_hours: number;
+            /**
+             * Format: int64
+             * @description Increases with every change; of two copies of the settings, the higher revision is newer.
+             *     Read-only.
+             */
+            revision?: number;
             vk_base: string;
         };
         SettingsPatch: {
