@@ -139,7 +139,33 @@ pub fn router_for(app: App) -> Router {
         .route("/p/{file}", get(playlist_m3u))
         .route("/p/{slug}/epg.xml", get(playlist_epg))
         .fallback(web::static_handler)
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(app)
+}
+
+/// Changes and playlist/guide downloads at info (with the client, when known); other reads at
+/// debug. The event stream is long-lived and only logged at debug when it ends.
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let client = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip().to_string())
+        .unwrap_or_else(|| "-".into());
+    let started = std::time::Instant::now();
+    let res = next.run(req).await;
+    let status = res.status().as_u16();
+    let ms = started.elapsed().as_millis();
+    let notable = method != axum::http::Method::GET && method != axum::http::Method::HEAD
+        || path.starts_with("/p/")
+        || status >= 500;
+    if notable {
+        tracing::info!("{client} {method} {path} {status} {ms} ms");
+    } else {
+        tracing::debug!("{client} {method} {path} {status} {ms} ms");
+    }
+    res
 }
 
 // -------------------------------------------------------------------- plumbing

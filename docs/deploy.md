@@ -115,6 +115,18 @@ lineup ls --health dead
 
 Scheduled checks are off by default; set `probe_interval_hours` (Settings, or `lineup settings set probe_interval_hours 6`) to turn them on. Hooks can subscribe to `channel.unhealthy` and `channel.recovered`. A check measures the swarm, not whether playback works.
 
+## Logs
+
+`docker logs lineup` shows, at the default `LINEUP_LOG=info`:
+
+- every change event (`event playlist.changed {"slugs":["jellyfin"]}`, `epg.updated`, …);
+- each guide fetch per source (updated with channel and programme counts, not modified, or the error), and a summary of each scheduled run;
+- each hook delivery, successful or not;
+- health-check runs and each channel's result;
+- every change made through the API, and every playlist or guide download (`192.168.1.50 GET /p/jellyfin.m3u 200 3 ms`), so you can see when Jellyfin re-reads them.
+
+`LINEUP_LOG=debug` adds every other request.
+
 ## Backups
 
 ```sh

@@ -34,17 +34,34 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     app.epg.spawn_scheduler();
     app.hooks.spawn();
     app.prober.spawn_scheduler();
+    spawn_event_log(app.store.subscribe());
     let handle = app.clone();
     let router = http::router_for(app);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     tracing::info!("lineup listening on http://{}", listener.local_addr()?);
-    axum::serve(listener, router)
+    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             shutdown().await;
             handle.begin_shutdown();
         })
         .await?;
     Ok(())
+}
+
+/// Log every change event (the ones the UI and hooks see). Per-probe events are logged by the
+/// prober itself, so they only show at debug level here.
+fn spawn_event_log(mut rx: tokio::sync::broadcast::Receiver<Event>) {
+    use tokio::sync::broadcast::error::RecvError;
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(e @ Event::ChannelProbed { .. }) => tracing::debug!("event {} {}", e.kind(), e.payload()),
+                Ok(e) => tracing::info!("event {} {}", e.kind(), e.payload()),
+                Err(RecvError::Lagged(n)) => tracing::warn!("event log missed {n} events"),
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 async fn shutdown() {

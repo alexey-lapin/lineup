@@ -202,11 +202,17 @@ impl Epg {
                     });
                 if due {
                     last_run = Some(SystemTime::now());
+                    tracing::info!("scheduled guide fetch starting (every {hours} h)");
                     match me.fetch(&[]).await {
                         Ok(results) => {
-                            for r in results.iter().filter(|r| r.status == EpgFetchStatus::Error) {
-                                tracing::warn!("EPG source {}: {}", r.source_id, r.error.as_deref().unwrap_or("?"));
-                            }
+                            let n = |st: EpgFetchStatus| results.iter().filter(|r| r.status == st).count();
+                            tracing::info!(
+                                "scheduled guide fetch done: {} updated, {} not modified, {} failed, {} disabled",
+                                n(EpgFetchStatus::Updated),
+                                n(EpgFetchStatus::NotModified),
+                                n(EpgFetchStatus::Error),
+                                n(EpgFetchStatus::Disabled),
+                            );
                         }
                         Err(e) => tracing::warn!("scheduled EPG fetch: {e}"),
                     }
@@ -228,8 +234,13 @@ impl Epg {
             result.status = EpgFetchStatus::Disabled;
             return result;
         }
-        match self.download_and_publish(src).await {
+        tracing::info!("guide source {} ({}): fetching {}", src.id, src.name, src.url);
+        let started = std::time::Instant::now();
+        let fetched = self.download_and_publish(src).await;
+        let secs = started.elapsed().as_secs_f32();
+        match fetched {
             Ok(Fetched::NotModified) => {
+                tracing::info!("guide source {} ({}): not modified ({secs:.1} s)", src.id, src.name);
                 result.status = EpgFetchStatus::NotModified;
                 if let Err(e) = self
                     .store
@@ -240,6 +251,11 @@ impl Epg {
                 }
             }
             Ok(Fetched::Published { channels, programmes }) => {
+                tracing::info!(
+                    "guide source {} ({}): updated, {channels} channels, {programmes} programmes ({secs:.1} s)",
+                    src.id,
+                    src.name
+                );
                 result.status = EpgFetchStatus::Updated;
                 result.channels = Some(channels as i64);
                 result.programmes = Some(programmes as i64);
@@ -247,6 +263,7 @@ impl Epg {
             Ok(Fetched::Stale) => {
                 // The source was deleted or its URL changed during the download; nothing is
                 // recorded on the row, which now describes something else.
+                tracing::info!("guide source {}: changed during the fetch; result discarded", src.id);
                 result.error = Some("the source changed during the fetch; result discarded".into());
             }
             Err(e) => {

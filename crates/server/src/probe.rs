@@ -185,6 +185,11 @@ impl Prober {
         let _lock = self.run_lock.lock().await;
         let mut results = Vec::new();
         let mut stopped: Option<String> = None;
+        tracing::info!(
+            "probe run starting: {} channel(s){}",
+            targets.len(),
+            if force { ", forced" } else { "" }
+        );
         for t in targets {
             let not_recorded = |reason: &str| ProbeResult {
                 channel_id: t.channel_id,
@@ -208,6 +213,18 @@ impl Prober {
                 }
             }
         }
+        let n = |o: ProbeOutcome| results.iter().filter(|r| r.outcome == o).count();
+        tracing::info!(
+            "probe run done: {} ok, {} dead, {} unknown, {} skipped{}",
+            n(ProbeOutcome::Ok),
+            n(ProbeOutcome::Dead),
+            n(ProbeOutcome::Unknown),
+            n(ProbeOutcome::Skipped),
+            stopped
+                .as_deref()
+                .map(|w| format!(" (stopped: {w})"))
+                .unwrap_or_default()
+        );
         (results, stopped.is_some())
     }
 
@@ -241,6 +258,7 @@ impl Prober {
             created_at: t.created_at,
             ace: &t.ace,
         };
+        tracing::info!("probe of channel {} ({}): {outcome:?} {detail}", t.channel_id, t.ace);
         let mut detail = detail;
         match self.store.record_probe(identity, outcome, Some(detail.clone())).await {
             Ok(true) => {}

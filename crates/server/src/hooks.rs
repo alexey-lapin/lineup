@@ -267,9 +267,21 @@ impl Hooks {
         for attempt in 1..=(self.timing.backoff.len() as u32 + 1) {
             let a = self.send(hook, task_id, body).await;
             let ok = a.ok;
-            if !ok {
+            let what = if types.is_empty() {
+                format!("{trigger:?}").to_lowercase()
+            } else {
+                types.join(", ")
+            };
+            if ok {
+                tracing::info!(
+                    "hook {} ({}): delivered {what} (HTTP {}, attempt {attempt})",
+                    hook.id,
+                    hook.name,
+                    a.http_code.unwrap_or(0)
+                );
+            } else {
                 tracing::warn!(
-                    "hook {} ({}) attempt {attempt}: {}",
+                    "hook {} ({}) attempt {attempt} for {what}: {}",
                     hook.id,
                     hook.name,
                     a.error.as_deref().unwrap_or("?")
@@ -279,8 +291,9 @@ impl Hooks {
             if ok {
                 return;
             }
-            if let Some(wait) = self.timing.backoff.get(attempt as usize - 1) {
-                tokio::time::sleep(*wait).await;
+            match self.timing.backoff.get(attempt as usize - 1) {
+                Some(wait) => tokio::time::sleep(*wait).await,
+                None => tracing::warn!("hook {} ({}): giving up on {what}", hook.id, hook.name),
             }
         }
     }
