@@ -105,7 +105,7 @@ impl Prober {
                 _ => return Err(invalid(format!("channel {} is not an acestream channel", c.id))),
             }
         }
-        Ok(self.run(targets, force).await.0)
+        Ok(self.run_owned(targets, force).await.0)
     }
 
     /// All enabled acestream channels. Returns whether the guard stopped the run early.
@@ -129,7 +129,20 @@ impl Prober {
                 _ => None,
             })
             .collect();
-        Ok(self.run(targets, force).await)
+        Ok(self.run_owned(targets, force).await)
+    }
+
+    /// Run in a task of its own: once started, a run finishes (stopping its sessions and recording
+    /// results) and keeps holding the run lock even if the caller goes away, so runs never overlap.
+    async fn run_owned(self: &Arc<Self>, targets: Vec<Target>, force: bool) -> (Vec<ProbeResult>, bool) {
+        let me = self.clone();
+        match tokio::spawn(async move { me.run(targets, force).await }).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("probe run failed: {e}");
+                (vec![], true)
+            }
+        }
     }
 
     pub fn spawn_all(self: &Arc<Self>, force: bool) {
@@ -187,18 +200,11 @@ impl Prober {
                 results.push(not_recorded("the channel or its source changed"));
                 continue;
             }
-            // The attempt runs in its own task so a started session is always stopped and its result
-            // recorded, even if this request is cancelled.
-            let me = self.clone();
-            let task = tokio::spawn(async move { me.attempt(t, force).await });
-            match task.await {
-                Ok(Attempt::Done(r)) => results.push(r),
-                Ok(Attempt::Stop(r, why)) => {
+            match self.attempt(t, force).await {
+                Attempt::Done(r) => results.push(r),
+                Attempt::Stop(r, why) => {
                     results.push(r);
                     stopped = Some(why);
-                }
-                Err(e) => {
-                    stopped = Some(format!("probe task failed: {e}"));
                 }
             }
         }
@@ -337,6 +343,8 @@ impl Prober {
 
         let deadline = tokio::time::Instant::now() + self.timing.give_up_after;
         let mut samples = 0u32;
+        // Every sample so far showed prebuffering with zero peers.
+        let mut all_prebuf = true;
         let mut failures: Vec<String> = Vec::new();
         let mut last: Value = Value::Null;
         let mut healthy = false;
@@ -346,6 +354,9 @@ impl Prober {
                     samples += 1;
                     let peers = s.get("peers").and_then(Value::as_u64).unwrap_or(0);
                     let downloading = s.get("status").and_then(Value::as_str) == Some("dl");
+                    let prebuf_zero = s.get("status").and_then(Value::as_str) == Some("prebuf")
+                        && s.get("peers").and_then(Value::as_u64) == Some(0);
+                    all_prebuf &= prebuf_zero;
                     last = s;
                     if peers > 0 || downloading {
                         healthy = true;
@@ -365,11 +376,7 @@ impl Prober {
         } else {
             // Dead only if every sample came back and showed prebuffering with no peers; any failed
             // or unexpected sample leaves the window incomplete.
-            let all_prebuf = samples > 0
-                && failures.is_empty()
-                && last.get("status").and_then(Value::as_str) == Some("prebuf")
-                && last.get("peers").and_then(Value::as_u64) == Some(0);
-            if all_prebuf {
+            if samples > 0 && failures.is_empty() && all_prebuf {
                 ProbeOutcome::Dead
             } else {
                 ProbeOutcome::Unknown

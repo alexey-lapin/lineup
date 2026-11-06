@@ -19,6 +19,8 @@ const WATCHED: &str = "3333333333333333333333333333333333333333";
 const BROKEN: &str = "4444444444444444444444444444444444444444";
 /// The first stat request fails, later ones report prebuffering.
 const FLAKY: &str = "5555555555555555555555555555555555555555";
+/// The first stat sample is neither healthy nor prebuffering; later ones prebuffer.
+const WOBBLY: &str = "7777777777777777777777777777777777777777";
 /// The engine returns no command_url.
 const NOCMD: &str = "6666666666666666666666666666666666666666";
 
@@ -31,6 +33,9 @@ struct Fake {
     watched: Option<Vec<String>>,
     global_streams: u64,
     stat_calls: HashMap<String, u32>,
+    /// Sessions started and not yet stopped, and the most seen at once.
+    open: i32,
+    max_open: i32,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -42,7 +47,11 @@ async fn getstream(State(f): State<Shared>, Query(q): Query<HashMap<String, Stri
     if id == BROKEN {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    let _ = f;
+    if id != NOCMD {
+        let mut f = f.lock().unwrap();
+        f.open += 1;
+        f.max_open = f.max_open.max(f.open);
+    }
     if id == NOCMD {
         return axum::Json(json!({
             "response": { "stat_url": format!("http://127.0.0.1:1/ace/stat/{id}/s") },
@@ -71,6 +80,9 @@ async fn stat(State(f): State<Shared>, Path(id): Path<String>) -> axum::response
     if id == FLAKY && n == 1 {
         return StatusCode::BAD_GATEWAY.into_response();
     }
+    if id == WOBBLY && n == 1 {
+        return axum::Json(json!({ "response": { "status": "check", "peers": 0 }, "error": null })).into_response();
+    }
     let (status, peers) = f.swarm.get(&id).cloned().unwrap_or(("prebuf".into(), 0));
     axum::Json(json!({ "response": { "status": status, "peers": peers }, "error": null })).into_response()
 }
@@ -81,7 +93,9 @@ async fn cmd(
     Query(q): Query<HashMap<String, String>>,
 ) -> axum::response::Response {
     assert_eq!(q["method"], "stop");
-    f.lock().unwrap().stops.push(id);
+    let mut f = f.lock().unwrap();
+    f.stops.push(id);
+    f.open -= 1;
     axum::Json(json!({ "response": "ok", "error": null })).into_response()
 }
 
@@ -301,6 +315,11 @@ async fn probes_are_bound_to_their_channel_and_session() {
     assert!(!store.record_probe(stale, ProbeOutcome::Dead, None).await.unwrap());
     assert!(store.get_channel(ok.id).await.unwrap().health.is_none());
 
+    // One unexpected sample is enough to make the window inconclusive.
+    let wobbly = add("wobbly", WOBBLY).await;
+    let r = prober.probe(&[wobbly.id], true).await.unwrap();
+    assert_eq!(r[0].outcome, ProbeOutcome::Unknown, "{:?}", r[0].detail);
+
     // A cancelled request still stops the session it started.
     let again = add("again", DEAD).await;
     fake.lock().unwrap().stops.clear();
@@ -311,4 +330,10 @@ async fn probes_are_bound_to_their_channel_and_session() {
         store.get_channel(again.id).await.unwrap().health.is_some(),
         "and records its result"
     );
+
+    // A run started after a cancelled one waits for it: sessions never overlap.
+    fake.lock().unwrap().max_open = 0;
+    let _ = tokio::time::timeout(Duration::from_millis(25), prober.probe(&[again.id], true)).await;
+    prober.probe(&[ok.id, wobbly.id], true).await.unwrap();
+    assert_eq!(fake.lock().unwrap().max_open, 1);
 }
