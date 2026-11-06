@@ -433,6 +433,123 @@ pub struct EpgChannel {
     pub score: Option<f64>,
 }
 
+/// Event types a hook can subscribe to.
+pub const EVENT_TYPES: &[&str] = &[
+    "playlist.changed",
+    "epg.updated",
+    "channel.unhealthy",
+    "channel.recovered",
+];
+
+/// Shown instead of a stored secret. Sending it back unchanged keeps the secret.
+pub const SECRET_MASK: &str = "********";
+
+/// What a hook calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum HookConfig {
+    /// Runs Jellyfin's "Refresh Guide" scheduled task.
+    Jellyfin {
+        /// e.g. `http://jellyfin:8096`
+        base_url: String,
+        /// API key (Dashboard → API Keys). Write-only: responses show a mask.
+        api_key: String,
+        /// Scheduled task id; found by its key `RefreshGuide` when empty.
+        #[serde(default)]
+        task_id: Option<String>,
+        /// A second refresh this many minutes after the last delivery, once Jellyfin's cached
+        /// guide download has expired; 0 turns it off.
+        #[serde(default = "default_followup_minutes")]
+        followup_minutes: u32,
+    },
+    /// Sends the event envelope as JSON.
+    Webhook {
+        #[serde(default = "default_method")]
+        method: String,
+        url: String,
+        /// Extra request headers. Values are write-only: responses show a mask.
+        #[serde(default)]
+        headers: std::collections::BTreeMap<String, String>,
+    },
+}
+
+fn default_followup_minutes() -> u32 {
+    65
+}
+
+fn default_method() -> String {
+    "POST".into()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Hook {
+    pub id: i64,
+    pub name: String,
+    pub config: HookConfig,
+    /// Event types that trigger it.
+    pub events: Vec<String>,
+    /// Events are collected until none has arrived for this long, then delivered together.
+    pub debounce_secs: u32,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct HookCreate {
+    pub name: String,
+    pub config: HookConfig,
+    /// Defaults: `playlist.changed` and `epg.updated` for Jellyfin, every event for webhooks.
+    #[serde(default)]
+    pub events: Option<Vec<String>>,
+    #[serde(default)]
+    pub debounce_secs: Option<u32>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct HookPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Replaces the whole config; masked secrets sent back unchanged keep their stored values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<HookConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryTrigger {
+    /// Debounced events.
+    Events,
+    /// The Jellyfin follow-up refresh.
+    Followup,
+    /// The test action.
+    Test,
+}
+
+/// One delivery attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct HookDelivery {
+    pub id: i64,
+    pub hook_id: i64,
+    pub events: Vec<String>,
+    pub trigger: DeliveryTrigger,
+    /// 1 for the first try; retries count up.
+    pub attempt: u32,
+    /// The receiver answered 2xx (accepted; not a guarantee that it finished).
+    pub ok: bool,
+    pub http_code: Option<u16>,
+    pub error: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Status {
     pub version: String,

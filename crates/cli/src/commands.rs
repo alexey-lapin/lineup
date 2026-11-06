@@ -1,13 +1,13 @@
 use api_types::{
     Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource,
-    EpgSourceCreate, EpgSourcePatch, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate,
-    PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings,
-    SettingsPatch, Status,
+    EpgSourceCreate, EpgSourcePatch, Hook, HookConfig, HookCreate, HookDelivery, HookPatch, ImportReport,
+    ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest,
+    RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch, Status,
 };
 use serde::Serialize;
 
 use crate::client::{CliError, Client};
-use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, PlaylistCmd, SettingsCmd, output};
+use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, HookAddCmd, HookCmd, PlaylistCmd, SettingsCmd, output};
 
 type R<T = ()> = Result<T, CliError>;
 
@@ -335,6 +335,7 @@ pub async fn run(cli: Cli) -> R {
         }
 
         Command::Epg(cmd) => epg(&mut x, cmd).await?,
+        Command::Hook(cmd) => hook(&mut x, cmd).await?,
 
         Command::Refresh { slugs } => {
             let r: RefreshResponse = x.c.post("/refresh", &RefreshRequest { slugs }).await?;
@@ -428,6 +429,100 @@ async fn epg(x: &mut Ctx, cmd: EpgCmd) -> R {
                 x.c.get_query("/epg/channels", &[("q", query), ("limit", limit.to_string())])
                     .await?;
             x.emit(&l, |l| output::epg_channels(l));
+        }
+    }
+    Ok(())
+}
+
+async fn hook(x: &mut Ctx, cmd: HookCmd) -> R {
+    match cmd {
+        HookCmd::Ls => {
+            let l: Vec<Hook> = x.c.get("/hooks").await?;
+            x.emit(&l, |l| output::hooks(l));
+        }
+        HookCmd::Add(add) => {
+            let (name, config, common) = match add {
+                HookAddCmd::Jellyfin {
+                    name,
+                    url,
+                    api_key,
+                    task_id,
+                    followup_minutes,
+                    common,
+                } => (
+                    name,
+                    HookConfig::Jellyfin {
+                        base_url: url,
+                        api_key,
+                        task_id,
+                        followup_minutes,
+                    },
+                    common,
+                ),
+                HookAddCmd::Webhook {
+                    name,
+                    url,
+                    method,
+                    headers,
+                    common,
+                } => (
+                    name,
+                    HookConfig::Webhook {
+                        method,
+                        url,
+                        headers: headers.into_iter().collect(),
+                    },
+                    common,
+                ),
+            };
+            let req = HookCreate {
+                name,
+                config,
+                events: common.events,
+                debounce_secs: common.debounce,
+                enabled: true,
+            };
+            let h: Hook = x.c.post("/hooks", &req).await?;
+            x.emit(&h, |h| {
+                println!("added hook {} ({}) for {}", h.id, h.name, h.events.join(", "))
+            });
+        }
+        HookCmd::Enable { id } | HookCmd::Disable { id } => {
+            let enabled = matches!(cmd, HookCmd::Enable { .. });
+            let patch = HookPatch {
+                enabled: Some(enabled),
+                ..Default::default()
+            };
+            let h: Hook = x.c.patch(&format!("/hooks/{id}"), &patch).await?;
+            x.emit(&h, |h| {
+                println!(
+                    "{} hook {} ({})",
+                    if enabled { "enabled" } else { "disabled" },
+                    h.id,
+                    h.name
+                )
+            });
+        }
+        HookCmd::Rm { id } => {
+            let _: () = x.c.delete(&format!("/hooks/{id}")).await?;
+            if x.json {
+                println!("{}", serde_json::json!({ "deleted": id }));
+            } else if !x.quiet {
+                println!("deleted hook {id}");
+            }
+        }
+        HookCmd::Test { id } => {
+            let d: HookDelivery = x.c.post(&format!("/hooks/{id}/test"), &()).await?;
+            x.emit(&d, |d| output::deliveries(std::slice::from_ref(d)));
+            if !d.ok {
+                return Err(CliError::Reported(1));
+            }
+        }
+        HookCmd::Deliveries { id, limit } => {
+            let l: Vec<HookDelivery> =
+                x.c.get_query(&format!("/hooks/{id}/deliveries"), &[("limit", limit)])
+                    .await?;
+            x.emit(&l, |l| output::deliveries(l));
         }
     }
     Ok(())

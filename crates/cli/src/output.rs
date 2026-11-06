@@ -1,8 +1,8 @@
 //! Human-readable rendering.
 
 use api_types::{
-    Channel, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource, ImportAction, ImportReport, Playlist,
-    PlaylistDetail, ResolveResponse, Settings, Source, Status,
+    Channel, DeliveryTrigger, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource, Hook, HookConfig, HookDelivery,
+    ImportAction, ImportReport, Playlist, PlaylistDetail, ResolveResponse, Settings, Source, Status,
 };
 
 pub fn source_label(s: &Source) -> String {
@@ -315,4 +315,70 @@ pub fn epg_channels(list: &[EpgChannel]) {
 pub fn status(s: &Status, server: &str) {
     println!("server:  {server}");
     println!("version: {}", s.version);
+}
+
+pub fn hooks(list: &[Hook]) {
+    if list.is_empty() {
+        println!("(no hooks)");
+        return;
+    }
+    table(
+        &["ID", "NAME", "KIND", "TARGET", "EVENTS", "DEBOUNCE"],
+        list.iter()
+            .map(|h| {
+                let (kind, target) = match &h.config {
+                    HookConfig::Jellyfin {
+                        base_url,
+                        followup_minutes,
+                        ..
+                    } => ("jellyfin", format!("{base_url} (follow-up {followup_minutes}m)")),
+                    HookConfig::Webhook { method, url, .. } => ("webhook", format!("{method} {url}")),
+                };
+                let name = if h.enabled {
+                    h.name.clone()
+                } else {
+                    format!("{} (disabled)", h.name)
+                };
+                vec![
+                    h.id.to_string(),
+                    name,
+                    kind.into(),
+                    target,
+                    h.events.join(","),
+                    format!("{}s", h.debounce_secs),
+                ]
+            })
+            .collect(),
+    );
+}
+
+pub fn deliveries(list: &[HookDelivery]) {
+    if list.is_empty() {
+        println!("(no deliveries)");
+        return;
+    }
+    table(
+        &["WHEN", "TRIGGER", "TRY", "RESULT", "EVENTS"],
+        list.iter()
+            .map(|d| {
+                let trigger = match d.trigger {
+                    DeliveryTrigger::Events => "events",
+                    DeliveryTrigger::Followup => "follow-up",
+                    DeliveryTrigger::Test => "test",
+                };
+                let result = if d.ok {
+                    format!("ok {}", d.http_code.map_or(String::new(), |c| c.to_string()))
+                } else {
+                    format!("failed: {}", d.error.as_deref().unwrap_or("?"))
+                };
+                vec![
+                    d.at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    trigger.into(),
+                    d.attempt.to_string(),
+                    result.trim().to_string(),
+                    d.events.join(","),
+                ]
+            })
+            .collect(),
+    );
 }

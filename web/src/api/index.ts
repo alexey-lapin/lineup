@@ -18,6 +18,16 @@ export type EpgSourceCreate = components['schemas']['EpgSourceCreate']
 export type EpgSourcePatch = components['schemas']['EpgSourcePatch']
 export type EpgChannel = components['schemas']['EpgChannel']
 export type EpgFetchResult = components['schemas']['EpgFetchResult']
+export type Hook = components['schemas']['Hook']
+export type HookConfig = components['schemas']['HookConfig']
+export type HookCreate = components['schemas']['HookCreate']
+export type HookPatch = components['schemas']['HookPatch']
+export type HookDelivery = components['schemas']['HookDelivery']
+
+/** Event types hooks can subscribe to. */
+export const EVENT_TYPES = ['playlist.changed', 'epg.updated', 'channel.unhealthy', 'channel.recovered'] as const
+/** What the API shows instead of a stored secret; sending it back keeps the secret. */
+export const SECRET_MASK = '********'
 
 export const client = createClient<paths>({ baseUrl: '/api/v1' })
 
@@ -94,6 +104,14 @@ export const api = {
     unwrap(client.PATCH('/epg/sources/{id}', { params: { path: { id } }, body })),
   deleteEpgSource: (id: number) => unwrap(client.DELETE('/epg/sources/{id}', { params: { path: { id } } })),
   fetchEpg: (source_ids: number[] = []) => unwrap(client.POST('/epg/fetch', { body: { source_ids } })),
+  hooks: () => unwrap(client.GET('/hooks')),
+  createHook: (body: HookCreate) => unwrap(client.POST('/hooks', { body })),
+  patchHook: (id: number, body: HookPatch) => unwrap(client.PATCH('/hooks/{id}', { params: { path: { id } }, body })),
+  deleteHook: (id: number) => unwrap(client.DELETE('/hooks/{id}', { params: { path: { id } } })),
+  testHook: (id: number) => unwrap(client.POST('/hooks/{id}/test', { params: { path: { id } } })),
+  hookDeliveries: (id: number, limit = 50) =>
+    unwrap(client.GET('/hooks/{id}/deliveries', { params: { path: { id }, query: { limit } } })),
+
   epgChannels: (q?: string, limit?: number) =>
     unwrap(client.GET('/epg/channels', { params: { query: { q: q || undefined, limit } } }))
 }

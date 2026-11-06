@@ -64,6 +64,8 @@ pub struct Store {
     write_lock: tokio::sync::Mutex<()>,
     /// Bumped with every event; output caches key on it.
     version: std::sync::atomic::AtomicU64,
+    /// Bumped when hooks change, so the dispatcher reloads them.
+    hooks_version: tokio::sync::watch::Sender<u64>,
 }
 
 const DEFAULT_ACEXY: &str = "http://127.0.0.1:8080";
@@ -102,6 +104,7 @@ impl Store {
             events,
             write_lock: tokio::sync::Mutex::new(()),
             version: std::sync::atomic::AtomicU64::new(0),
+            hooks_version: tokio::sync::watch::Sender::new(0),
         };
         Ok(store)
     }
@@ -1149,7 +1152,9 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str, url_tvg: Option<&st
 }
 
 mod epg;
+mod hooks;
 pub use epg::{FetchOutcome, IndexedChannel, PatchedSource};
+pub use hooks::{DELIVERIES_KEPT, NewDelivery};
 
 #[cfg(test)]
 mod tests;

@@ -9,6 +9,7 @@ const items: NavigationMenuItem[][] = [
     { label: 'Channels', icon: 'i-lucide-tv', to: '/channels' },
     { label: 'Playlists', icon: 'i-lucide-list-video', to: '/playlists' },
     { label: 'EPG', icon: 'i-lucide-calendar-range', to: '/epg' },
+    { label: 'Hooks', icon: 'i-lucide-webhook', to: '/hooks' },
     { label: 'Import', icon: 'i-lucide-file-down', to: '/import' }
   ],
   [{ label: 'Settings', icon: 'i-lucide-settings', to: '/settings' }]

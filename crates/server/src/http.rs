@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use api_types::{
     Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgSource, EpgSourceCreate,
-    EpgSourcePatch, ErrorBody, ErrorDetail, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist,
-    PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse,
-    Settings, SettingsPatch, SourceKind, Status,
+    EpgSourcePatch, ErrorBody, ErrorDetail, Hook, HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest,
+    ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse,
+    ResolveRequest, ResolveResponse, Settings, SettingsPatch, SourceKind, Status,
 };
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
@@ -29,6 +29,7 @@ use crate::{Error, web};
 pub struct App {
     pub store: Arc<Store>,
     pub epg: Arc<Epg>,
+    pub hooks: Arc<crate::hooks::Hooks>,
     /// Where temporary files (backups) are written; the data dir in production.
     scratch: std::path::PathBuf,
     /// Flips to true on shutdown, ending open event streams so the server can stop.
@@ -39,9 +40,17 @@ pub struct App {
 impl App {
     /// `data_dir` holds the EPG cache and backup scratch files.
     pub fn new(store: Arc<Store>, data_dir: &std::path::Path) -> Self {
+        Self::with_timing(store, data_dir, crate::hooks::Timing::default())
+    }
+
+    /// As [`App::new`] with custom hook timing (tests). The hook dispatcher is not started; call
+    /// `app.hooks.spawn()`.
+    pub fn with_timing(store: Arc<Store>, data_dir: &std::path::Path, timing: crate::hooks::Timing) -> Self {
         let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let epg = Epg::new(store.clone(), data_dir);
         App {
-            epg: Epg::new(store.clone(), data_dir),
+            hooks: crate::hooks::Hooks::new(store.clone(), epg.client().clone(), timing),
+            epg,
             store,
             scratch: data_dir.to_path_buf(),
             shutdown,
@@ -89,6 +98,10 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(patch_epg_source, delete_epg_source))
         .routes(routes!(fetch_epg))
         .routes(routes!(search_epg_channels))
+        .routes(routes!(list_hooks, create_hook))
+        .routes(routes!(get_hook, patch_hook, delete_hook))
+        .routes(routes!(test_hook))
+        .routes(routes!(hook_deliveries))
 }
 
 /// The OpenAPI document (paths are relative to `/api/v1`).
@@ -503,6 +516,69 @@ async fn search_epg_channels(
     let all = s.epg_channels().await?;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     Ok(Json(crate::suggest::search(all, q.q.as_deref(), limit)))
+}
+
+// -------------------------------------------------------------------- hooks
+
+#[utoipa::path(get, path = "/hooks", responses((status = 200, body = Vec<Hook>)))]
+async fn list_hooks(State(s): State<AppState>) -> ApiResult<Json<Vec<Hook>>> {
+    Ok(Json(s.list_hooks().await?))
+}
+
+#[utoipa::path(post, path = "/hooks", request_body = HookCreate,
+    responses((status = 201, body = Hook), (status = 422, body = ErrorBody)))]
+async fn create_hook(State(s): State<AppState>, Body(req): Body<HookCreate>) -> ApiResult<(StatusCode, Json<Hook>)> {
+    Ok((StatusCode::CREATED, Json(s.create_hook(req).await?)))
+}
+
+#[utoipa::path(get, path = "/hooks/{id}", params(("id" = i64, Path)),
+    responses((status = 200, body = Hook), (status = 404, body = ErrorBody)))]
+async fn get_hook(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<Hook>> {
+    Ok(Json(s.get_hook(id).await?))
+}
+
+#[utoipa::path(patch, path = "/hooks/{id}", params(("id" = i64, Path)), request_body = HookPatch,
+    responses((status = 200, body = Hook), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
+async fn patch_hook(
+    State(s): State<AppState>,
+    ApiPath(id): ApiPath<i64>,
+    Body(req): Body<HookPatch>,
+) -> ApiResult<Json<Hook>> {
+    Ok(Json(s.patch_hook(id, req).await?))
+}
+
+#[utoipa::path(delete, path = "/hooks/{id}", params(("id" = i64, Path)),
+    responses((status = 204), (status = 404, body = ErrorBody)))]
+async fn delete_hook(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
+    s.delete_hook(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Send a synthetic `hook.test` event now (one attempt, no debounce) and return the logged result.
+/// For a Jellyfin hook this really starts a guide refresh.
+#[utoipa::path(post, path = "/hooks/{id}/test", params(("id" = i64, Path)),
+    responses((status = 200, body = HookDelivery), (status = 404, body = ErrorBody)))]
+async fn test_hook(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<HookDelivery>> {
+    Ok(Json(s.hooks.test(id).await?))
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct DeliveryQuery {
+    /// Maximum rows (default 50).
+    limit: Option<i64>,
+}
+
+/// Recent delivery attempts, newest first.
+#[utoipa::path(get, path = "/hooks/{id}/deliveries", params(("id" = i64, Path), DeliveryQuery),
+    responses((status = 200, body = Vec<HookDelivery>), (status = 404, body = ErrorBody)))]
+async fn hook_deliveries(
+    State(s): State<AppState>,
+    ApiPath(id): ApiPath<i64>,
+    ApiQuery(q): ApiQuery<DeliveryQuery>,
+) -> ApiResult<Json<Vec<HookDelivery>>> {
+    let limit = q.limit.unwrap_or(50).clamp(1, crate::store::DELIVERIES_KEPT);
+    Ok(Json(s.hook_deliveries(id, limit).await?))
 }
 
 // -------------------------------------------------------------------- playlist output

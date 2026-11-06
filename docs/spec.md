@@ -198,9 +198,9 @@ Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` 
 | health check with no transition | — | SSE only |
 
 **Dispatcher**
-- One tokio task per hook, with a trailing-edge debounce of `debounce_secs` (default 30).
+- One tokio task per hook, with a trailing-edge debounce of `debounce_secs` (default 30). A window never stays open longer than four debounce periods, so a steady stream of changes still gets delivered.
 - The delivered body is the envelope `{events: [{type, at, payload}…], window_start, window_end}`, so mixed events keep their own payloads.
-- Retries 3 times with backoff. Each attempt is logged.
+- Retries 3 times with backoff (2s, 10s, 30s). Each attempt is logged; the last 200 rows per hook are kept.
 - A 2xx means *accepted*, not that the downstream is fresh.
 
 **Hook kinds**

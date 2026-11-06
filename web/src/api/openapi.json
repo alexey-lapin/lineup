@@ -443,6 +443,260 @@
         }
       }
     },
+    "/hooks": {
+      "get": {
+        "operationId": "list_hooks",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Hook"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_hook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HookCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Hook"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/hooks/{id}": {
+      "get": {
+        "operationId": "get_hook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Hook"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_hook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "patch_hook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HookPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Hook"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/hooks/{id}/deliveries": {
+      "get": {
+        "summary": "Recent delivery attempts, newest first.",
+        "operationId": "hook_deliveries",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows (default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HookDelivery"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/hooks/{id}/test": {
+      "post": {
+        "summary": "Send a synthetic `hook.test` event now (one attempt, no debounce) and return the logged result.\nFor a Jellyfin hook this really starts a guide refresh.",
+        "operationId": "test_hook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HookDelivery"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/import": {
       "post": {
         "operationId": "import",
@@ -1205,6 +1459,14 @@
           }
         }
       },
+      "DeliveryTrigger": {
+        "type": "string",
+        "enum": [
+          "events",
+          "followup",
+          "test"
+        ]
+      },
       "EpgChannel": {
         "type": "object",
         "description": "A channel offered by a guide source.",
@@ -1477,6 +1739,271 @@
             "type": "string"
           },
           "incoming": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Hook": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "config",
+          "events",
+          "debounce_secs",
+          "enabled",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/HookConfig"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "debounce_secs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Events are collected until none has arrived for this long, then delivered together.",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Event types that trigger it."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "HookConfig": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Runs Jellyfin's \"Refresh Guide\" scheduled task.",
+            "required": [
+              "base_url",
+              "api_key",
+              "kind"
+            ],
+            "properties": {
+              "api_key": {
+                "type": "string",
+                "description": "API key (Dashboard → API Keys). Write-only: responses show a mask."
+              },
+              "base_url": {
+                "type": "string",
+                "description": "e.g. `http://jellyfin:8096`"
+              },
+              "followup_minutes": {
+                "type": "integer",
+                "format": "int32",
+                "description": "A second refresh this many minutes after the last delivery, once Jellyfin's cached\nguide download has expired; 0 turns it off.",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "jellyfin"
+                ]
+              },
+              "task_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Scheduled task id; found by its key `RefreshGuide` when empty."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Sends the event envelope as JSON.",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "headers": {
+                "type": "object",
+                "description": "Extra request headers. Values are write-only: responses show a mask.",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "webhook"
+                ]
+              },
+              "method": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "What a hook calls."
+      },
+      "HookCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/HookConfig"
+          },
+          "debounce_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Defaults: `playlist.changed` and `epg.updated` for Jellyfin, every event for webhooks."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "HookDelivery": {
+        "type": "object",
+        "description": "One delivery attempt.",
+        "required": [
+          "id",
+          "hook_id",
+          "events",
+          "trigger",
+          "attempt",
+          "ok",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1 for the first try; retries count up.",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "hook_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "http_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "The receiver answered 2xx (accepted; not a guarantee that it finished)."
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/DeliveryTrigger"
+          }
+        }
+      },
+      "HookPatch": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HookConfig",
+                "description": "Replaces the whole config; masked secrets sent back unchanged keep their stored values."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "debounce_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "events": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
             "type": [
               "string",
               "null"

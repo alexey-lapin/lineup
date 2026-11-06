@@ -73,7 +73,7 @@ export function useLiveUpdates() {
   const cache = useQueryCache()
   const refetch = (...keys: string[]) =>
     Promise.allSettled(keys.map((k) => cache.invalidateQueries({ key: [k] })))
-  const everything = () => refetch('channels', 'playlists', 'playlist', 'epg-sources', 'settings', 'status')
+  const everything = () => refetch('channels', 'playlists', 'playlist', 'epg-sources', 'hooks', 'settings', 'status')
   let es: EventSource | undefined
   onMounted(() => {
     if (typeof EventSource === 'undefined') return

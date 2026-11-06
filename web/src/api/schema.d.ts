@@ -110,6 +110,75 @@ export interface paths {
         patch: operations["patch_epg_source"];
         trace?: never;
     };
+    "/hooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_hooks"];
+        put?: never;
+        post: operations["create_hook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hooks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_hook"];
+        put?: never;
+        post?: never;
+        delete: operations["delete_hook"];
+        options?: never;
+        head?: never;
+        patch: operations["patch_hook"];
+        trace?: never;
+    };
+    "/hooks/{id}/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent delivery attempts, newest first. */
+        get: operations["hook_deliveries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/hooks/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a synthetic `hook.test` event now (one attempt, no debounce) and return the logged result.
+         *     For a Jellyfin hook this really starts a guide refresh.
+         */
+        post: operations["test_hook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/import": {
         parameters: {
             query?: never;
@@ -324,6 +393,8 @@ export interface components {
             tvg_id?: string | null;
             tvg_logo?: string | null;
         };
+        /** @enum {string} */
+        DeliveryTrigger: "events" | "followup" | "test";
         /** @description A channel offered by a guide source. */
         EpgChannel: {
             display_names: string[];
@@ -419,6 +490,88 @@ export interface components {
             existing?: string | null;
             field: string;
             incoming?: string | null;
+        };
+        Hook: {
+            config: components["schemas"]["HookConfig"];
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: int32
+             * @description Events are collected until none has arrived for this long, then delivered together.
+             */
+            debounce_secs: number;
+            enabled: boolean;
+            /** @description Event types that trigger it. */
+            events: string[];
+            /** Format: int64 */
+            id: number;
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description What a hook calls. */
+        HookConfig: {
+            /** @description API key (Dashboard → API Keys). Write-only: responses show a mask. */
+            api_key: string;
+            /** @description e.g. `http://jellyfin:8096` */
+            base_url: string;
+            /**
+             * Format: int32
+             * @description A second refresh this many minutes after the last delivery, once Jellyfin's cached
+             *     guide download has expired; 0 turns it off.
+             */
+            followup_minutes?: number;
+            /** @enum {string} */
+            kind: "jellyfin";
+            /** @description Scheduled task id; found by its key `RefreshGuide` when empty. */
+            task_id?: string | null;
+        } | {
+            /** @description Extra request headers. Values are write-only: responses show a mask. */
+            headers?: {
+                [key: string]: string;
+            };
+            /** @enum {string} */
+            kind: "webhook";
+            method?: string;
+            url: string;
+        };
+        HookCreate: {
+            config: components["schemas"]["HookConfig"];
+            /** Format: int32 */
+            debounce_secs?: number | null;
+            enabled?: boolean;
+            /** @description Defaults: `playlist.changed` and `epg.updated` for Jellyfin, every event for webhooks. */
+            events?: string[] | null;
+            name: string;
+        };
+        /** @description One delivery attempt. */
+        HookDelivery: {
+            /** Format: date-time */
+            at: string;
+            /**
+             * Format: int32
+             * @description 1 for the first try; retries count up.
+             */
+            attempt: number;
+            error?: string | null;
+            events: string[];
+            /** Format: int64 */
+            hook_id: number;
+            /** Format: int32 */
+            http_code?: number | null;
+            /** Format: int64 */
+            id: number;
+            /** @description The receiver answered 2xx (accepted; not a guarantee that it finished). */
+            ok: boolean;
+            trigger: components["schemas"]["DeliveryTrigger"];
+        };
+        HookPatch: {
+            config?: components["schemas"]["HookConfig"] | null;
+            /** Format: int32 */
+            debounce_secs?: number | null;
+            enabled?: boolean | null;
+            events?: string[] | null;
+            name?: string | null;
         };
         /** @enum {string} */
         ImportAction: "create" | "reuse" | "skip_in_playlist";
@@ -915,6 +1068,214 @@ export interface operations {
                 };
             };
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_hooks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Hook"][];
+                };
+            };
+        };
+    };
+    create_hook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HookCreate"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Hook"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_hook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Hook"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete_hook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    patch_hook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HookPatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Hook"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    hook_deliveries: {
+        parameters: {
+            query?: {
+                /** @description Maximum rows (default 50). */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HookDelivery"][];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    test_hook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HookDelivery"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
