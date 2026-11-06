@@ -5,6 +5,7 @@ import { computed, ref } from 'vue'
 import { api, sourceLabel, type Channel } from '../api'
 import ChannelForm from '../components/ChannelForm.vue'
 import { copy, playerLinks, useAction, useChannels, useInvalidateAll } from '../composables'
+import { floating } from '../safe-area'
 
 const toast = useToast()
 const run = useAction()
@@ -154,7 +155,7 @@ function actions(c: Channel): DropdownMenuItem[][] {
           <UInput v-model="search" icon="i-lucide-search" placeholder="Search name, tvg-id, id…" class="w-full sm:w-72" />
         </template>
         <template #right>
-          <USelect v-model="group" :items="groups" class="w-36" />
+          <USelect v-model="group" :content="floating()" :items="groups" class="w-36" />
         </template>
       </UDashboardToolbar>
     </template>
@@ -179,7 +180,7 @@ function actions(c: Channel): DropdownMenuItem[][] {
               <div v-if="row.original.tvg_id" class="text-xs text-muted truncate">{{ row.original.tvg_id }}</div>
             </div>
             <UBadge v-if="row.original.is_event" label="event" color="warning" variant="subtle" size="sm" />
-            <UTooltip v-if="health(row.original)" :text="health(row.original)!.hint">
+            <UTooltip v-if="health(row.original)" :content="floating()" :text="health(row.original)!.hint">
               <UBadge
                 :label="health(row.original)!.label"
                 :color="health(row.original)!.color"
@@ -207,7 +208,7 @@ function actions(c: Channel): DropdownMenuItem[][] {
           </div>
         </template>
         <template #actions-cell="{ row }">
-          <UDropdownMenu :items="actions(row.original)" :content="{ align: 'end' }">
+          <UDropdownMenu :items="actions(row.original)" :content="floating({ align: 'end' as const })">
             <UButton icon="i-lucide-ellipsis-vertical" color="neutral" variant="ghost" aria-label="Actions" />
           </UDropdownMenu>
         </template>

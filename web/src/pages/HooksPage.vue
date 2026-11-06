@@ -4,6 +4,7 @@ import { useToast } from '@nuxt/ui/composables'
 import { computed, ref } from 'vue'
 import { api, EVENT_TYPES, SECRET_MASK, type Hook, type HookConfig, type HookDelivery } from '../api'
 import { useAction } from '../composables'
+import { floating } from '../safe-area'
 
 const run = useAction()
 const toast = useToast()
@@ -231,6 +232,7 @@ function triggerLabel(d: HookDelivery) {
                 @click="test(h)"
               />
               <UDropdownMenu
+                :content="floating()"
                 :items="[
                   [
                     { label: 'Edit', icon: 'i-lucide-pencil', onSelect: () => openEdit(h) },
@@ -252,6 +254,7 @@ function triggerLabel(d: HookDelivery) {
             <UFormField label="Kind">
               <USelect
                 v-model="form.kind"
+                :content="floating()"
                 :items="kindItems"
                 class="w-full"
                 :disabled="!!editing"
@@ -289,7 +292,7 @@ function triggerLabel(d: HookDelivery) {
                 <UInput v-model="form.url" class="w-full" placeholder="https://example.org/hook" autocapitalize="off" />
               </UFormField>
               <UFormField label="Method">
-                <USelect v-model="form.method" :items="['POST', 'PUT', 'PATCH']" class="w-32" />
+                <USelect v-model="form.method" :content="floating()" :items="['POST', 'PUT', 'PATCH']" class="w-32" />
               </UFormField>
               <UFormField label="Headers" help="Values are stored write-only">
                 <div class="flex flex-col gap-2">
@@ -318,7 +321,7 @@ function triggerLabel(d: HookDelivery) {
             </template>
 
             <UFormField label="Events">
-              <USelectMenu v-model="form.events" :items="eventItems" value-key="value" multiple class="w-full" />
+              <USelectMenu v-model="form.events" :content="floating()" :items="eventItems" value-key="value" multiple class="w-full" />
             </UFormField>
             <UFormField label="Debounce (seconds)" help="Changes are collected until none has arrived for this long">
               <UInput v-model.number="form.debounce_secs" type="number" min="0" class="w-32" />

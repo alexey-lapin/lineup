@@ -5,10 +5,28 @@
   --ui-radius: 0.5rem;
 }
 
-/* Home-screen app on iOS: content runs under the status bar and home indicator. */
-body {
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
-  padding-left: env(safe-area-inset-left);
-  padding-right: env(safe-area-inset-right);
+/*
+ * Home-screen app on iOS: the page runs edge to edge (viewport-fit=cover, black-translucent status
+ * bar), under the status bar / Dynamic Island and the home indicator. Every fixed surface keeps clear
+ * of them through these variables (theme overrides in vite.config.ts; floating menus via safe-area.ts).
+ */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
+/*
+ * The status bar text is white (black-translucent), so the strip behind it stays dark in both colour
+ * schemes, above every overlay (a light slideover or drawer would otherwise hide the clock).
+ */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: var(--safe-top);
+  background: #09090b;
+  z-index: 2147483647;
+  pointer-events: none;
 }

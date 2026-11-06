@@ -6,6 +6,7 @@ import { useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
 import { api, guideUrl, playlistUrl, sourceLabel, type PlaylistDetail } from '../api'
 import { copy, useAction, useChannels, useInvalidateAll } from '../composables'
+import { floating } from '../safe-area'
 
 const props = defineProps<{ slug: string }>()
 
@@ -150,6 +151,7 @@ async function deletePlaylist() {
         <template #left>
           <USelectMenu
             v-model="toAdd"
+            :content="floating()"
             :items="addable"
             value-key="value"
             multiple

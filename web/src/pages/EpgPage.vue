@@ -5,6 +5,7 @@ import { onBeforeUnmount, ref } from 'vue'
 import { api, type EpgFetchResult, type EpgSource } from '../api'
 import EpgSearch from '../components/EpgSearch.vue'
 import { copy, useAction } from '../composables'
+import { floating } from '../safe-area'
 
 const toast = useToast()
 const run = useAction()
@@ -210,6 +211,7 @@ function when(iso?: string | null) {
                 @click="fetchNow(s.id)"
               />
               <UDropdownMenu
+                :content="floating()"
                 :items="[
                   [{ label: 'Edit', icon: 'i-lucide-pencil', onSelect: () => openEdit(s) }],
                   [{ label: 'Delete', icon: 'i-lucide-trash-2', color: 'error', onSelect: () => (deleting = s) }]

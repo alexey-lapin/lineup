@@ -26,7 +26,49 @@ export default defineConfig({
     vue(),
     ui({
       ui: {
-        colors: { primary: 'emerald', neutral: 'zinc' }
+        colors: { primary: 'emerald', neutral: 'zinc' },
+        // iPhone home-screen app: keep fixed surfaces clear of the status bar and home indicator
+        // (--safe-* in main.css; all 0 elsewhere).
+        dashboardGroup: {
+          base: 'pt-(--safe-top) pb-(--safe-bottom) pl-(--safe-left) pr-(--safe-right)'
+        },
+        // Stretch to the padded group instead of forcing a full viewport height.
+        dashboardPanel: { slots: { root: 'min-h-0' } },
+        dashboardSidebar: { slots: { root: 'min-h-0' } },
+        slideover: {
+          slots: {
+            content: 'pt-(--safe-top) pb-(--safe-bottom) pl-(--safe-left) pr-(--safe-right)',
+            close: 'top-[calc(1rem+var(--safe-top))] end-[calc(1rem+var(--safe-right))]'
+          }
+        },
+        // The phone sidebar menu is a bottom drawer.
+        drawer: {
+          slots: { content: 'pb-(--safe-bottom) pl-(--safe-left) pr-(--safe-right)' },
+          compoundVariants: [
+            {
+              direction: ['top', 'bottom'],
+              class: { content: 'max-h-[calc(96%-var(--safe-top)-var(--safe-bottom))]' }
+            }
+          ]
+        },
+        // Centred dialogs: centre within the safe area and fit inside it.
+        modal: {
+          compoundVariants: [
+            {
+              scrollable: false,
+              fullscreen: false,
+              class: {
+                content:
+                  'top-[calc(50%+(var(--safe-top)-var(--safe-bottom))/2)] ' +
+                  'max-h-[calc(100dvh-2rem-var(--safe-top)-var(--safe-bottom))] ' +
+                  'sm:max-h-[calc(100dvh-4rem-var(--safe-top)-var(--safe-bottom))]'
+              }
+            }
+          ]
+        },
+        toaster: {
+          slots: { viewport: 'mt-(--safe-top) mb-(--safe-bottom) ml-(--safe-left) mr-(--safe-right)' }
+        }
       }
     })
   ],

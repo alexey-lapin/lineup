@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { api, sourceLabel, type Channel, type EpgChannel, type ResolveResponse } from '../api'
 import EpgSearch from './EpgSearch.vue'
 import { useAction, useChannels, useInvalidateAll, usePlaylists } from '../composables'
+import { floating } from '../safe-area'
 
 const props = defineProps<{ channel?: Channel | null }>()
 const open = defineModel<boolean>('open', { default: false })
@@ -241,6 +242,7 @@ async function save() {
         <UFormField label="Group">
           <UInputMenu
             v-model="state.group_title"
+            :content="floating()"
             :items="groups"
             create-item
             class="w-full"
@@ -296,6 +298,7 @@ async function save() {
         <UFormField v-if="!editing" label="Add to playlists">
           <USelectMenu
             v-model="state.playlists"
+            :content="floating()"
             :items="playlistItems"
             value-key="value"
             multiple
