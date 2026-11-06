@@ -169,7 +169,7 @@ async function deletePlaylist() {
       <div v-else-if="!items.length" class="py-10 text-center text-muted">This playlist is empty.</div>
 
       <p v-if="items.length" class="text-sm text-muted mb-2">
-        Drag to reorder. The number is the channel number players show (tvg-chno).
+        Drag to reorder. The number is written to the playlist as tvg-chno; how players number channels depends on the player.
       </p>
       <VueDraggable
         v-model="items"

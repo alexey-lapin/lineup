@@ -10,12 +10,12 @@ docker compose -f deploy/compose.yaml up -d
 
 Pin a release tag rather than `latest`. The container runs as uid 10001 and stores everything under `/data`.
 
-Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI. Use addresses that your players and media server can reach, not `localhost`:
+Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI. Use addresses that your players and media server can reach for acexy and the VK proxy, not `localhost`; the engine only needs to be reachable from lineup:
 
 | Setting | What it is | Example |
 |---|---|---|
 | `acexy_base` | acexy, which plays Acestream ids | `http://media-host:8080` |
-| `engine_base` | the Acestream engine, used for name lookups and (later) health checks | `http://media-host:6878` |
+| `engine_base` | the Acestream engine, used for name lookups and health checks | `http://media-host:6878` |
 | `vk_base` | a VK proxy that serves `/vk/{owner}_{video}[?list=…]` | `http://media-host:8099` |
 
 Each has a **Test** button (or `lineup settings test acexy|engine|vk [--base URL]`) that checks, from the lineup server, that the service answers: acexy's status endpoint, the engine's version, or any HTTP answer from the VK proxy. It tests the URL as typed, before you save it. A passing test does not prove your players can reach the address, only that lineup can.
@@ -58,7 +58,9 @@ Each playlist is a plain M3U file at a fixed URL:
 http://media-host:9300/p/tv.m3u
 ```
 
-`lineup playlist url tv` prints it. Give it to anything that plays M3U from a URL: Jellyfin, Plex, Emby or Channels DVR as a tuner, an IPTV app such as TiviMate or IPTV Smarters, or VLC and Kodi directly. Each channel's number (`tvg-chno`) is its position in the playlist, so reordering in lineup reorders the channel list.
+`lineup playlist url tv` prints it. Give it to anything that reads an M3U playlist from a URL: Jellyfin or Emby as an M3U tuner, Kodi with the IPTV Simple add-on, or an IPTV app such as TiviMate. VLC can play it too, without a guide. Plex can't read M3U directly; it needs a tuner bridge such as Threadfin in between.
+
+lineup writes each channel's position in the playlist as `tvg-chno`. Whether a client numbers and orders channels by it depends on the client and its settings.
 
 ### Jellyfin
 
@@ -88,7 +90,7 @@ Players cache the guide (Jellyfin for about an hour), so guide changes can take 
 
 ## Tell Jellyfin, or anything else, about changes
 
-Players and media servers re-read the playlist and guide on their own schedule. Hooks let lineup tell them right away.
+Players and media servers re-read the playlist and guide on their own schedule. Hooks let lineup tell them right away: the Jellyfin hook refreshes Jellyfin, and a webhook sends the change events to any receiver that acts on them.
 
 A Jellyfin hook runs Jellyfin's **Refresh Guide** task whenever a playlist or guide data changes, so new channels show up without waiting for Jellyfin's own schedule. Create an API key in Jellyfin (**Dashboard → API Keys**), then add the hook under **Hooks** in the UI, or:
 
