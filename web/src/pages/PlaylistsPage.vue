@@ -79,10 +79,10 @@ async function create() {
         <template #body>
           <form class="flex flex-col gap-4" @submit.prevent="create">
             <UFormField label="Slug" help="Used in the URL: lowercase letters, digits, - and _" required>
-              <UInput v-model="form.slug" class="w-full" placeholder="jellyfin" autocapitalize="off" />
+              <UInput v-model="form.slug" class="w-full" placeholder="tv" autocapitalize="off" />
             </UFormField>
             <UFormField label="Name">
-              <UInput v-model="form.name" class="w-full" placeholder="Jellyfin" />
+              <UInput v-model="form.name" class="w-full" placeholder="TV" />
             </UFormField>
             <button type="submit" class="hidden" />
           </form>

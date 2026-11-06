@@ -799,8 +799,8 @@ export interface components {
             target: components["schemas"]["SettingsTestTarget"];
         };
         /**
-         * @description Outcome of a connection test, run from the lineup server (it cannot show whether Jellyfin or a
-         *     phone reaches the same address).
+         * @description Outcome of a connection test, run from the lineup server (it cannot show whether your players
+         *     can reach the same address).
          */
         SettingsTestResult: {
             /** @description What the answer shows, or why the test failed. */

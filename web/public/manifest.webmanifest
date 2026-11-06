@@ -1,7 +1,7 @@
 {
   "name": "lineup",
   "short_name": "lineup",
-  "description": "Channels, playlists and guide data for Jellyfin Live TV",
+  "description": "IPTV channels, M3U playlists and XMLTV guides",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

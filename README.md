@@ -1,6 +1,6 @@
 # lineup
 
-lineup manages channels and playlists for Jellyfin Live TV, instead of a hand-edited M3U file. Channels are Acestream streams (played through [acexy](https://github.com/Javinator9889/acexy)), live VK videos (played through a VK proxy), or plain stream URLs. One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, refreshes Jellyfin through hooks, and can check Acestream swarm health. The same binary is also a CLI for people and agents.
+lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. Anything that can read an M3U playlist and an XMLTV guide from a URL can use them: Jellyfin, Plex, Emby, Channels DVR, IPTV apps such as TiviMate, or VLC and Kodi. Channels are Acestream streams (played through [acexy](https://github.com/Javinator9889/acexy)), live VK videos (played through a VK proxy), or plain stream URLs. One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, tells Jellyfin (or anything with a webhook) when something changes, and can check Acestream swarm health. The same binary is also a CLI for people and agents.
 
 - Spec and roadmap: [docs/spec.md](docs/spec.md)
 - Deploying: [docs/deploy.md](docs/deploy.md)
@@ -10,8 +10,8 @@ lineup manages channels and playlists for Jellyfin Live TV, instead of a hand-ed
 | URL | What |
 |---|---|
 | `/` | Web UI |
-| `/p/<slug>.m3u` (or `.m3u8`) | Playlist for Jellyfin's M3U tuner. `tvg-chno` is the position in the playlist. |
-| `/p/<slug>/epg.xml` | XMLTV guide with just that playlist's channels, for Jellyfin's XMLTV provider. |
+| `/p/<slug>.m3u` (or `.m3u8`) | M3U playlist for your player or media server. `tvg-chno` is the position in the playlist. |
+| `/p/<slug>/epg.xml` | XMLTV guide with just that playlist's channels. |
 | `/api/v1/events` | Server-sent events (`playlist.changed`, `epg.updated`, `channel.unhealthy`, ...) |
 | `/api/v1/...` | REST API |
 | `/api/openapi.json` | OpenAPI document |
@@ -19,9 +19,9 @@ lineup manages channels and playlists for Jellyfin Live TV, instead of a hand-ed
 ## CLI
 
 ```sh
-lineup add acestream://<id> -p jellyfin --yes   # name, group, tvg-id and logo suggested from the engine and guide
-lineup add acestream://<id> --name "Arena 1" --group Sports --tvg-id Arena.1.de -p jellyfin
-lineup add "https://vk.com/video-1_2?list=..." --name "VK Live - A vs B" --event --kickoff 2026-11-08T20:00:00Z -p jellyfin
+lineup add acestream://<id> -p tv --yes   # name, group, tvg-id and logo suggested from the engine and guide
+lineup add acestream://<id> --name "Arena 1" --group Sports --tvg-id Arena.1.de -p tv
+lineup add "https://vk.com/video-1_2?list=..." --name "VK Live - A vs B" --event --kickoff 2026-11-08T20:00:00Z -p tv
 lineup ls [query] [--group G] [--playlist P] [--kind acestream|vk|raw] [--health ok|dead]
 lineup show|edit|rm|enable|disable <channel>   # channel = id, exact name, or any source input
 lineup playlist ls|show|create|rename|rm|add|remove|move|set|url

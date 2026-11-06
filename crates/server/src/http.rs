@@ -78,7 +78,10 @@ pub type AppState = App;
 
 #[derive(OpenApi)]
 #[openapi(
-    info(title = "lineup", description = "Channel and playlist manager for Jellyfin Live TV"),
+    info(
+        title = "lineup",
+        description = "IPTV channel and playlist manager: M3U playlists and XMLTV guides over HTTP"
+    ),
     components(schemas(SourceKind))
 )]
 struct ApiDoc;

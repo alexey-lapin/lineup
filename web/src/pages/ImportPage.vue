@@ -12,7 +12,7 @@ const router = useRouter()
 const invalidate = useInvalidateAll()
 
 const text = ref('')
-const slug = ref('jellyfin')
+const slug = ref('tv')
 /** The preview and the exact (text, slug) it was computed for; commit sends that snapshot. */
 const preview = ref<ImportReport | null>(null)
 let snapshot: { text: string; slug: string } | null = null

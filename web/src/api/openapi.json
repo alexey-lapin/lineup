@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "lineup",
-    "description": "Channel and playlist manager for Jellyfin Live TV",
+    "description": "IPTV channel and playlist manager: M3U playlists and XMLTV guides over HTTP",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -2702,7 +2702,7 @@
       },
       "SettingsTestResult": {
         "type": "object",
-        "description": "Outcome of a connection test, run from the lineup server (it cannot show whether Jellyfin or a\nphone reaches the same address).",
+        "description": "Outcome of a connection test, run from the lineup server (it cannot show whether your players\ncan reach the same address).",
         "required": [
           "ok",
           "url",

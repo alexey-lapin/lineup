@@ -325,8 +325,8 @@ pub struct SettingsTestRequest {
     pub base: Option<String>,
 }
 
-/// Outcome of a connection test, run from the lineup server (it cannot show whether Jellyfin or a
-/// phone reaches the same address).
+/// Outcome of a connection test, run from the lineup server (it cannot show whether your players
+/// can reach the same address).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SettingsTestResult {
     pub ok: bool,

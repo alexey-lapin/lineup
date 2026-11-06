@@ -169,7 +169,7 @@ async function deletePlaylist() {
       <div v-else-if="!items.length" class="py-10 text-center text-muted">This playlist is empty.</div>
 
       <p v-if="items.length" class="text-sm text-muted mb-2">
-        Drag to reorder. The number is the channel number Jellyfin shows (tvg-chno).
+        Drag to reorder. The number is the channel number players show (tvg-chno).
       </p>
       <VueDraggable
         v-model="items"
@@ -214,7 +214,7 @@ async function deletePlaylist() {
         <template #body>
           <div class="flex flex-col gap-4">
             <UFormField label="Name"><UInput v-model="edit.name" class="w-full" /></UFormField>
-            <UFormField label="Slug" help="Changing it changes the playlist URL (update Jellyfin too)">
+            <UFormField label="Slug" help="Changing it changes the playlist URL (update your players too)">
               <UInput v-model="edit.slug" class="w-full" autocapitalize="off" />
             </UFormField>
           </div>

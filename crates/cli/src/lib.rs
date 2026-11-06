@@ -14,7 +14,11 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 pub use client::{CliError, exit_code};
 
 #[derive(Debug, Parser)]
-#[command(name = "lineup", version, about = "Manage Jellyfin Live TV channels and playlists")]
+#[command(
+    name = "lineup",
+    version,
+    about = "Manage IPTV channels, M3U playlists and XMLTV guides"
+)]
 pub struct Cli {
     /// Server URL [default: from ~/.config/lineup/config.toml, else http://127.0.0.1:9300]
     #[arg(long, global = true, env = "LINEUP_SERVER")]

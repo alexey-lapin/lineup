@@ -121,7 +121,7 @@ export const api = {
     unwrap(client.GET('/epg/channels', { params: { query: { q: q || undefined, limit } } }))
 }
 
-/** Absolute URL of a playlist as Jellyfin should be configured with it. */
+/** Absolute URL of a playlist, as players and media servers are configured with it. */
 export function playlistUrl(slug: string): string {
   return `${window.location.origin}/p/${encodeURIComponent(slug)}.m3u`
 }

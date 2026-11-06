@@ -195,7 +195,7 @@ function triggerLabel(d: HookDelivery) {
       <UAlert v-if="error" color="error" variant="subtle" :title="error.message" />
       <p v-if="!isPending && !hooks?.length" class="text-sm text-muted max-w-2xl">
         Hooks run when playlists or guide data change. A Jellyfin hook starts its "Refresh Guide" task, so
-        Jellyfin picks up changes without waiting for its schedule. A webhook receives the events as JSON.
+        Jellyfin picks up changes without waiting for its schedule. A webhook sends the events as JSON to anything else.
       </p>
 
       <div class="flex flex-col gap-3">

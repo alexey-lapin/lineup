@@ -2,9 +2,9 @@
 
 ## 1. Problem
 
-Jellyfin Live TV can read an M3U tuner and XMLTV guides, but the playlist itself is usually a hand-edited file. When the channels are Acestream streams (played through [acexy](https://github.com/Javinator9889/acexy)) and live VK videos (played through a VK proxy), that file gets messy fast. The host address is repeated on every line, tvg-ids are matched to the guide by hand, and any script that builds the guide has to grep the file.
+Media servers (Jellyfin Live TV, Plex, Emby, Channels DVR) and IPTV players read channels from an M3U playlist and guide data from XMLTV, but the playlist itself is usually a hand-edited file. lineup started as a replacement for one such file behind Jellyfin. When the channels are Acestream streams (played through [acexy](https://github.com/Javinator9889/acexy)) and live VK videos (played through a VK proxy), that file gets messy fast. The host address is repeated on every line, tvg-ids are matched to the guide by hand, and any script that builds the guide has to grep the file.
 
-lineup is a standalone service that owns the channels. It serves playlists and their EPG over HTTP and refreshes Jellyfin. You drive it from a web UI (an iOS home-screen app) or from a CLI that agents can use too.
+lineup is a standalone service that owns the channels. It serves playlists and their EPG over HTTP to any client that reads them from a URL, and tells Jellyfin (or any webhook) when they change. You drive it from a web UI (an iOS home-screen app) or from a CLI that agents can use too.
 
 ## 2. Goals and non-goals
 

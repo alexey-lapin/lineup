@@ -10,7 +10,7 @@ docker compose -f deploy/compose.yaml up -d
 
 Pin a release tag rather than `latest`. The container runs as uid 10001 and stores everything under `/data`.
 
-Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI. Use addresses that Jellyfin and your players can reach, not `localhost`:
+Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI. Use addresses that your players and media server can reach, not `localhost`:
 
 | Setting | What it is | Example |
 |---|---|---|
@@ -18,7 +18,7 @@ Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, 
 | `engine_base` | the Acestream engine, used for name lookups and (later) health checks | `http://media-host:6878` |
 | `vk_base` | a VK proxy that serves `/vk/{owner}_{video}[?list=…]` | `http://media-host:8099` |
 
-Each has a **Test** button (or `lineup settings test acexy|engine|vk [--base URL]`) that checks, from the lineup server, that the service answers: acexy's status endpoint, the engine's version, or any HTTP answer from the VK proxy. It tests the URL as typed, before you save it. A passing test does not prove Jellyfin or a phone can reach the address, only that lineup can.
+Each has a **Test** button (or `lineup settings test acexy|engine|vk [--base URL]`) that checks, from the lineup server, that the service answers: acexy's status endpoint, the engine's version, or any HTTP answer from the VK proxy. It tests the URL as typed, before you save it. A passing test does not prove your players can reach the address, only that lineup can.
 
 ## Point the CLI at it
 
@@ -44,23 +44,25 @@ CLI binaries for macOS and Linux (x86_64 and arm64) are attached to each GitHub 
 If you already have an M3U file, import it. Preview first; nothing is written until the second command.
 
 ```sh
-lineup import ./channels.m3u -p jellyfin --dry-run
-lineup import ./channels.m3u -p jellyfin
+lineup import ./channels.m3u -p tv --dry-run
+lineup import ./channels.m3u -p tv
 ```
 
 Acestream and VK links are recognised in any of their usual forms (acexy or engine URLs, `acestream://` ids, vk.com and vkvideo.ru links, proxy URLs). Anything else is kept as a raw URL. Re-importing is safe: channels that already exist are reused and their details are kept, and the report shows where the file differs.
 
-## Connect Jellyfin
+## Use the playlist
 
-In Jellyfin, go to **Dashboard → Live TV → Tuner Devices → Add → M3U Tuner** and enter the playlist URL:
+Each playlist is a plain M3U file at a fixed URL:
 
 ```
-http://media-host:9300/p/jellyfin.m3u
+http://media-host:9300/p/tv.m3u
 ```
 
-`lineup playlist url jellyfin` prints it. The channel number in Jellyfin is the position in the playlist, so reordering in lineup reorders the guide.
+`lineup playlist url tv` prints it. Give it to anything that plays M3U from a URL: Jellyfin, Plex, Emby or Channels DVR as a tuner, an IPTV app such as TiviMate or IPTV Smarters, or VLC and Kodi directly. Each channel's number (`tvg-chno`) is its position in the playlist, so reordering in lineup reorders the channel list.
 
-If you replace an existing tuner, Jellyfin may treat the channels as new, because channel ids depend partly on the tuner URL. Favourites can reset.
+### Jellyfin
+
+Go to **Dashboard → Live TV → Tuner Devices → Add → M3U Tuner** and enter the playlist URL. If you replace an existing tuner, Jellyfin may treat the channels as new, because channel ids depend partly on the tuner URL. Favourites can reset.
 
 ## Guide data
 
@@ -77,14 +79,16 @@ lineup downloads each source shortly after it is added, 3 minutes after every st
 Each playlist gets its own guide with just its channels:
 
 ```
-http://media-host:9300/p/jellyfin/epg.xml
+http://media-host:9300/p/tv/epg.xml
 ```
 
-In Jellyfin, go to **Dashboard → Live TV → TV Guide Data Providers → Add → XMLTV** and enter that URL. A channel gets guide data when its tvg-id matches a channel id in one of the sources. Channels marked as events get placeholder programmes ("Pre-match", the event, then "ended") built from their kickoff time, so they always show up in the guide.
+Add it wherever your player takes an XMLTV guide; in Jellyfin that is **Dashboard → Live TV → TV Guide Data Providers → Add → XMLTV**. A channel gets guide data when its tvg-id matches a channel id in one of the sources. Channels marked as events get placeholder programmes ("Pre-match", the event, then "ended") built from their kickoff time, so they always show up in the guide.
 
-Jellyfin keeps a downloaded guide for about an hour, so guide changes can take that long to appear.
+Players cache the guide (Jellyfin for about an hour), so guide changes can take a while to appear.
 
-## Refresh Jellyfin automatically
+## Tell Jellyfin, or anything else, about changes
+
+Players and media servers re-read the playlist and guide on their own schedule. Hooks let lineup tell them right away.
 
 A Jellyfin hook runs Jellyfin's **Refresh Guide** task whenever a playlist or guide data changes, so new channels show up without waiting for Jellyfin's own schedule. Create an API key in Jellyfin (**Dashboard → API Keys**), then add the hook under **Hooks** in the UI, or:
 
@@ -99,7 +103,7 @@ Changes are collected for 30 seconds (`--debounce`) and delivered together. Beca
 A webhook hook sends the same events as JSON to any URL (`lineup hook add webhook <name> <url>`):
 
 ```json
-{"events": [{"type": "playlist.changed", "at": "…", "payload": {"slugs": ["jellyfin"]}}],
+{"events": [{"type": "playlist.changed", "at": "…", "payload": {"slugs": ["tv"]}}],
  "window_start": "…", "window_end": "…"}
 ```
 
@@ -119,11 +123,11 @@ Scheduled checks are off by default; set `probe_interval_hours` (Settings, or `l
 
 `docker logs lineup` shows, at the default `LINEUP_LOG=info`:
 
-- every change event (`event playlist.changed {"slugs":["jellyfin"]}`, `epg.updated`, …);
+- every change event (`event playlist.changed {"slugs":["tv"]}`, `epg.updated`, …);
 - each guide fetch per source (updated with channel and programme counts, not modified, or the error), and a summary of each scheduled run;
 - each hook delivery, successful or not;
 - health-check runs and each channel's result;
-- every change made through the API, and every playlist or guide download (`192.168.1.50 GET /p/jellyfin.m3u 200 3 ms`), so you can see when Jellyfin re-reads them.
+- every change made through the API, and every playlist or guide download (`192.168.1.50 GET /p/tv.m3u 200 3 ms`), so you can see when your players re-read them.
 
 `LINEUP_LOG=debug` adds every other request.
 

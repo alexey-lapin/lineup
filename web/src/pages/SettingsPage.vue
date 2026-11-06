@@ -175,8 +175,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
               :actions="[{ label: 'Retry', onClick: () => refetchChannels() }]"
             />
             <p class="text-sm text-muted">
-              Playlists send Jellyfin and your players to acexy and the VK proxy, so use addresses they can reach,
-              not localhost. Only the lineup server talks to the Acestream engine.
+              Playlists send your players and media server to acexy and the VK proxy, so use addresses they can
+              reach, not localhost. Only the lineup server talks to the Acestream engine.
             </p>
           </div>
 
