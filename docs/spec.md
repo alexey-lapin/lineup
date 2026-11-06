@@ -360,4 +360,4 @@ deploy/          example compose.yaml, restore.sh
 - Which acexy versions support `/ace/status?id=`? Without it, the global guard applies.
 - The exact engine `format=json` response (the envelope, and the loopback host in returned URLs). Capture as test fixtures before M3.
 - Does every VK proxy need the `list` hash, or is it optional?
-- Does RefreshGuide re-download an M3U from a URL tuner, and how long is Jellyfin's XMLTV cache window (about 1h upstream)? Measure in M2 and adjust `followup_minutes`.
+- Does RefreshGuide re-download an M3U from a URL tuner, and how long is Jellyfin's XMLTV cache window (about 1h upstream)? Observed on a real install: RefreshGuide via a webhook works; the follow-up setting was removed in 0.3.0.
