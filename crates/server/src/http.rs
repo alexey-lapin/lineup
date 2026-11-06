@@ -5,8 +5,9 @@ use std::sync::Arc;
 use api_types::{
     Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgSource, EpgSourceCreate,
     EpgSourcePatch, ErrorBody, ErrorDetail, Hook, HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest,
-    ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse,
-    ResolveRequest, ResolveResponse, Settings, SettingsPatch, SourceKind, Status,
+    ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeOutcome, ProbeRequest,
+    ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch,
+    SourceKind, Status,
 };
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
@@ -30,6 +31,7 @@ pub struct App {
     pub store: Arc<Store>,
     pub epg: Arc<Epg>,
     pub hooks: Arc<crate::hooks::Hooks>,
+    pub prober: Arc<crate::probe::Prober>,
     /// Where temporary files (backups) are written; the data dir in production.
     scratch: std::path::PathBuf,
     /// Flips to true on shutdown, ending open event streams so the server can stop.
@@ -50,6 +52,7 @@ impl App {
         let epg = Epg::new(store.clone(), data_dir);
         App {
             hooks: crate::hooks::Hooks::new(store.clone(), epg.client().clone(), timing),
+            prober: crate::probe::Prober::new(store.clone(), epg.client().clone(), Default::default()),
             epg,
             store,
             scratch: data_dir.to_path_buf(),
@@ -86,6 +89,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(list_channels, create_channel))
         .routes(routes!(get_channel, patch_channel, delete_channel))
         .routes(routes!(resolve))
+        .routes(routes!(probe))
         .routes(routes!(list_playlists, create_playlist))
         .routes(routes!(get_playlist, patch_playlist, delete_playlist))
         .routes(routes!(add_item, replace_items))
@@ -234,6 +238,8 @@ struct ChannelQuery {
     /// Only channels in this playlist.
     playlist: Option<String>,
     kind: Option<SourceKind>,
+    /// Only channels whose last conclusive probe result is this (`ok` or `dead`).
+    health: Option<ProbeOutcome>,
 }
 
 #[utoipa::path(get, path = "/channels", params(ChannelQuery), responses((status = 200, body = Vec<Channel>)))]
@@ -246,6 +252,7 @@ async fn list_channels(
         q: q.q,
         playlist: q.playlist,
         kind: q.kind,
+        health: q.health,
     };
     Ok(Json(s.list_channels(&filter).await?))
 }
@@ -287,6 +294,35 @@ async fn delete_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) ->
 async fn resolve(State(s): State<AppState>, Body(req): Body<ResolveRequest>) -> ApiResult<Json<ResolveResponse>> {
     Ok(Json(
         crate::resolve::resolve(&s.store, s.epg.client(), &req.input).await?,
+    ))
+}
+
+/// Probe acestream channels. With `ids`, waits and returns their results; without, starts a run over
+/// all enabled acestream channels in the background (202).
+#[utoipa::path(post, path = "/probe", request_body = ProbeRequest,
+    responses((status = 200, body = ProbeResponse), (status = 202, body = ProbeResponse),
+        (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
+async fn probe(
+    State(s): State<AppState>,
+    Body(req): Body<ProbeRequest>,
+) -> ApiResult<(StatusCode, Json<ProbeResponse>)> {
+    if req.ids.is_empty() {
+        s.prober.spawn_all(req.force);
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(ProbeResponse {
+                background: true,
+                results: vec![],
+            }),
+        ));
+    }
+    let results = s.prober.probe(&req.ids, req.force).await?;
+    Ok((
+        StatusCode::OK,
+        Json(ProbeResponse {
+            background: false,
+            results,
+        }),
     ))
 }
 

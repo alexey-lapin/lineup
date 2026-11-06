@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use crate::error::{Error, Result, conflict, invalid, is_unique_violation, not_found};
 use crate::{m3u, source};
 
-/// Change notifications (consumed by SSE and, later, hooks).
+/// Change notifications, consumed by SSE and hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     PlaylistChanged {
@@ -31,14 +31,32 @@ pub enum Event {
     EpgUpdated {
         sources: Vec<i64>,
     },
+    /// A channel's conclusive health became `dead` (also the first result being dead).
+    ChannelUnhealthy {
+        channel_id: i64,
+        name: String,
+        detail: Option<serde_json::Value>,
+    },
+    /// A channel's conclusive health went from `dead` to `ok`.
+    ChannelRecovered {
+        channel_id: i64,
+        name: String,
+    },
+    /// A probe finished without a health transition (live UI updates only).
+    ChannelProbed {
+        channel_id: i64,
+    },
 }
 
 impl Event {
-    /// Wire name, as used for SSE and (later) hooks.
+    /// Wire name, as used for SSE and hooks.
     pub fn kind(&self) -> &'static str {
         match self {
             Event::PlaylistChanged { .. } => "playlist.changed",
             Event::EpgUpdated { .. } => "epg.updated",
+            Event::ChannelUnhealthy { .. } => "channel.unhealthy",
+            Event::ChannelRecovered { .. } => "channel.recovered",
+            Event::ChannelProbed { .. } => "channel.probed",
         }
     }
 
@@ -46,12 +64,23 @@ impl Event {
         match self {
             Event::PlaylistChanged { slugs } => serde_json::json!({ "slugs": slugs }),
             Event::EpgUpdated { sources } => serde_json::json!({ "sources": sources }),
+            Event::ChannelUnhealthy {
+                channel_id,
+                name,
+                detail,
+            } => serde_json::json!({ "channel_id": channel_id, "name": name, "detail": detail }),
+            Event::ChannelRecovered { channel_id, name } => {
+                serde_json::json!({ "channel_id": channel_id, "name": name })
+            }
+            Event::ChannelProbed { channel_id } => serde_json::json!({ "channel_id": channel_id }),
         }
     }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct ChannelFilter {
+    /// Only channels whose conclusive health is this.
+    pub health: Option<api_types::ProbeOutcome>,
     pub group: Option<String>,
     pub q: Option<String>,
     pub playlist: Option<String>,
@@ -142,6 +171,14 @@ impl Store {
             }
             new.epg_refresh_hours = v;
         }
+        if let Some(v) = patch.probe_interval_hours {
+            if v > MAX_EPG_REFRESH_HOURS {
+                return Err(invalid(format!(
+                    "probe_interval_hours must be at most {MAX_EPG_REFRESH_HOURS}"
+                )));
+            }
+            new.probe_interval_hours = v;
+        }
         save_settings(&mut tx, &new).await?;
 
         let mut affected = BTreeSet::new();
@@ -170,6 +207,9 @@ impl Store {
                 .is_none_or(|g| c.group_title.as_deref() == Some(g.as_str()))
                 && filter.playlist.as_ref().is_none_or(|p| c.playlists.contains(p))
                 && filter.kind.is_none_or(|k| c.source.kind() == k)
+                && filter
+                    .health
+                    .is_none_or(|h| c.health.as_ref().and_then(|x| x.conclusive) == Some(h))
                 && q.as_ref().is_none_or(|q| {
                     c.name.to_lowercase().contains(q)
                         || c.tvg_id.as_deref().is_some_and(|t| t.to_lowercase().contains(q))
@@ -844,6 +884,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
         engine_base: DEFAULT_ENGINE.into(),
         vk_base: DEFAULT_VK.into(),
         epg_refresh_hours: DEFAULT_EPG_REFRESH_HOURS,
+        probe_interval_hours: 0,
     };
     for r in rows {
         let key: String = r.try_get("key")?;
@@ -853,6 +894,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
             "engine_base" => s.engine_base = serde_json::from_str(&value)?,
             "vk_base" => s.vk_base = serde_json::from_str(&value)?,
             "epg_refresh_hours" => s.epg_refresh_hours = serde_json::from_str(&value)?,
+            "probe_interval_hours" => s.probe_interval_hours = serde_json::from_str(&value)?,
             _ => {}
         }
     }
@@ -865,6 +907,7 @@ async fn save_settings(conn: &mut SqliteConnection, s: &Settings) -> Result<()> 
         ("engine_base", serde_json::to_string(&s.engine_base)?),
         ("vk_base", serde_json::to_string(&s.vk_base)?),
         ("epg_refresh_hours", serde_json::to_string(&s.epg_refresh_hours)?),
+        ("probe_interval_hours", serde_json::to_string(&s.probe_interval_hours)?),
     ];
     for (k, v) in pairs {
         sqlx::query(
@@ -955,6 +998,7 @@ async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result
     for m in memberships {
         by_channel.entry(m.get("channel_id")).or_default().push(m.get("slug"));
     }
+    let mut health = health::load_health(conn, only).await?;
     rows.iter()
         .map(|r| {
             let id: i64 = r.try_get("id")?;
@@ -973,6 +1017,7 @@ async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result
                 kickoff_at: kickoff.as_deref().map(parse_ts).transpose()?,
                 enabled: r.try_get("enabled")?,
                 playlists: by_channel.remove(&id).unwrap_or_default(),
+                health: health.remove(&id),
                 created_at: parse_ts(&r.try_get::<String, _>("created_at")?)?,
                 updated_at: parse_ts(&r.try_get::<String, _>("updated_at")?)?,
             })
@@ -1152,6 +1197,7 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str, url_tvg: Option<&st
 }
 
 mod epg;
+mod health;
 mod hooks;
 pub use epg::{FetchOutcome, IndexedChannel, PatchedSource};
 pub use hooks::{DELIVERIES_KEPT, NewDelivery};

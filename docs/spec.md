@@ -233,9 +233,10 @@ This measures **swarm health**, not a guarantee that playback works.
 - Viewers can still start between checks. This is best effort; check concurrent playback behaviour before turning the schedule on.
 
 **Schedule**
-- 10 min after start, then every 6h (configurable; default **off**).
+- 10 min after start, then every `probe_interval_hours` (default 0, which is **off**). A run stopped by the guard is retried after 30 min.
 - One channel at a time.
-- Manual probes from the UI or CLI (`POST /probe {ids?: [], force: bool}`) apply the same guard unless `force` is set.
+- Manual probes from the UI or CLI (`POST /probe {ids?: [], force: bool}`) apply the same guard unless `force` is set. With ids the request waits and returns the results; without, the run continues in the background (202).
+- An acexy per-id status that is a 200 is read for a client count (`clients`, `streams`, `viewers` or `active`); when it has none, the id is skipped rather than risk interrupting a viewer.
 
 **Results**
 - Results only write `channel_health`.
@@ -349,7 +350,7 @@ deploy/          example compose.yaml, restore.sh
 - Sources, scheduled fetch with raw retention and indexes, per-playlist epg.xml, VK placeholders, resolve/suggestions, the add flow in UI and CLI.
 - Jellyfin setup doc: one XMLTV provider pointing at `/p/<slug>/epg.xml`. Note that Jellyfin derives channel ids partly from the tuner URL, so switching an existing tuner to lineup can reset favourites.
 
-**M3 Hooks + health.**
+**M3 Hooks + health** (done).
 - Event bus consumers, Jellyfin hook (with follow-up) and webhook hooks, delivery log, SSE.
 - Probes, with the schedule off by default until the engine response and acexy status have been captured as test fixtures.
 

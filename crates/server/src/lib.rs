@@ -2,6 +2,7 @@ pub mod epg;
 pub mod error;
 pub mod hooks;
 pub mod m3u;
+pub mod probe;
 pub mod resolve;
 pub mod source;
 pub mod store;
@@ -31,6 +32,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     app.epg.recover().await?;
     app.epg.spawn_scheduler();
     app.hooks.spawn();
+    app.prober.spawn_scheduler();
     let handle = app.clone();
     let router = http::router_for(app);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;

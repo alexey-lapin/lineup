@@ -4,6 +4,60 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeOutcome {
+    /// The swarm has peers or is downloading.
+    Ok,
+    /// The session started but stayed in prebuffering with no peers.
+    Dead,
+    /// The engine or network failed; says nothing about the stream.
+    Unknown,
+    /// Not probed because the stream was being watched (or the guard could not tell).
+    Skipped,
+}
+
+/// Probe results of a channel. Only `ok` and `dead` are conclusive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ChannelHealth {
+    /// Last conclusive result (`ok` or `dead`); drives the badge and events.
+    pub conclusive: Option<ProbeOutcome>,
+    pub conclusive_at: Option<DateTime<Utc>>,
+    pub last_attempt: ProbeOutcome,
+    pub last_attempt_at: DateTime<Utc>,
+    /// Engine statistics or the error of the last attempt.
+    #[schema(value_type = Object)]
+    pub detail: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ProbeRequest {
+    /// Channels to probe; all enabled acestream channels when empty (that run continues in the
+    /// background).
+    #[serde(default)]
+    pub ids: Vec<i64>,
+    /// Probe even if the stream seems to be in use.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProbeResult {
+    pub channel_id: i64,
+    pub outcome: ProbeOutcome,
+    #[schema(value_type = Object)]
+    pub detail: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProbeResponse {
+    /// True when a run over all channels was started in the background; results then arrive as
+    /// channel updates and events.
+    pub background: bool,
+    /// Results, when specific channels were probed.
+    pub results: Vec<ProbeResult>,
+}
+
 /// A channel's stream source. The full URL is built from the per-kind base URL in settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -75,6 +129,8 @@ pub struct Channel {
     pub enabled: bool,
     /// Slugs of playlists containing this channel.
     pub playlists: Vec<String>,
+    /// Swarm health from probes (acestream channels only); null until probed.
+    pub health: Option<ChannelHealth>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -229,6 +285,9 @@ pub struct Settings {
     pub vk_base: String,
     /// Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
     pub epg_refresh_hours: u32,
+    /// Hours between scheduled health probes of all acestream channels (the first runs 10 minutes
+    /// after start); 0, the default, turns them off.
+    pub probe_interval_hours: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -241,6 +300,8 @@ pub struct SettingsPatch {
     pub vk_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epg_refresh_hours: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_interval_hours: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

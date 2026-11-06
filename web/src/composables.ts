@@ -86,6 +86,9 @@ export function useLiveUpdates() {
     es.addEventListener('resync', everything)
     es.addEventListener('playlist.changed', () => refetch('channels', 'playlists', 'playlist'))
     es.addEventListener('epg.updated', () => refetch('epg-sources'))
+    for (const e of ['channel.unhealthy', 'channel.recovered', 'channel.probed']) {
+      es.addEventListener(e, () => refetch('channels', 'playlist'))
+    }
   })
   onBeforeUnmount(() => es?.close())
 }

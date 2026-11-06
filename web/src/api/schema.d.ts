@@ -275,6 +275,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Probe acestream channels. With `ids`, waits and returns their results; without, starts a run over
+         *     all enabled acestream channels in the background (202).
+         */
+        post: operations["probe"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/refresh": {
         parameters: {
             query?: never;
@@ -348,6 +368,7 @@ export interface components {
             created_at: string;
             enabled: boolean;
             group_title?: string | null;
+            health?: components["schemas"]["ChannelHealth"] | null;
             /** Format: int64 */
             id: number;
             is_event: boolean;
@@ -379,6 +400,17 @@ export interface components {
             source?: components["schemas"]["Source"] | null;
             tvg_id?: string | null;
             tvg_logo?: string | null;
+        };
+        /** @description Probe results of a channel. Only `ok` and `dead` are conclusive. */
+        ChannelHealth: {
+            conclusive?: components["schemas"]["ProbeOutcome"] | null;
+            /** Format: date-time */
+            conclusive_at?: string | null;
+            /** @description Engine statistics or the error of the last attempt. */
+            detail: Record<string, never>;
+            last_attempt: components["schemas"]["ProbeOutcome"];
+            /** Format: date-time */
+            last_attempt_at: string;
         };
         /** @description Partial update. Absent fields are left unchanged; for nullable fields, `null` clears. */
         ChannelPatch: {
@@ -656,6 +688,32 @@ export interface components {
             name?: string | null;
             slug?: string | null;
         };
+        /** @enum {string} */
+        ProbeOutcome: "ok" | "dead" | "unknown" | "skipped";
+        ProbeRequest: {
+            /** @description Probe even if the stream seems to be in use. */
+            force?: boolean;
+            /**
+             * @description Channels to probe; all enabled acestream channels when empty (that run continues in the
+             *     background).
+             */
+            ids?: number[];
+        };
+        ProbeResponse: {
+            /**
+             * @description True when a run over all channels was started in the background; results then arrive as
+             *     channel updates and events.
+             */
+            background: boolean;
+            /** @description Results, when specific channels were probed. */
+            results: components["schemas"]["ProbeResult"][];
+        };
+        ProbeResult: {
+            /** Format: int64 */
+            channel_id: number;
+            detail: Record<string, never>;
+            outcome: components["schemas"]["ProbeOutcome"];
+        };
         RefreshRequest: {
             /** @description Playlists to refresh; all when absent or empty. */
             slugs?: string[];
@@ -692,6 +750,12 @@ export interface components {
              * @description Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
              */
             epg_refresh_hours: number;
+            /**
+             * Format: int32
+             * @description Hours between scheduled health probes of all acestream channels (the first runs 10 minutes
+             *     after start); 0, the default, turns them off.
+             */
+            probe_interval_hours: number;
             vk_base: string;
         };
         SettingsPatch: {
@@ -699,6 +763,8 @@ export interface components {
             engine_base?: string | null;
             /** Format: int32 */
             epg_refresh_hours?: number | null;
+            /** Format: int32 */
+            probe_interval_hours?: number | null;
             vk_base?: string | null;
         };
         /** @description A channel's stream source. The full URL is built from the per-kind base URL in settings. */
@@ -751,6 +817,8 @@ export interface operations {
                 /** @description Only channels in this playlist. */
                 playlist?: string;
                 kind?: components["schemas"]["SourceKind"];
+                /** @description Only channels whose last conclusive probe result is this (`ok` or `dead`). */
+                health?: components["schemas"]["ProbeOutcome"];
             };
             header?: never;
             path?: never;
@@ -1608,6 +1676,53 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProbeRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProbeResponse"];
+                };
+            };
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProbeResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

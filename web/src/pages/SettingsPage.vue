@@ -13,7 +13,8 @@ const state = ref({
   acexy_base: '',
   engine_base: '',
   vk_base: '',
-  epg_refresh_hours: 6
+  epg_refresh_hours: 6,
+  probe_interval_hours: 0
 })
 watch(
   settings,
@@ -23,6 +24,7 @@ watch(
     state.value.engine_base = s.engine_base
     state.value.vk_base = s.vk_base
     state.value.epg_refresh_hours = s.epg_refresh_hours
+    state.value.probe_interval_hours = s.probe_interval_hours
   },
   { immediate: true }
 )
@@ -37,7 +39,8 @@ async function save() {
         acexy_base: state.value.acexy_base,
         engine_base: state.value.engine_base,
         vk_base: state.value.vk_base,
-        epg_refresh_hours: Number(state.value.epg_refresh_hours) || 0
+        epg_refresh_hours: Number(state.value.epg_refresh_hours) || 0,
+        probe_interval_hours: Number(state.value.probe_interval_hours) || 0
       }),
     'Settings saved'
   )
@@ -82,6 +85,16 @@ async function save() {
             help="Guide sources are fetched 3 minutes after start, then at this interval. 0 turns the schedule off."
           >
             <UInput v-model.number="state.epg_refresh_hours" type="number" min="0" max="168" class="w-32" />
+          </UFormField>
+        </section>
+
+        <section class="flex flex-col gap-4">
+          <h2 class="font-semibold">Health checks</h2>
+          <UFormField
+            label="Check every (hours)"
+            help="Probes each acestream channel's swarm through the engine, skipping streams someone is watching. 0 (the default) turns the schedule off; channels can still be checked by hand."
+          >
+            <UInput v-model.number="state.probe_interval_hours" type="number" min="0" max="168" class="w-32" />
           </UFormField>
         </section>
 

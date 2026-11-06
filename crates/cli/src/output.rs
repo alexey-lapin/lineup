@@ -2,7 +2,8 @@
 
 use api_types::{
     Channel, DeliveryTrigger, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource, Hook, HookConfig, HookDelivery,
-    ImportAction, ImportReport, Playlist, PlaylistDetail, ResolveResponse, Settings, Source, Status,
+    ImportAction, ImportReport, Playlist, PlaylistDetail, ProbeOutcome, ProbeResult, ResolveResponse, Settings, Source,
+    Status,
 };
 
 pub fn source_label(s: &Source) -> String {
@@ -55,7 +56,7 @@ pub fn channels(list: &[Channel]) {
         return;
     }
     table(
-        &["ID", "NAME", "GROUP", "SOURCE", "TVG-ID", "PLAYLISTS"],
+        &["ID", "NAME", "GROUP", "SOURCE", "TVG-ID", "HEALTH", "PLAYLISTS"],
         list.iter()
             .map(|c| {
                 let name = if c.enabled {
@@ -70,11 +71,49 @@ pub fn channels(list: &[Channel]) {
                     c.group_title.clone().unwrap_or_default(),
                     source_label(&c.source),
                     c.tvg_id.clone().unwrap_or_default(),
+                    health_label(c),
                     c.playlists.join(","),
                 ]
             })
             .collect(),
     );
+}
+
+fn outcome(o: ProbeOutcome) -> &'static str {
+    match o {
+        ProbeOutcome::Ok => "ok",
+        ProbeOutcome::Dead => "dead",
+        ProbeOutcome::Unknown => "unknown",
+        ProbeOutcome::Skipped => "skipped",
+    }
+}
+
+/// The conclusive result, with the latest attempt when it was inconclusive ("ok (unknown)").
+fn health_label(c: &Channel) -> String {
+    match &c.health {
+        None => String::new(),
+        Some(h) => {
+            let base = h.conclusive.map_or("-", outcome);
+            if h.conclusive != Some(h.last_attempt) {
+                format!("{base} ({})", outcome(h.last_attempt))
+            } else {
+                base.to_string()
+            }
+        }
+    }
+}
+
+pub fn probe_results(list: &[ProbeResult]) {
+    for r in list {
+        let detail = r
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("error").or_else(|| d.get("reason")))
+            .and_then(|v| v.as_str())
+            .map(|s| format!(": {s}"))
+            .unwrap_or_default();
+        println!("channel {}: {}{detail}", r.channel_id, outcome(r.outcome));
+    }
 }
 
 pub fn channel(c: &Channel) {
@@ -204,6 +243,7 @@ pub fn settings(s: &Settings) {
     println!("engine_base: {}", s.engine_base);
     println!("vk_base:     {}", s.vk_base);
     println!("epg_refresh_hours: {}", s.epg_refresh_hours);
+    println!("probe_interval_hours: {}", s.probe_interval_hours);
 }
 
 /// The suggested metadata of a resolve, one field per line.

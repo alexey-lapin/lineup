@@ -1,8 +1,8 @@
 use api_types::{
     Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource,
     EpgSourceCreate, EpgSourcePatch, Hook, HookConfig, HookCreate, HookDelivery, HookPatch, ImportReport,
-    ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, RefreshRequest,
-    RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch, Status,
+    ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeRequest,
+    ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch, Status,
 };
 use serde::Serialize;
 
@@ -240,6 +240,8 @@ pub async fn run(cli: Cli) -> R {
                 playlist: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 kind: Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                health: Option<&'static str>,
             }
             let list: Vec<Channel> =
                 x.c.get_query(
@@ -249,6 +251,10 @@ pub async fn run(cli: Cli) -> R {
                         group: l.group,
                         playlist: l.playlist,
                         kind: l.kind.map(|k| k.as_str().to_string()),
+                        health: l.health.map(|h| match h {
+                            crate::HealthArg::Ok => "ok",
+                            crate::HealthArg::Dead => "dead",
+                        }),
                     },
                 )
                 .await?;
@@ -337,6 +343,20 @@ pub async fn run(cli: Cli) -> R {
         Command::Epg(cmd) => epg(&mut x, cmd).await?,
         Command::Hook(cmd) => hook(&mut x, cmd).await?,
 
+        Command::Probe { channels, force } => {
+            let mut ids = Vec::new();
+            for c in &channels {
+                ids.push(x.channel_id(c).await?);
+            }
+            let r: ProbeResponse = x.c.post_slow("/probe", &ProbeRequest { ids, force }).await?;
+            x.emit(&r, |r| {
+                if r.background {
+                    println!("probing all acestream channels in the background; see `lineup ls` for results");
+                }
+                output::probe_results(&r.results);
+            });
+        }
+
         Command::Refresh { slugs } => {
             let r: RefreshResponse = x.c.post("/refresh", &RefreshRequest { slugs }).await?;
             x.emit(&r, |r| println!("refreshed: {}", r.slugs.join(", ")));
@@ -352,6 +372,13 @@ pub async fn run(cli: Cli) -> R {
                 "acexy_base" => patch.acexy_base = Some(value),
                 "engine_base" => patch.engine_base = Some(value),
                 "vk_base" => patch.vk_base = Some(value),
+                "probe_interval_hours" => {
+                    patch.probe_interval_hours = Some(
+                        value
+                            .parse()
+                            .map_err(|_| CliError::Usage(format!("probe_interval_hours: not a number: {value:?}")))?,
+                    )
+                }
                 "epg_refresh_hours" => {
                     patch.epg_refresh_hours = Some(
                         value

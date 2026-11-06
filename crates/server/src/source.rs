@@ -234,6 +234,7 @@ mod tests {
             engine_base: "http://10.0.0.5:6878".into(),
             vk_base: "http://10.0.0.5:8099/".into(),
             epg_refresh_hours: 6,
+            probe_interval_hours: 0,
         }
     }
 

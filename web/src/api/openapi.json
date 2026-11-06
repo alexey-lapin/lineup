@@ -53,6 +53,15 @@
             "schema": {
               "$ref": "#/components/schemas/SourceKind"
             }
+          },
+          {
+            "name": "health",
+            "in": "query",
+            "description": "Only channels whose last conclusive probe result is this (`ok` or `dead`).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ProbeOutcome"
+            }
           }
         ],
         "responses": {
@@ -1109,6 +1118,60 @@
         }
       }
     },
+    "/probe": {
+      "post": {
+        "summary": "Probe acestream channels. With `ids`, waits and returns their results; without, starts a run over\nall enabled acestream channels in the background (202).",
+        "operationId": "probe",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProbeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/refresh": {
       "post": {
         "operationId": "refresh",
@@ -1275,6 +1338,17 @@
               "null"
             ]
           },
+          "health": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChannelHealth",
+                "description": "Swarm health from probes (acestream channels only); null until probed."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "id": {
             "type": "integer",
             "format": "int64"
@@ -1391,6 +1465,46 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ChannelHealth": {
+        "type": "object",
+        "description": "Probe results of a channel. Only `ok` and `dead` are conclusive.",
+        "required": [
+          "last_attempt",
+          "last_attempt_at",
+          "detail"
+        ],
+        "properties": {
+          "conclusive": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProbeOutcome",
+                "description": "Last conclusive result (`ok` or `dead`); drives the badge and events."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "conclusive_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "detail": {
+            "type": "object",
+            "description": "Engine statistics or the error of the last attempt."
+          },
+          "last_attempt": {
+            "$ref": "#/components/schemas/ProbeOutcome"
+          },
+          "last_attempt_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -2298,6 +2412,72 @@
           }
         }
       },
+      "ProbeOutcome": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "dead",
+          "unknown",
+          "skipped"
+        ]
+      },
+      "ProbeRequest": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "description": "Probe even if the stream seems to be in use."
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Channels to probe; all enabled acestream channels when empty (that run continues in the\nbackground)."
+          }
+        }
+      },
+      "ProbeResponse": {
+        "type": "object",
+        "required": [
+          "background",
+          "results"
+        ],
+        "properties": {
+          "background": {
+            "type": "boolean",
+            "description": "True when a run over all channels was started in the background; results then arrive as\nchannel updates and events."
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProbeResult"
+            },
+            "description": "Results, when specific channels were probed."
+          }
+        }
+      },
+      "ProbeResult": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "outcome",
+          "detail"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "detail": {
+            "type": "object"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ProbeOutcome"
+          }
+        }
+      },
       "RefreshRequest": {
         "type": "object",
         "properties": {
@@ -2394,7 +2574,8 @@
           "acexy_base",
           "engine_base",
           "vk_base",
-          "epg_refresh_hours"
+          "epg_refresh_hours",
+          "probe_interval_hours"
         ],
         "properties": {
           "acexy_base": {
@@ -2407,6 +2588,12 @@
             "type": "integer",
             "format": "int32",
             "description": "Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.",
+            "minimum": 0
+          },
+          "probe_interval_hours": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Hours between scheduled health probes of all acestream channels (the first runs 10 minutes\nafter start); 0, the default, turns them off.",
             "minimum": 0
           },
           "vk_base": {
@@ -2430,6 +2617,14 @@
             ]
           },
           "epg_refresh_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "probe_interval_hours": {
             "type": [
               "integer",
               "null"

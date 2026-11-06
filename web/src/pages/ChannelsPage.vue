@@ -63,6 +63,41 @@ async function toggle(c: Channel) {
   }
 }
 
+const probing = ref<number | 'all' | null>(null)
+
+async function probe(c: Channel) {
+  probing.value = c.id
+  const r = await run(() => api.probe([c.id]))
+  probing.value = null
+  if (!r.ok) return
+  await invalidate()
+  const res = r.value.results[0]
+  if (!res) return
+  const reason = (res.detail as { error?: string; reason?: string } | null)?.error ?? (res.detail as { reason?: string } | null)?.reason
+  const color = res.outcome === 'ok' ? 'success' : res.outcome === 'dead' ? 'error' : 'warning'
+  toast.add({ title: `${c.name}: ${res.outcome}`, description: reason, color })
+}
+
+async function probeAll() {
+  probing.value = 'all'
+  const r = await run(() => api.probe([]), 'Probing all acestream channels in the background')
+  probing.value = null
+  void r
+}
+
+/** Badge for the last conclusive probe; a hint when the latest attempt was inconclusive. */
+function health(c: Channel) {
+  const h = c.health
+  if (!h) return null
+  const color = h.conclusive === 'ok' ? 'success' : h.conclusive === 'dead' ? 'error' : 'neutral'
+  const label = h.conclusive ?? h.last_attempt
+  const hint =
+    h.conclusive !== h.last_attempt
+      ? `Latest attempt ${new Date(h.last_attempt_at).toLocaleString()}: ${h.last_attempt}`
+      : `Checked ${new Date(h.last_attempt_at).toLocaleString()}`
+  return { color, label, hint, stale: h.conclusive !== h.last_attempt } as const
+}
+
 async function confirmDelete() {
   const c = deleting.value
   if (!c) return
@@ -82,6 +117,9 @@ function actions(c: Channel): DropdownMenuItem[][] {
       }
     ],
     [
+      ...(c.source.kind === 'acestream'
+        ? [{ label: 'Check health', icon: 'i-lucide-activity', onSelect: () => probe(c) }]
+        : []),
       { label: 'Copy stream URL', icon: 'i-lucide-clipboard', onSelect: () => copy(c.stream_url, toast) },
       { label: 'Open in VLC', icon: 'i-lucide-play', href: links.vlc },
       { label: 'Open in Infuse', icon: 'i-lucide-play', href: links.infuse }
@@ -99,6 +137,15 @@ function actions(c: Channel): DropdownMenuItem[][] {
           <UDashboardSidebarCollapse />
         </template>
         <template #right>
+          <UButton
+            icon="i-lucide-activity"
+            color="neutral"
+            variant="subtle"
+            label="Check all"
+            class="hidden sm:inline-flex"
+            :loading="probing === 'all'"
+            @click="probeAll"
+          />
           <UButton icon="i-lucide-plus" label="Add" @click="openAdd" />
         </template>
       </UDashboardNavbar>
@@ -132,6 +179,15 @@ function actions(c: Channel): DropdownMenuItem[][] {
               <div v-if="row.original.tvg_id" class="text-xs text-muted truncate">{{ row.original.tvg_id }}</div>
             </div>
             <UBadge v-if="row.original.is_event" label="event" color="warning" variant="subtle" size="sm" />
+            <UTooltip v-if="health(row.original)" :text="health(row.original)!.hint">
+              <UBadge
+                :label="health(row.original)!.label"
+                :color="health(row.original)!.color"
+                :variant="health(row.original)!.stale ? 'outline' : 'subtle'"
+                size="sm"
+              />
+            </UTooltip>
+            <UIcon v-if="probing === row.original.id" name="i-lucide-loader-circle" class="size-4 animate-spin text-muted" />
           </div>
         </template>
         <template #group_title-cell="{ row }">

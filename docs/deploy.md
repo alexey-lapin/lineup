@@ -71,7 +71,38 @@ http://media-host:9300/p/jellyfin/epg.xml
 
 In Jellyfin, go to **Dashboard → Live TV → TV Guide Data Providers → Add → XMLTV** and enter that URL. A channel gets guide data when its tvg-id matches a channel id in one of the sources. Channels marked as events get placeholder programmes ("Pre-match", the event, then "ended") built from their kickoff time, so they always show up in the guide.
 
-After changing channels, run Jellyfin's **Refresh Guide** task. Jellyfin keeps a downloaded guide for about an hour, so guide changes can take that long to appear. Automatic refresh arrives with hooks.
+Jellyfin keeps a downloaded guide for about an hour, so guide changes can take that long to appear.
+
+## Refresh Jellyfin automatically
+
+A Jellyfin hook runs Jellyfin's **Refresh Guide** task whenever a playlist or guide data changes, so new channels show up without waiting for Jellyfin's own schedule. Create an API key in Jellyfin (**Dashboard → API Keys**), then add the hook under **Hooks** in the UI, or:
+
+```sh
+lineup hook add jellyfin Jellyfin --url http://jellyfin:8096 --api-key <key>
+lineup hook test 1          # really starts a guide refresh
+lineup hook deliveries 1
+```
+
+Changes are collected for 30 seconds (`--debounce`) and delivered together. Because Jellyfin reuses a downloaded guide for about an hour, the hook runs a second refresh 65 minutes after the last change (`--followup-minutes`, 0 turns it off). The API key is stored write-only and never shown again.
+
+A webhook hook sends the same events as JSON to any URL (`lineup hook add webhook <name> <url>`):
+
+```json
+{"events": [{"type": "playlist.changed", "at": "…", "payload": {"slugs": ["jellyfin"]}}],
+ "window_start": "…", "window_end": "…"}
+```
+
+## Health checks
+
+lineup can check whether each Acestream channel's swarm has peers, through the engine (`engine_base`). It starts a short session, reads its statistics and stops it again. Before each check it asks acexy whether anyone is watching that stream, and skips it if so.
+
+```sh
+lineup probe "Sports One"   # one channel, waits for the result
+lineup probe                # all of them, in the background
+lineup ls --health dead
+```
+
+Scheduled checks are off by default; set `probe_interval_hours` (Settings, or `lineup settings set probe_interval_hours 6`) to turn them on. Hooks can subscribe to `channel.unhealthy` and `channel.recovered`. A check measures the swarm, not whether playback works.
 
 ## Backups
 

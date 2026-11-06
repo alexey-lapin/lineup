@@ -72,6 +72,7 @@ export const api = {
     unwrap(client.PATCH('/channels/{id}', { params: { path: { id } }, body })),
   deleteChannel: (id: number) => unwrap(client.DELETE('/channels/{id}', { params: { path: { id } } })),
   resolve: (input: string) => unwrap(client.POST('/resolve', { body: { input } })),
+  probe: (ids: number[], force = false) => unwrap(client.POST('/probe', { body: { ids, force } })),
 
   playlists: () => unwrap(client.GET('/playlists')),
   playlist: (slug: string) => unwrap(client.GET('/playlists/{slug}', { params: { path: { slug } } })),

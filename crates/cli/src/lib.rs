@@ -66,6 +66,14 @@ pub enum Command {
     /// Manage guide (XMLTV) sources and search their channels.
     #[command(subcommand)]
     Epg(EpgCmd),
+    /// Probe acestream channels' swarm health (all enabled ones when none are given; that run continues
+    /// on the server).
+    Probe {
+        channels: Vec<String>,
+        /// Probe even if a stream seems to be in use.
+        #[arg(long)]
+        force: bool,
+    },
     /// Manage hooks (Jellyfin guide refresh, webhooks).
     #[command(subcommand)]
     Hook(HookCmd),
@@ -138,6 +146,15 @@ pub struct LsArgs {
     pub playlist: Option<String>,
     #[arg(long, value_enum)]
     pub kind: Option<KindArg>,
+    /// Only channels whose last conclusive probe was this.
+    #[arg(long, value_enum)]
+    pub health: Option<HealthArg>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum HealthArg {
+    Ok,
+    Dead,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -371,7 +388,7 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
 pub enum SettingsCmd {
     /// Show all settings.
     Get,
-    /// Set one setting: acexy_base, engine_base, vk_base or epg_refresh_hours.
+    /// Set one setting: acexy_base, engine_base, vk_base, epg_refresh_hours or probe_interval_hours.
     Set { key: String, value: String },
 }
 
