@@ -234,7 +234,7 @@ impl Epg {
             result.status = EpgFetchStatus::Disabled;
             return result;
         }
-        tracing::info!("guide source {} ({}): fetching {}", src.id, src.name, src.url);
+        tracing::info!("guide source {} ({}): fetching", src.id, src.name);
         let started = std::time::Instant::now();
         let fetched = self.download_and_publish(src).await;
         let secs = started.elapsed().as_secs_f32();
@@ -268,7 +268,7 @@ impl Epg {
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                tracing::warn!("EPG source {} ({}): {msg}", src.id, src.url);
+                tracing::warn!("guide source {} ({}): {msg}", src.id, src.name);
                 if let Err(e) = self
                     .store
                     .record_epg_fetch(src.id, &src.url, FetchOutcome::Error, Some(&msg))
@@ -304,7 +304,8 @@ impl Epg {
                 req = req.header(IF_MODIFIED_SINCE, l);
             }
         }
-        let mut res = req.send().await?;
+        // Errors never carry the URL: it may hold provider credentials or tokens.
+        let mut res = req.send().await.map_err(reqwest::Error::without_url)?;
         if res.status() == StatusCode::NOT_MODIFIED {
             anyhow::ensure!(validators.is_some(), "server answered 304 to an unconditional request");
             return Ok(Fetched::NotModified);
@@ -333,7 +334,7 @@ impl Epg {
         let built = async {
             let mut file = tokio::fs::File::create(dir.join(xmltv::RAW)).await?;
             let mut total: u64 = 0;
-            while let Some(chunk) = res.chunk().await? {
+            while let Some(chunk) = res.chunk().await.map_err(reqwest::Error::without_url)? {
                 total += chunk.len() as u64;
                 anyhow::ensure!(total <= MAX_DOWNLOAD_BYTES, "larger than {MAX_DOWNLOAD_BYTES} bytes");
                 file.write_all(&chunk).await?;

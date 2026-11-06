@@ -267,26 +267,7 @@ impl Hooks {
         for attempt in 1..=(self.timing.backoff.len() as u32 + 1) {
             let a = self.send(hook, task_id, body).await;
             let ok = a.ok;
-            let what = if types.is_empty() {
-                format!("{trigger:?}").to_lowercase()
-            } else {
-                types.join(", ")
-            };
-            if ok {
-                tracing::info!(
-                    "hook {} ({}): delivered {what} (HTTP {}, attempt {attempt})",
-                    hook.id,
-                    hook.name,
-                    a.http_code.unwrap_or(0)
-                );
-            } else {
-                tracing::warn!(
-                    "hook {} ({}) attempt {attempt} for {what}: {}",
-                    hook.id,
-                    hook.name,
-                    a.error.as_deref().unwrap_or("?")
-                );
-            }
+            let what = log_attempt(hook, types, trigger, attempt, &a);
             self.log(hook.id, types, trigger, attempt, a).await;
             if ok {
                 return;
@@ -334,6 +315,7 @@ impl Hooks {
         });
         let types = vec!["hook.test".to_string()];
         let a = self.send(&hook, &mut None, &body).await;
+        log_attempt(&hook, &types, DeliveryTrigger::Test, 1, &a);
         // The row this attempt inserted, not merely the latest one.
         self.log(id, &types, DeliveryTrigger::Test, 1, a)
             .await
@@ -348,7 +330,8 @@ impl Hooks {
                 for (k, v) in headers {
                     req = req.header(k, v);
                 }
-                req.send().await.map_err(|e| e.to_string())
+                // Webhook URLs may carry tokens; keep them out of errors (and so out of logs).
+                req.send().await.map_err(|e| e.without_url().to_string())
             }
             HookConfig::Jellyfin {
                 base_url,
@@ -424,6 +407,31 @@ impl Hooks {
             .map(str::to_string)
             .ok_or_else(|| "Jellyfin has no scheduled task with key RefreshGuide".into())
     }
+}
+
+/// Log one delivery attempt; returns what was delivered, for later lines about the same delivery.
+fn log_attempt(hook: &Hook, types: &[String], trigger: DeliveryTrigger, attempt: u32, a: &Attempt) -> String {
+    let what = if types.is_empty() {
+        format!("{trigger:?}").to_lowercase()
+    } else {
+        types.join(", ")
+    };
+    if a.ok {
+        tracing::info!(
+            "hook {} ({}): delivered {what} (HTTP {}, attempt {attempt})",
+            hook.id,
+            hook.name,
+            a.http_code.unwrap_or(0)
+        );
+    } else {
+        tracing::warn!(
+            "hook {} ({}) attempt {attempt} for {what}: {}",
+            hook.id,
+            hook.name,
+            a.error.as_deref().unwrap_or("?")
+        );
+    }
+    what
 }
 
 fn jellyfin_auth(api_key: &str) -> String {

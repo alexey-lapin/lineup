@@ -144,7 +144,8 @@ pub fn router_for(app: App) -> Router {
 }
 
 /// Changes and playlist/guide downloads at info (with the client, when known); other reads at
-/// debug. The event stream is long-lived and only logged at debug when it ends.
+/// debug. The line is written once the response headers are ready, before a streamed body (the
+/// event stream, a large guide) is sent, so the time covers producing the response, not sending it.
 async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_owned();
