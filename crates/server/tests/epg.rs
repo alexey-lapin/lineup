@@ -388,3 +388,99 @@ mod output {
         );
     }
 }
+
+mod races {
+    use super::*;
+
+    #[tokio::test]
+    async fn stale_publishes_are_discarded() {
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&data.path().join("lineup.db")).await.unwrap());
+        let create = |url: &str| EpgSourceCreate {
+            url: url.into(),
+            name: None,
+            priority: 0,
+            enabled: true,
+        };
+        // Ids are never reused.
+        let a = store.create_epg_source(create("http://a/x.xml")).await.unwrap();
+        store.delete_epg_source(a.id).await.unwrap();
+        let b = store.create_epg_source(create("http://a/x.xml")).await.unwrap();
+        assert_ne!(a.id, b.id);
+        assert!(
+            !store
+                .publish_epg_generation(a.id, "http://a/x.xml", 1, &[])
+                .await
+                .unwrap()
+        );
+
+        // A download of the old URL that finishes after a URL change publishes nothing and records
+        // nothing.
+        store
+            .patch_epg_source(
+                b.id,
+                EpgSourcePatch {
+                    url: Some("http://b/y.xml".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .publish_epg_generation(b.id, "http://a/x.xml", 1, &[])
+                .await
+                .unwrap()
+        );
+        store
+            .record_epg_fetch(
+                b.id,
+                "http://a/x.xml",
+                lineup_server::store::FetchOutcome::Error,
+                Some("old"),
+            )
+            .await
+            .unwrap();
+        let s = store.get_epg_source(b.id).await.unwrap();
+        assert_eq!((s.current_gen, s.last_status), (None, None));
+        assert!(
+            store
+                .publish_epg_generation(b.id, "http://b/y.xml", 1, &[])
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_checks_files_not_just_the_marker() {
+        let (base, up) = upstream().await;
+        let data = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&data.path().join("lineup.db")).await.unwrap());
+        let epg = Epg::new(store.clone(), data.path());
+        let src = store
+            .create_epg_source(EpgSourceCreate {
+                url: format!("{base}/guide.xml.gz"),
+                name: None,
+                priority: 0,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        epg.fetch(&[]).await.unwrap();
+        set(&up, gz(&guide("v2")), "\"v2\"");
+        epg.fetch(&[]).await.unwrap();
+        std::fs::remove_file(epg.gen_dir(src.id, 2).join("programmes.idx")).unwrap();
+
+        // An unusable current generation is not trusted for a conditional request either.
+        let r = epg.fetch(&[]).await.unwrap();
+        assert_eq!(r[0].status, EpgFetchStatus::Updated);
+        assert_eq!(up.lock().unwrap().seen.last().unwrap(), &None);
+        assert_eq!(store.get_epg_source(src.id).await.unwrap().current_gen, Some(3));
+
+        // Recovery falls back past a current generation with a missing file.
+        std::fs::remove_file(epg.gen_dir(src.id, 3).join("channels.json")).unwrap();
+        epg.recover().await.unwrap();
+        let s = store.get_epg_source(src.id).await.unwrap();
+        assert_eq!(s.current_gen, None, "generation 2 is broken too, so nothing is served");
+    }
+}

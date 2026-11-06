@@ -140,26 +140,39 @@ impl Store {
         Ok(())
     }
 
-    /// Record a fetch attempt that did not publish anything.
-    pub async fn record_epg_fetch(&self, id: i64, outcome: FetchOutcome, error: Option<&str>) -> Result<()> {
+    /// Record a fetch attempt of `url` that did not publish anything. Nothing is recorded if the
+    /// source is gone or now has another URL.
+    pub async fn record_epg_fetch(&self, id: i64, url: &str, outcome: FetchOutcome, error: Option<&str>) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        sqlx::query("UPDATE epg_sources SET last_fetch_at=?, last_status=?, last_error=? WHERE id=?")
+        sqlx::query("UPDATE epg_sources SET last_fetch_at=?, last_status=?, last_error=? WHERE id=? AND url=?")
             .bind(now())
             .bind(outcome.as_str())
             .bind(error)
             .bind(id)
+            .bind(url)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// Publish generation `generation` of source `id` in one transaction: it becomes current, the old
-    /// current becomes previous, and the source's `epg_channels` rows are replaced. Fails with
-    /// `not_found` if the source was deleted meanwhile.
-    pub async fn publish_epg_generation(&self, id: i64, generation: i64, channels: &[IndexedChannel]) -> Result<()> {
+    /// Publish generation `generation` of source `id`, downloaded from `url`, in one transaction: it
+    /// becomes current, the old current becomes previous, and the source's `epg_channels` rows are
+    /// replaced. Returns false, publishing nothing, if the source was deleted or its URL changed
+    /// since the download started (ids are never reused).
+    pub async fn publish_epg_generation(
+        &self,
+        id: i64,
+        url: &str,
+        generation: i64,
+        channels: &[IndexedChannel],
+    ) -> Result<bool> {
         let _guard = self.write_lock.lock().await;
         let mut tx = self.pool.begin().await?;
-        let cur = get_source(&mut tx, id).await?;
+        let cur = match get_source(&mut tx, id).await {
+            Ok(c) if c.url == url => c,
+            Ok(_) | Err(crate::Error::NotFound(_)) => return Ok(false),
+            Err(e) => return Err(e),
+        };
         let previous = cur.current_gen.filter(|g| *g != generation);
         sqlx::query(
             "UPDATE epg_sources SET current_gen=?, previous_gen=?, last_fetch_at=?, last_status='ok', last_error=NULL
@@ -176,7 +189,7 @@ impl Store {
         if cur.enabled {
             self.epg_changed_locked(vec![id]);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Startup recovery: serve `generation` (a complete, previously published one) or nothing.

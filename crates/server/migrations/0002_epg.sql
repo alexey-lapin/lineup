@@ -1,5 +1,6 @@
+-- AUTOINCREMENT: ids are never reused, so a fetch of a deleted source cannot land in a new one.
 CREATE TABLE epg_sources (
-    id            INTEGER PRIMARY KEY,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT    NOT NULL,
     url           TEXT    NOT NULL,
     priority      INTEGER NOT NULL DEFAULT 0,

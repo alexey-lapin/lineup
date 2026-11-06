@@ -62,12 +62,28 @@ impl Epg {
         &self.store
     }
 
+    /// The outgoing HTTP client (also used for engine lookups).
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     fn source_dir(&self, id: i64) -> PathBuf {
         self.dir.join(id.to_string())
     }
 
     pub fn gen_dir(&self, id: i64, generation: i64) -> PathBuf {
         self.source_dir(id).join(format!("gen-{generation}"))
+    }
+
+    /// The data directory: directory syncs go up to here.
+    fn sync_root(&self) -> &Path {
+        self.dir.parent().unwrap_or(&self.dir)
+    }
+
+    /// Check a generation's files (off the async runtime).
+    async fn validate(&self, id: i64, generation: i64) -> anyhow::Result<Vec<xmltv::ChannelEntry>> {
+        let dir = self.gen_dir(id, generation);
+        tokio::task::spawn_blocking(move || xmltv::validate(&dir)).await?
     }
 
     /// Startup recovery (§6): delete incomplete generations and directories of deleted sources, and
@@ -93,21 +109,27 @@ impl Epg {
                 }
             }
             let Some(cur) = current else { continue };
-            if xmltv::is_complete(&self.gen_dir(id, cur)) {
-                continue;
-            }
-            let fallback = previous.filter(|p| xmltv::is_complete(&self.gen_dir(id, *p)));
-            let channels = match fallback {
-                Some(p) => {
-                    let dir = self.gen_dir(id, p);
-                    tokio::task::spawn_blocking(move || xmltv::read_channels(&dir)).await??
-                }
-                None => vec![],
+            let problem = match self.validate(id, cur).await {
+                Ok(_) => continue,
+                Err(e) => e,
             };
-            tracing::warn!("EPG source {id}: generation {cur} is unusable; now serving {fallback:?}");
+            // Fall back to the previously published generation if it is usable, else to nothing.
+            let mut fallback = None;
+            let mut channels = vec![];
+            if let Some(p) = previous {
+                match self.validate(id, p).await {
+                    Ok(c) => {
+                        fallback = Some(p);
+                        channels = c;
+                    }
+                    Err(e) => tracing::warn!("EPG source {id}: previous generation {p} is unusable too: {e:#}"),
+                }
+            }
+            tracing::warn!("EPG source {id}: generation {cur} is unusable ({problem:#}); now serving {fallback:?}");
             let indexed: Vec<_> = channels.iter().map(|c| c.indexed()).collect();
             self.store.republish_epg_generation(id, fallback, &indexed).await?;
         }
+        xmltv::sync_dirs(&self.dir, self.sync_root())?;
         Ok(())
     }
 
@@ -210,7 +232,7 @@ impl Epg {
                 result.status = EpgFetchStatus::NotModified;
                 if let Err(e) = self
                     .store
-                    .record_epg_fetch(src.id, FetchOutcome::NotModified, None)
+                    .record_epg_fetch(src.id, &src.url, FetchOutcome::NotModified, None)
                     .await
                 {
                     tracing::warn!("recording EPG fetch: {e}");
@@ -221,12 +243,17 @@ impl Epg {
                 result.channels = Some(channels as i64);
                 result.programmes = Some(programmes as i64);
             }
+            Ok(Fetched::Stale) => {
+                // The source was deleted or its URL changed during the download; nothing is
+                // recorded on the row, which now describes something else.
+                result.error = Some("the source changed during the fetch; result discarded".into());
+            }
             Err(e) => {
                 let msg = format!("{e:#}");
                 tracing::warn!("EPG source {} ({}): {msg}", src.id, src.url);
                 if let Err(e) = self
                     .store
-                    .record_epg_fetch(src.id, FetchOutcome::Error, Some(&msg))
+                    .record_epg_fetch(src.id, &src.url, FetchOutcome::Error, Some(&msg))
                     .await
                 {
                     tracing::warn!("recording EPG fetch: {e}");
@@ -241,13 +268,14 @@ impl Epg {
         let source_dir = self.source_dir(src.id);
         tokio::fs::create_dir_all(&source_dir).await?;
 
-        // Validators only when the served generation is complete and came from the configured URL.
-        let validators = src
-            .current_gen
-            .map(|g| self.gen_dir(src.id, g))
-            .filter(|d| xmltv::is_complete(d))
-            .and_then(|d| xmltv::read_meta(&d))
-            .filter(|m| m.url == src.url);
+        // Validators only when the served generation is usable and came from the configured URL, so
+        // a 304 always leaves good data in place.
+        let mut validators = None;
+        if let Some(g) = src.current_gen
+            && self.validate(src.id, g).await.is_ok()
+        {
+            validators = xmltv::read_meta(&self.gen_dir(src.id, g)).filter(|m| m.url == src.url);
+        }
 
         let mut req = self.client.get(&src.url);
         if let Some(m) = &validators {
@@ -297,9 +325,10 @@ impl Epg {
             let d = dir.clone();
             let now = chrono::Utc::now().timestamp();
             let meta = meta.clone();
+            let root = self.sync_root().to_path_buf();
             tokio::task::spawn_blocking(move || {
                 let built = xmltv::build(&d, now)?;
-                xmltv::finish(&d, &meta)?;
+                xmltv::finish(&d, &meta, &root)?;
                 anyhow::Ok(built)
             })
             .await?
@@ -314,9 +343,20 @@ impl Epg {
         };
 
         let indexed: Vec<_> = built.channels.iter().map(|c| c.indexed()).collect();
-        if let Err(e) = self.store.publish_epg_generation(src.id, generation, &indexed).await {
-            remove_dir(&dir).await;
-            return Err(e.into());
+        match self
+            .store
+            .publish_epg_generation(src.id, &src.url, generation, &indexed)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                remove_dir(&dir).await;
+                return Ok(Fetched::Stale);
+            }
+            Err(e) => {
+                remove_dir(&dir).await;
+                return Err(e.into());
+            }
         }
         // Keep only the generation just published and the one it replaced.
         let keep = [Some(generation), src.current_gen];
@@ -335,7 +375,12 @@ impl Epg {
 
 enum Fetched {
     NotModified,
-    Published { channels: usize, programmes: usize },
+    Published {
+        channels: usize,
+        programmes: usize,
+    },
+    /// The source row no longer matches what was fetched.
+    Stale,
 }
 
 /// `gen-<n>` directories of a source, in no particular order.

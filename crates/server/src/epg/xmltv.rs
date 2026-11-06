@@ -66,10 +66,18 @@ pub struct Built {
     pub programmes: usize,
 }
 
+/// Largest decompressed document accepted.
+pub const MAX_XML_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Largest single `<channel>` or `<programme>` element accepted.
+pub const MAX_ELEMENT_BYTES: usize = 1024 * 1024;
+
 /// Parse `dir/raw` and write `programmes.*` and `channels.json`. `now` is unix seconds.
+///
+/// The document must be well-formed with a single `<tv>` root that is closed before the end, so a
+/// truncated or wrapped download never replaces good data.
 pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
     let raw = open_raw(&dir.join(RAW))?;
-    let mut reader = Reader::from_reader(raw);
+    let mut reader = Reader::from_reader(BufReader::new(raw.take(MAX_XML_BYTES + 1)));
     reader.config_mut().expand_empty_elements = false;
 
     // Programmes are first written in file order to a scratch file, then copied grouped by channel.
@@ -84,42 +92,53 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
     let mut seen_channel: HashMap<String, usize> = HashMap::new();
     let cutoff = now - KEEP_PAST_SECS;
 
-    let mut saw_tv_end = false;
+    // 0: before the root, 1: inside <tv>, >1: inside other elements of <tv>.
+    let mut depth = 0usize;
+    let mut root_done = false;
     let mut buf = Vec::new();
     loop {
         let ev = reader.read_event_into(&mut buf)?;
+        anyhow::ensure!(
+            reader.buffer_position() <= MAX_XML_BYTES,
+            "document is larger than {MAX_XML_BYTES} bytes uncompressed"
+        );
         match ev {
-            Event::End(ref e) if e.name().as_ref() == "tv" => saw_tv_end = true,
-            Event::Start(ref e) if e.name().as_ref() == "channel" => {
-                let start = e.clone().into_owned();
-                let ch = read_channel(&mut reader, start)?;
-                if let Some(ch) = ch {
-                    match seen_channel.get(&ch.id) {
-                        // Duplicate <channel>: keep the first.
-                        Some(_) => {}
-                        None => {
-                            seen_channel.insert(ch.id.clone(), channels.len());
-                            channels.push(ch);
-                        }
-                    }
+            Event::Start(ref e) | Event::Empty(ref e) if depth == 0 => {
+                anyhow::ensure!(!root_done, "content after the closing </tv>");
+                anyhow::ensure!(e.name().as_ref() == "tv", "root element is <{}>, not <tv>", &**e);
+                attrs_of(e)?;
+                if matches!(ev, Event::Start(_)) {
+                    depth = 1;
+                } else {
+                    root_done = true;
                 }
             }
-            Event::Start(ref e) if e.name().as_ref() == "programme" => {
+            Event::Start(ref e) if depth == 1 && e.name().as_ref() == "channel" => {
+                let start = e.clone().into_owned();
+                if let Some(ch) = read_channel(&mut reader, start)?
+                    && !seen_channel.contains_key(&ch.id)
+                {
+                    // Duplicate <channel>: the first one is kept.
+                    seen_channel.insert(ch.id.clone(), channels.len());
+                    channels.push(ch);
+                }
+            }
+            Event::Start(ref e) if depth == 1 && e.name().as_ref() == "programme" => {
                 let start_ev = e.clone().into_owned();
-                let attrs = attrs_of(&start_ev);
+                let attrs = attrs_of(&start_ev)?;
                 let xml = capture(&mut reader, Event::Start(start_ev))?;
                 if let Some((chan, start, stop)) = programme_key(&attrs)
                     && stop.unwrap_or(start) >= cutoff
                 {
                     let ci = intern(&mut ids, &mut id_index, chan);
                     scratch.write_all(&xml)?;
-                    progs.push((ci, start, scratch_len, xml.len() as u32));
+                    progs.push((ci, start, scratch_len, u32::try_from(xml.len())?));
                     scratch_len += xml.len() as u64;
                 }
             }
-            Event::Empty(ref e) if e.name().as_ref() == "channel" => {
+            Event::Empty(ref e) if depth == 1 && e.name().as_ref() == "channel" => {
                 let start = e.clone().into_owned();
-                if let Some(id) = attrs_of(&start).get("id").filter(|i| !i.is_empty()).cloned()
+                if let Some(id) = attrs_of(&start)?.get("id").filter(|i| !i.is_empty()).cloned()
                     && !seen_channel.contains_key(&id)
                 {
                     seen_channel.insert(id.clone(), channels.len());
@@ -132,13 +151,36 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
                     });
                 }
             }
+            Event::Start(ref e) => {
+                attrs_of(e)?;
+                depth += 1;
+            }
+            Event::Empty(ref e) => {
+                attrs_of(e)?;
+            }
+            Event::End(_) => {
+                // Mismatched end tags are rejected by the reader itself.
+                anyhow::ensure!(depth > 0, "unexpected closing tag");
+                depth -= 1;
+                if depth == 0 {
+                    root_done = true;
+                }
+            }
+            Event::Text(ref t) if depth == 0 => {
+                anyhow::ensure!(t.trim().is_empty(), "text outside the <tv> element");
+            }
+            Event::CData(_) | Event::GeneralRef(_) if depth == 0 => {
+                anyhow::bail!("content outside the <tv> element")
+            }
             Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
-    // A download cut off between elements still parses; the closing tag proves it is whole.
-    anyhow::ensure!(saw_tv_end, "not a complete XMLTV document (no closing </tv>)");
+    anyhow::ensure!(
+        root_done && depth == 0,
+        "not a complete XMLTV document (the <tv> element is not closed)"
+    );
     scratch.flush()?;
     drop(scratch);
 
@@ -184,8 +226,9 @@ pub fn build(dir: &Path, now: i64) -> anyhow::Result<Built> {
     })
 }
 
-/// Write `meta.json`, sync the directory's files, then write `COMPLETE`.
-pub fn finish(dir: &Path, meta: &Meta) -> anyhow::Result<()> {
+/// Write `meta.json`, sync the directory's files, then write `COMPLETE` and sync the directory and
+/// its parents up to `root`, so the generation's directory entry survives a power loss too.
+pub fn finish(dir: &Path, meta: &Meta, root: &Path) -> anyhow::Result<()> {
     write_json(&dir.join(META), meta)?;
     for f in [RAW, PROGRAMMES, INDEX, CHANNELS, META] {
         File::open(dir.join(f))?.sync_all()?;
@@ -193,13 +236,47 @@ pub fn finish(dir: &Path, meta: &Meta) -> anyhow::Result<()> {
     let mut c = File::create(dir.join(COMPLETE))?;
     c.write_all(b"ok\n")?;
     c.sync_all()?;
+    sync_dirs(dir, root)
+}
+
+/// fsync `dir` and each ancestor up to and including `root`.
+pub fn sync_dirs(dir: &Path, root: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
-    File::open(dir)?.sync_all()?;
+    {
+        let mut d = Some(dir);
+        while let Some(p) = d {
+            File::open(p)?.sync_all()?;
+            if p == root {
+                break;
+            }
+            d = p.parent();
+        }
+    }
+    let _ = (dir, root);
     Ok(())
 }
 
+/// Has the `COMPLETE` marker. Says nothing about the other files; see [`validate`].
 pub fn is_complete(dir: &Path) -> bool {
     dir.join(COMPLETE).is_file()
+}
+
+/// Check that a complete generation is servable: every file is present and the index and channel
+/// list parse and point inside `programmes.xml`. Returns its channels.
+pub fn validate(dir: &Path) -> anyhow::Result<Vec<ChannelEntry>> {
+    anyhow::ensure!(is_complete(dir), "no COMPLETE marker");
+    anyhow::ensure!(dir.join(RAW).is_file(), "missing {RAW}");
+    read_meta(dir).ok_or_else(|| anyhow::anyhow!("missing or invalid {META}"))?;
+    let channels = read_channels(dir)?;
+    let index = read_index(dir)?;
+    let len = fs::metadata(dir.join(PROGRAMMES))?.len();
+    for (id, (off, n)) in &index {
+        anyhow::ensure!(
+            off.checked_add(*n).is_some_and(|end| end <= len),
+            "index entry for {id} is out of range"
+        );
+    }
+    Ok(channels)
 }
 
 pub fn read_meta(dir: &Path) -> Option<Meta> {
@@ -222,7 +299,7 @@ fn write_json<T: Serialize + ?Sized>(path: &Path, v: &T) -> anyhow::Result<()> {
 }
 
 /// Open the raw download, transparently gunzipping it.
-fn open_raw(path: &Path) -> anyhow::Result<Box<dyn BufRead>> {
+fn open_raw(path: &Path) -> anyhow::Result<Box<dyn Read>> {
     let mut f = BufReader::new(File::open(path)?);
     let magic = f.fill_buf()?;
     if magic.starts_with(&[0x1f, 0x8b]) {
@@ -242,17 +319,15 @@ fn intern(ids: &mut Vec<String>, index: &mut HashMap<String, u32>, id: &str) -> 
     i
 }
 
-fn attrs_of(e: &BytesStart<'_>) -> HashMap<String, String> {
-    e.attributes()
-        .flatten()
-        .filter_map(|a| {
-            let v = a
-                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                .ok()?
-                .into_owned();
-            Some((a.key.as_ref().to_string(), v))
-        })
-        .collect()
+/// Attributes of an element; malformed attributes or values are an error.
+fn attrs_of(e: &BytesStart<'_>) -> anyhow::Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    for a in e.attributes() {
+        let a = a?;
+        let v = a.normalized_value(quick_xml::XmlVersion::Implicit1_0)?.into_owned();
+        out.insert(a.key.as_ref().to_string(), v);
+    }
+    Ok(out)
 }
 
 /// `(channel, start, stop)` of a programme; `None` if it has no channel or unparseable start.
@@ -300,12 +375,22 @@ fn capture<R: BufRead>(reader: &mut Reader<R>, start: Event<'static>) -> anyhow:
     while depth > 0 {
         let ev = reader.read_event_into(&mut buf)?;
         match &ev {
-            Event::Start(_) => depth += 1,
+            Event::Start(e) => {
+                attrs_of(e)?;
+                depth += 1;
+            }
+            Event::Empty(e) => {
+                attrs_of(e)?;
+            }
             Event::End(_) => depth -= 1,
             Event::Eof => anyhow::bail!("unexpected end of file inside an element"),
             _ => {}
         }
         w.write_event(ev)?;
+        anyhow::ensure!(
+            w.get_ref().len() <= MAX_ELEMENT_BYTES,
+            "element larger than {MAX_ELEMENT_BYTES} bytes"
+        );
         buf.clear();
     }
     Ok(w.into_inner())
@@ -322,7 +407,7 @@ fn read_channel<R: BufRead>(
     reader: &mut Reader<R>,
     start: BytesStart<'static>,
 ) -> anyhow::Result<Option<ChannelEntry>> {
-    let id = attrs_of(&start).get("id").cloned().unwrap_or_default();
+    let id = attrs_of(&start)?.get("id").cloned().unwrap_or_default();
     let mut w = Writer::new(Vec::new());
     w.write_event(Event::Start(start))?;
     let mut depth = 1usize;
@@ -335,13 +420,20 @@ fn read_channel<R: BufRead>(
         let ev = reader.read_event_into(&mut buf)?;
         match &ev {
             Event::Start(e) => {
+                let attrs = attrs_of(e)?;
                 depth += 1;
                 if depth == 2 && e.name().as_ref() == "display-name" {
                     text = Some(String::new());
                 }
+                if depth == 2 && e.name().as_ref() == "icon" && icon.is_none() {
+                    icon = attrs.get("src").cloned().filter(|s| !s.is_empty());
+                }
             }
-            Event::Empty(e) if depth == 1 && e.name().as_ref() == "icon" && icon.is_none() => {
-                icon = attrs_of(e).get("src").cloned().filter(|s| !s.is_empty());
+            Event::Empty(e) => {
+                let attrs = attrs_of(e)?;
+                if depth == 1 && e.name().as_ref() == "icon" && icon.is_none() {
+                    icon = attrs.get("src").cloned().filter(|s| !s.is_empty());
+                }
             }
             Event::Text(t) => {
                 if let Some(s) = text.as_mut() {
@@ -378,6 +470,10 @@ fn read_channel<R: BufRead>(
             _ => {}
         }
         w.write_event(ev)?;
+        anyhow::ensure!(
+            w.get_ref().len() <= MAX_ELEMENT_BYTES,
+            "element larger than {MAX_ELEMENT_BYTES} bytes"
+        );
         buf.clear();
     }
     if id.is_empty() {
@@ -478,6 +574,52 @@ mod tests {
             );
             assert!(ch.contains("Sports 1 &amp; More"));
         }
+    }
+
+    fn build_str(xml: &str) -> anyhow::Result<Built> {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(RAW), xml).unwrap();
+        build(dir.path(), now())
+    }
+
+    #[test]
+    fn rejects_malformed_documents() {
+        for bad in [
+            "<tv></tv><extra/>",
+            "<wrapper><tv></tv>",
+            "<wrapper><tv></tv></wrapper>",
+            "<tv><channel id=\"x\" broken><display-name>X</display-name></channel></tv>",
+            "<tv><programme start=\"20990101000000\" channel=\"x\"><title a=b>T</title></programme></tv>",
+            "<tv></tv>junk",
+            "<tv><channel id=\"x\"></tv>",
+            "",
+        ] {
+            assert!(build_str(bad).is_err(), "accepted: {bad:?}");
+        }
+        for good in ["<tv/>", "<?xml version=\"1.0\"?>\n<!-- c -->\n<tv></tv>\n"] {
+            assert!(build_str(good).is_ok(), "rejected: {good:?}");
+        }
+    }
+
+    #[test]
+    fn paired_icon() {
+        let b = build_str(r#"<tv><channel id="a"><icon src="http://i/a.png"></icon></channel></tv>"#).unwrap();
+        assert_eq!(b.channels[0].icon.as_deref(), Some("http://i/a.png"));
+    }
+
+    #[test]
+    fn validates_generation_files() {
+        let (dir, _) = built(false);
+        let meta = Meta {
+            url: "u".into(),
+            etag: None,
+            last_modified: None,
+            fetched_at: "t".into(),
+        };
+        finish(dir.path(), &meta, dir.path()).unwrap();
+        assert_eq!(validate(dir.path()).unwrap().len(), 3);
+        fs::remove_file(dir.path().join(INDEX)).unwrap();
+        assert!(validate(dir.path()).is_err());
     }
 
     #[test]

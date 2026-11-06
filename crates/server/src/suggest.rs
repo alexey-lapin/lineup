@@ -80,6 +80,9 @@ pub fn rank(all: Vec<EpgChannel>, query: &str, region: Option<&str>, limit: usiz
         return vec![];
     }
     let suffix = region.map(|r| format!(".{r}"));
+    // One definition per id: the highest-priority source's, which is the one that serves the guide.
+    let mut seen = std::collections::HashSet::new();
+    let all: Vec<EpgChannel> = all.into_iter().filter(|c| seen.insert(c.xmltv_id.clone())).collect();
     // Sort on the raw score so the region bonus still breaks ties between perfect matches.
     let mut scored: Vec<(f64, EpgChannel)> = all
         .into_iter()
@@ -99,8 +102,6 @@ pub fn rank(all: Vec<EpgChannel>, query: &str, region: Option<&str>, limit: usiz
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut scored: Vec<EpgChannel> = scored.into_iter().map(|(_, c)| c).collect();
-    let mut seen = std::collections::HashSet::new();
-    scored.retain(|c| seen.insert(c.xmltv_id.clone()));
     scored.truncate(limit);
     scored
 }
