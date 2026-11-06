@@ -50,6 +50,8 @@ export function useSettingsSection<K extends keyof Settings>(
   const pending = ref(false)
   const error = ref('')
   const conflict = ref(false)
+  /** The latest server values seen while a save was in flight. */
+  let seenDuringSave: Values | null = null
 
   const dirty = computed(() => !!confirmed.value && keys.some((k) => norm(draft.value[k]) !== norm(confirmed.value![k])))
   const invalid = computed(() => (options.validate ? options.validate(draft.value) : null))
@@ -65,6 +67,7 @@ export function useSettingsSection<K extends keyof Settings>(
         draft.value = { ...next }
         return
       }
+      if (pending.value) seenDuringSave = next
       if (!keys.some((k) => norm(next[k]) !== norm(prev[k]))) return
       if (dirty.value || pending.value) {
         if (keys.some((k) => norm(next[k]) !== norm(prev[k]) && norm(next[k]) !== norm(draft.value[k]))) {
@@ -94,11 +97,14 @@ export function useSettingsSection<K extends keyof Settings>(
     if (!dirty.value || pending.value || invalid.value) return false
     pending.value = true
     error.value = ''
+    seenDuringSave = null
     try {
       const body = Object.fromEntries(keys.map((k) => [k, draft.value[k]]))
       const saved = pick(await api.patchSettings(body))
       const fresh = options.reload ? await options.reload().catch(() => undefined) : undefined
-      const current = fresh ? pick(fresh) : saved
+      // Without a fresh read, the newest values seen during the save beat the (possibly older)
+      // response; only when nothing arrived meanwhile is the response the best known state.
+      const current = fresh ? pick(fresh) : (seenDuringSave ?? saved)
       confirmed.value = current
       draft.value = { ...current }
       conflict.value = keys.some((k) => norm(current[k]) !== norm(saved[k]))
