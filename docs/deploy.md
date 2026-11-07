@@ -63,7 +63,7 @@ lineup import ./channels.m3u -p tv --dry-run
 lineup import ./channels.m3u -p tv
 ```
 
-Acestream and VK links are recognised in any of their usual forms (acexy or engine URLs, `acestream://` ids, vk.com and vkvideo.ru links, proxy URLs). Anything else is kept as a direct URL. Re-importing is safe: channels that already exist are reused and their details are kept, and the report shows where the file differs.
+Acestream and VK links are recognised in any of their usual forms (acexy or engine URLs, also behind a path prefix, `acestream://` ids, vk.com and vkvideo.ru links, proxy URLs). Anything else is kept as a direct URL. Re-importing is safe: channels that already exist are reused and their details are kept, and the report shows where the file differs.
 
 ## Use the playlist
 
@@ -150,13 +150,27 @@ If the task id ever changes (a 404 in `lineup hook deliveries`), look it up agai
 
 lineup 0.4 starts from a new database and cannot open a 0.3 one: it refuses to start and leaves the old file untouched. To move over:
 
-1. Before upgrading, export each playlist from 0.3 (`curl -o tv.m3u http://media-host:9300/p/tv.m3u`) and note your guide sources (`lineup epg sources ls`), hooks (`lineup hook ls`; header secrets are masked, so take the Jellyfin API key from Jellyfin) and base URLs (`lineup settings get`). Disabled channels are not in the M3U; note them if you want them back.
-2. Stop lineup 0.3 and keep its data directory (or volume) aside as the backup. Only the 0.3 binary can read it, so keep the 0.3 image tag too if you might roll back.
-3. Start 0.4 with an empty data directory.
-4. Set up the integrations (above), then import each exported playlist (`lineup import tv.m3u -p tv`). Acestream and VK channels are recognised from their stream URLs.
-5. Add the guide sources and hooks again.
+1. Before upgrading, while 0.3 is still running, save what you will need (into an empty folder):
 
-Imported channels keep their name, group, tvg-id and logo from the M3U. Disabled channels, event flags and kickoff times are not in an M3U, so set those again.
+   ```sh
+   lineup --json ls > channels.json                 # every channel, also disabled ones and ones in no playlist
+   lineup --json playlist ls > playlists.json
+   for p in $(jq -r '.[].slug' playlists.json); do
+     curl -fsS -o "$p.m3u" "http://media-host:9300/p/$p.m3u"
+     lineup --json playlist show "$p" > "playlist-$p.json"
+   done
+   lineup --json epg sources ls > epg-sources.json
+   lineup --json hook ls > hooks.json               # header secrets are masked: take the Jellyfin API key from Jellyfin
+   lineup --json settings get > settings.json       # the 0.3 base URLs
+   ```
+
+   The M3U files are what you import. The JSON files are records to recreate what an M3U does not carry: disabled channels (left out of the M3U), channels in no playlist, event flags and kickoff times.
+2. Stop and remove the 0.3 container, and keep its volume as the backup. Only the 0.3 binary can read it, so keep the 0.3 image tag too if you might roll back.
+3. Start 0.4 on a new, empty volume. With the example compose file, change the volume's `name:` (for example to `lineup-data-0.4`) and the image tag, then `docker compose up -d`. Starting 0.4 on the old volume fails with a message saying so, and changes nothing. (`deploy/restore.sh` uses the volume `lineup-data` unless you pass `VOLUME=lineup-data-0.4`.)
+4. Set up the integrations (above), preview each import, then import it (`lineup import tv.m3u -p tv --dry-run`, then without `--dry-run`). Acestream and VK channels are recognised from their stream URLs, also behind a reverse-proxy path prefix (`http://proxy/acexy/ace/getstream?id=…`); the preview shows each entry's kind, so check that none you expect as Acestream or VK shows as direct.
+5. From the JSON records, add back the channels in no playlist, disable the ones that were disabled, and set event flags and kickoff times. Then add the guide sources and hooks again.
+
+Imported channels take their name, group, tvg-id and logo from the M3U.
 
 ## Health checks
 

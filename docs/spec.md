@@ -113,8 +113,12 @@ channel belongs to the one of its kind.
   endpoint). A configured but unreachable integration stays in output, so brief outages never churn
   playlists.
 - **Eligibility**: M3U and XMLTV output include a channel when it is enabled *and* its integration is
-  configured. Others stay listed (with `stream_url: null`, `configured: false`) and keep their
-  playlist memberships and positions; `tvg-chno` keeps counting them.
+  configured. Every other channel stays listed and keeps its playlist memberships and positions;
+  `tvg-chno` keeps counting it. Only a channel of an unconfigured integration has `stream_url: null`
+  and `configured: false`; a disabled channel of a configured integration keeps both.
+- PATCH `/integrations/{kind}` takes the config tagged with the route's kind, e.g.
+  `{"kind": "acestream", "engine_url": "http://media-host:6878", "acexy_url": null}`
+  (CLI: `lineup integration set acestream --acexy-url ""` removes acexy).
 - Each row has a `revision`, raised on every effective change; of two copies the higher is newer.
 - **Live details** (`GET /channels/{id}/info`): for acestream, acexy's per-stream status
   (`/ace/status?id=`; 404 = not watched) gives the player count and the stat URL of acexy's own
@@ -232,8 +236,8 @@ Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` 
 | EPG source publish | all | `epg.updated` |
 | EPG source enable / disable / delete / priority change | all (EPG cache flushed) | `epg.updated` |
 | EPG source URL change | — (current gen stays served until the new URL's first successful publish; fetches stay unconditional until then per §6, first one runs immediately) | `epg.updated` on that publish |
-| health status transition | — | `channel.unhealthy` / `channel.recovered`, SSE only |
-| health check with no transition | — | SSE only |
+| health status transition | — | `channel.unhealthy` / `channel.recovered` (hooks and SSE) |
+| health check with no transition | — | `channel.probed`, SSE only |
 
 **Dispatcher**
 - One tokio task per hook, with a trailing-edge debounce of `debounce_secs` (default 30). A window never stays open longer than four debounce periods, so a steady stream of changes still gets delivered.

@@ -30,16 +30,17 @@ fn parse_input_inner(input: &str) -> Result<Source> {
         return Err(invalid(format!("unsupported URL scheme: {}", url.scheme())));
     }
 
-    // acexy (/ace/getstream?id=) or the engine itself (/ace/getstream, /ace/manifest.m3u8 ...).
-    if url.path().starts_with("/ace/")
+    // acexy (/ace/getstream?id=) or the engine itself (/ace/getstream, /ace/manifest.m3u8 ...), also
+    // behind a reverse-proxy prefix (/acexy/ace/getstream?id=).
+    if segment_after(url.path(), "ace").is_some()
         && let Some(id) = query(&url, "id").or_else(|| query(&url, "content_id"))
         && is_ace_id(&id)
     {
         return acestream(&id);
     }
 
-    // VK proxy: /vk/<owner>_<video>[?list=...]
-    if let Some(rest) = url.path().strip_prefix("/vk/")
+    // VK proxy: /vk/<owner>_<video>[?list=...], also behind a prefix (/vkproxy/vk/...).
+    if let Some(rest) = segment_after(url.path(), "vk")
         && let Some((owner_id, video_id)) = parse_owner_video(rest)
     {
         return Ok(vk(owner_id, video_id, query(&url, "list")));
@@ -190,6 +191,12 @@ fn query(url: &Url, key: &str) -> Option<String> {
     url.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.into_owned())
 }
 
+/// What follows the first `/<name>/` path segment, if there is one.
+fn segment_after<'a>(path: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!("/{name}/");
+    path.find(&marker).map(|i| &path[i + marker.len()..])
+}
+
 fn is_vk_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     ["vk.com", "vk.ru", "vkvideo.ru"]
@@ -242,6 +249,16 @@ mod tests {
             want
         );
         assert!(parse_input("acestream://abc").is_err());
+        // Behind a reverse-proxy prefix (as 0.3 exports with a prefixed base URL look).
+        assert_eq!(
+            parse_input(&format!("http://proxy/acexy/ace/getstream?id={ACE}")).unwrap(),
+            want
+        );
+        // Not an ace id: a direct URL.
+        assert!(matches!(
+            parse_input("http://x/ace/live.m3u8?id=1").unwrap(),
+            Source::Direct { .. }
+        ));
     }
 
     #[test]
@@ -257,6 +274,7 @@ mod tests {
             "https://m.vk.com/video-100200300_456000001?list=4d2c9e1a7f",
             "https://vk.com/somegroup?z=video-100200300_456000001%2Fpl_x&list=4d2c9e1a7f",
             "http://10.0.0.5:8099/vk/-100200300_456000001?list=4d2c9e1a7f",
+            "http://proxy/vkproxy/vk/-100200300_456000001?list=4d2c9e1a7f",
         ] {
             assert_eq!(parse_input(input).unwrap(), want, "{input}");
         }
