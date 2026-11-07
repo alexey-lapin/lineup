@@ -30,11 +30,19 @@ export default defineConfig({
         // iPhone home-screen app: keep fixed surfaces clear of the status bar and home indicator
         // (--safe-* in main.css; all 0 elsewhere).
         dashboardGroup: {
-          base: 'pt-(--safe-top) pb-(--safe-bottom) pl-(--safe-left) pr-(--safe-right)'
+          base: 'pt-(--safe-top) pl-(--safe-left) pr-(--safe-right)'
         },
-        // Stretch to the padded group instead of forcing a full viewport height.
-        dashboardPanel: { slots: { root: 'min-h-0' } },
-        dashboardSidebar: { slots: { root: 'min-h-0' } },
+        // Stretch to the padded group instead of forcing a full viewport height. The body scrolls
+        // under the home indicator, with room to scroll its end clear of it.
+        dashboardPanel: {
+          slots: {
+            root: 'min-h-0',
+            body: 'pb-[calc(1rem+var(--safe-bottom))] sm:pb-[calc(1.5rem+var(--safe-bottom))]'
+          }
+        },
+        // The persistent sidebar (wide screens; the phone menu is a drawer) keeps its last link clear of
+        // the home indicator.
+        dashboardSidebar: { slots: { root: 'min-h-0 pb-(--safe-bottom)' } },
         slideover: {
           slots: {
             content: 'pt-(--safe-top) pb-(--safe-bottom) pl-(--safe-left) pr-(--safe-right)',

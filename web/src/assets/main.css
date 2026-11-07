@@ -6,9 +6,10 @@
 }
 
 /*
- * Home-screen app on iOS: the page runs edge to edge (viewport-fit=cover, black-translucent status
- * bar), under the status bar / Dynamic Island and the home indicator. Every fixed surface keeps clear
- * of them through these variables (theme overrides in vite.config.ts; floating menus via safe-area.ts).
+ * iPhone: the page runs edge to edge (viewport-fit=cover). The status bar keeps its own strip (the
+ * "default" style in index.html; "black-translucent" puts the page under a blurred bar on iOS 26+),
+ * but the home indicator and landscape notch overlap the page. Every fixed surface keeps clear of
+ * them through these variables (theme overrides in vite.config.ts; floating menus via safe-area.ts).
  */
 :root {
   --safe-top: env(safe-area-inset-top, 0px);
@@ -18,15 +19,11 @@
 }
 
 /*
- * The status bar text is white (black-translucent), so the strip behind it stays dark in both colour
- * schemes, above every overlay (a light slideover or drawer would otherwise hide the clock).
+ * Only the panels scroll. The page itself never does: when iOS sizes the viewport differently from
+ * the screen (seen with the translucent status bar), a swipe dragged the whole app instead of the list.
  */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0 0 auto 0;
-  height: var(--safe-top);
-  background: #09090b;
-  z-index: 2147483647;
-  pointer-events: none;
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
 }

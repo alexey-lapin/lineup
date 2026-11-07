@@ -32,6 +32,45 @@ export function watchSafeArea() {
   update()
   window.addEventListener('resize', update)
   window.addEventListener('orientationchange', update)
+
+  keepPageAtTop()
+}
+
+/** True while a text field or other editable element has focus (the software keyboard is up). */
+function editing() {
+  const el = document.activeElement
+  if (!(el instanceof HTMLElement)) return false
+  return (
+    el.isContentEditable ||
+    el.matches('input:not([type=checkbox],[type=radio],[type=button],[type=submit]), textarea, select')
+  )
+}
+
+/**
+ * The page never scrolls (only the panels do), but iOS still scrolls it to bring a focused field
+ * above the keyboard and doesn't always scroll it back, which leaves the app shifted. Once editing
+ * ends, put it back. Moving from one field to the next is not the end: the browser keeps panning
+ * for the new field, so a pending reset is dropped when focus lands on it.
+ */
+export function keepPageAtTop(delay = 300) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const reset = () => {
+    timer = undefined
+    if (!editing() && (window.scrollX || window.scrollY)) window.scrollTo(0, 0)
+  }
+  document.addEventListener('focusin', () => {
+    if (!editing()) return
+    clearTimeout(timer)
+    timer = undefined
+  })
+  // Wait for the keyboard to finish closing; the viewport resize below catches a slower close.
+  document.addEventListener('focusout', () => {
+    clearTimeout(timer)
+    timer = setTimeout(reset, delay)
+  })
+  window.visualViewport?.addEventListener('resize', () => {
+    if (!editing()) reset()
+  })
 }
 
 /** `content` props for dropdowns, selects and tooltips: keep clear of the status bar and home indicator. */
