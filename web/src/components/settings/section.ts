@@ -68,7 +68,8 @@ export function useSection<T extends Versioned, V extends object>(
   let revision = -1
 
   const dirty = computed(() => !!confirmed.value && !same(draft.value, confirmed.value))
-  const invalid = computed(() => (options.validate ? options.validate(draft.value) : null))
+  // Nothing to validate before the first copy arrives (the draft is still empty).
+  const invalid = computed(() => (options.validate && confirmed.value ? options.validate(draft.value) : null))
 
   /** Apply a copy if it is newer than what this card has. */
   function apply(s: T) {

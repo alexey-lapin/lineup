@@ -3,7 +3,9 @@ import { useQuery } from '@pinia/colada'
 import { useToast } from '@nuxt/ui/composables'
 import type { DropdownMenuItem, TableColumn } from '@nuxt/ui'
 import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api, INTEGRATION_NAMES, sourceLabel, type Channel } from '../api'
+import ChannelDetail from '../components/ChannelDetail.vue'
 import ChannelForm from '../components/ChannelForm.vue'
 import { copy, playerLinks, useAction, useChannels, useInvalidateAll } from '../composables'
 import { floating } from '../safe-area'
@@ -56,6 +58,29 @@ const columns: TableColumn<Channel>[] = [
   { id: 'playlists', header: 'Playlists', meta: { class: { th: hideMd, td: hideMd } } },
   { id: 'actions', meta: { class: { td: 'text-right' } } }
 ]
+
+// ---------------------------------------------------------------- details (/channels/:id)
+
+const route = useRoute()
+const router = useRouter()
+const detailId = computed(() => {
+  const id = Number(route.params.id)
+  return Number.isInteger(id) && id > 0 ? id : null
+})
+const detail = computed(() => (detailId.value ? (data.value ?? []).find((c) => c.id === detailId.value) ?? null : null))
+const detailOpen = computed({
+  get: () => detailId.value !== null,
+  set: (open) => {
+    if (!open) void router.push('/channels')
+  }
+})
+function openDetail(c: Channel) {
+  void router.push(`/channels/${c.id}`)
+}
+function editFromDetail(c: Channel) {
+  detailOpen.value = false
+  openEdit(c)
+}
 
 function openAdd() {
   editing.value = null
@@ -119,6 +144,7 @@ function actions(c: Channel): DropdownMenuItem[][] {
   const links = url ? playerLinks(url) : null
   return [
     [
+      { label: 'Details', icon: 'i-lucide-info', onSelect: () => openDetail(c) },
       { label: 'Edit', icon: 'i-lucide-pencil', onSelect: () => openEdit(c) },
       {
         label: c.enabled ? 'Disable' : 'Enable',
@@ -184,7 +210,14 @@ function actions(c: Channel): DropdownMenuItem[][] {
 
     <template #body>
       <UAlert v-if="error" color="error" variant="subtle" icon="i-lucide-circle-x" :title="error.message" />
-      <UTable :data="rows" :columns="columns" :loading="isPending" class="flex-1" :ui="{ td: 'py-2' }">
+      <UTable
+        :data="rows"
+        :columns="columns"
+        :loading="isPending"
+        class="flex-1"
+        :ui="{ td: 'py-2', tr: 'cursor-pointer' }"
+        :on-select="(_: Event, row: { original: Channel }) => openDetail(row.original)"
+      >
         <template #name-cell="{ row }">
           <div class="flex items-center gap-2 min-w-0">
             <img
@@ -233,9 +266,12 @@ function actions(c: Channel): DropdownMenuItem[][] {
           </div>
         </template>
         <template #actions-cell="{ row }">
-          <UDropdownMenu :items="actions(row.original)" :content="floating({ align: 'end' as const })">
-            <UButton icon="i-lucide-ellipsis-vertical" color="neutral" variant="ghost" aria-label="Actions" />
-          </UDropdownMenu>
+          <!-- The menu is not a row click (which opens the details). -->
+          <div class="inline-flex" @click.stop>
+            <UDropdownMenu :items="actions(row.original)" :content="floating({ align: 'end' as const })">
+              <UButton icon="i-lucide-ellipsis-vertical" color="neutral" variant="ghost" aria-label="Actions" />
+            </UDropdownMenu>
+          </div>
         </template>
         <template #empty>
           <div class="py-10 text-center text-muted">
@@ -245,6 +281,7 @@ function actions(c: Channel): DropdownMenuItem[][] {
       </UTable>
 
       <ChannelForm v-model:open="formOpen" :channel="editing" />
+      <ChannelDetail v-model:open="detailOpen" :channel="detail" @edit="editFromDetail" />
 
       <UModal
         :open="!!deleting"

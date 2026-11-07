@@ -42,7 +42,7 @@ const aceCard = useSection<Integration, AceDraft>(
 
 /** Acestream rules beyond URL syntax (the URL fields show their own errors). */
 function aceRules(d: AceDraft): string | null {
-  if (!d.engine_url.trim() && d.acexy_url.trim()) return 'acexy needs the engine: set the engine URL too'
+  if (!d.engine_url?.trim() && d.acexy_url?.trim()) return 'acexy needs the engine: set the engine URL too'
   return hoursError(d.probe_interval_hours)
 }
 
@@ -213,7 +213,9 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
               @update:model-value="(v: unknown) => setDraft(aceCard, 'probe_interval_hours', Number(v))"
             />
           </UFormField>
-          <p v-if="aceRules(aceCard.draft)" class="text-sm text-error">{{ aceRules(aceCard.draft) }}</p>
+          <p v-if="aceCard.confirmed && aceRules(aceCard.draft)" class="text-sm text-error">
+            {{ aceRules(aceCard.draft) }}
+          </p>
 
           <template #actions>
             <UButton

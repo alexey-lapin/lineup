@@ -4,7 +4,8 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', redirect: '/channels' },
-    { path: '/channels', component: () => import('./pages/ChannelsPage.vue') },
+    // One record for the list and an open channel, so the list stays mounted.
+    { path: '/channels/:id(\\d+)?', component: () => import('./pages/ChannelsPage.vue') },
     { path: '/playlists', component: () => import('./pages/PlaylistsPage.vue') },
     { path: '/playlists/:slug', component: () => import('./pages/PlaylistPage.vue'), props: true },
     { path: '/epg', component: () => import('./pages/EpgPage.vue') },
