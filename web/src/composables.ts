@@ -1,5 +1,5 @@
 import { useQuery, useQueryCache } from '@pinia/colada'
-import { onBeforeUnmount, onMounted } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useToast } from '@nuxt/ui/composables'
 import { api, ApiError } from './api'
 
@@ -21,7 +21,8 @@ export function useInvalidateAll() {
       cache.invalidateQueries({ key: ['playlists'] }),
       cache.invalidateQueries({ key: ['playlist'] }),
       cache.invalidateQueries({ key: ['status'] }),
-      cache.invalidateQueries({ key: ['settings'] })
+      cache.invalidateQueries({ key: ['settings'] }),
+      cache.invalidateQueries({ key: ['integrations'] })
     ])
 }
 
@@ -73,7 +74,8 @@ export function useLiveUpdates() {
   const cache = useQueryCache()
   const refetch = (...keys: string[]) =>
     Promise.allSettled(keys.map((k) => cache.invalidateQueries({ key: [k] })))
-  const everything = () => refetch('channels', 'playlists', 'playlist', 'epg-sources', 'hooks', 'settings', 'status')
+  const everything = () =>
+    refetch('channels', 'playlists', 'playlist', 'epg-sources', 'hooks', 'settings', 'status', 'integrations')
   let es: EventSource | undefined
   onMounted(() => {
     if (typeof EventSource === 'undefined') return
@@ -85,9 +87,71 @@ export function useLiveUpdates() {
     es.addEventListener('playlist.changed', () => refetch('channels', 'playlists', 'playlist'))
     es.addEventListener('epg.updated', () => refetch('epg-sources'))
     es.addEventListener('settings.changed', () => refetch('settings'))
+    // URL changes also come as playlist.changed; this covers the rest (schedule, acexy for checks).
+    es.addEventListener('integration.changed', () => refetch('integrations', 'channels'))
     for (const e of ['channel.unhealthy', 'channel.recovered', 'channel.probed']) {
       es.addEventListener(e, () => refetch('channels', 'playlist'))
     }
   })
   onBeforeUnmount(() => es?.close())
+}
+
+/**
+ * Poll `fetch(key)` every `everyMs` while the component is mounted and the page is visible. A
+ * request never overlaps the previous one, and an answer for an older key (or after unmounting) is
+ * dropped. `key` returning undefined pauses polling; a new key clears the old data and polls now.
+ */
+export function usePolling<K, T>(key: () => K | undefined, fetch: (key: K) => Promise<T>, everyMs: number) {
+  const data = ref<T>()
+  const error = ref('')
+  const loading = ref(false)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let seq = 0
+  let active = false
+
+  const visible = () => typeof document === 'undefined' || !document.hidden
+
+  async function tick() {
+    clearTimeout(timer)
+    timer = undefined
+    const k = key()
+    if (k === undefined || !active || !visible()) return
+    const mine = ++seq
+    loading.value = true
+    try {
+      const v = await fetch(k)
+      if (mine === seq) {
+        data.value = v
+        error.value = ''
+      }
+    } catch (e) {
+      if (mine === seq) error.value = e instanceof ApiError ? e.message : String(e)
+    } finally {
+      if (mine === seq) {
+        loading.value = false
+        if (active && visible()) timer = setTimeout(tick, everyMs)
+      }
+    }
+  }
+
+  const onVisibility = () => (visible() ? void tick() : clearTimeout(timer))
+  watch(key, () => {
+    seq++ // drop answers for the old key
+    data.value = undefined
+    error.value = ''
+    loading.value = false
+    void tick()
+  })
+  onMounted(() => {
+    active = true
+    document.addEventListener('visibilitychange', onVisibility)
+    void tick()
+  })
+  onBeforeUnmount(() => {
+    active = false
+    seq++
+    clearTimeout(timer)
+    document.removeEventListener('visibilitychange', onVisibility)
+  })
+  return { data, error, loading, refresh: tick }
 }

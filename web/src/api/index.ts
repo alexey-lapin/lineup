@@ -12,8 +12,15 @@ export type SettingsPatch = components['schemas']['SettingsPatch']
 export type ImportReport = components['schemas']['ImportReport']
 export type ResolveResponse = components['schemas']['ResolveResponse']
 export type Status = components['schemas']['Status']
-export type SettingsTestTarget = components['schemas']['SettingsTestTarget']
-export type SettingsTestResult = components['schemas']['SettingsTestResult']
+export type SourceKind = components['schemas']['SourceKind']
+export type Integration = components['schemas']['Integration']
+export type IntegrationConfig = components['schemas']['IntegrationConfig']
+export type IntegrationPatch = components['schemas']['IntegrationPatch']
+export type IntegrationStatus = components['schemas']['IntegrationStatus']
+export type Component = components['schemas']['Component']
+export type ConnectionTestResult = components['schemas']['ConnectionTestResult']
+export type ChannelInfo = components['schemas']['ChannelInfo']
+export type AcestreamLive = components['schemas']['AcestreamLive']
 export type Suggestion = components['schemas']['Suggestion']
 export type EpgSource = components['schemas']['EpgSource']
 export type EpgSourceCreate = components['schemas']['EpgSourceCreate']
@@ -97,8 +104,18 @@ export const api = {
 
   settings: () => unwrap(client.GET('/settings')),
   patchSettings: (body: SettingsPatch) => unwrap(client.PATCH('/settings', { body })),
-  testSetting: (target: SettingsTestTarget, base?: string) =>
-    unwrap(client.POST('/settings/test', { body: { target, base: base ?? null } })),
+  channelInfo: (id: number, name = false) =>
+    unwrap(client.GET('/channels/{id}/info', { params: { path: { id }, query: { name } } })),
+
+  integrations: () => unwrap(client.GET('/integrations')),
+  patchIntegration: (kind: SourceKind, body: IntegrationPatch) =>
+    unwrap(client.PATCH('/integrations/{kind}', { params: { path: { kind } }, body })),
+  testIntegration: (kind: SourceKind, component: Component, url?: string) =>
+    unwrap(
+      client.POST('/integrations/{kind}/test', { params: { path: { kind } }, body: { component, url: url ?? null } })
+    ),
+  integrationStatus: (kind: SourceKind) =>
+    unwrap(client.GET('/integrations/{kind}/status', { params: { path: { kind } } })),
   importM3u: (m3u_text: string, playlist_slug: string, dry_run: boolean) =>
     unwrap(client.POST('/import', { body: { m3u_text, playlist_slug, dry_run } })),
   refresh: (slugs: string[] = []) => unwrap(client.POST('/refresh', { body: { slugs } })),
@@ -137,7 +154,18 @@ export function sourceLabel(s: Source): string {
       return `ace ${s.id.slice(0, 8)}`
     case 'vk':
       return `vk ${s.owner_id}_${s.video_id}`
-    case 'raw':
+    case 'direct':
       return s.url
   }
+}
+
+/** Display names of the integrations. */
+export const INTEGRATION_NAMES: Record<SourceKind, string> = {
+  acestream: 'Acestream',
+  vk: 'VK proxy',
+  direct: 'Direct URLs'
+}
+
+export function integrationName(kind: SourceKind): string {
+  return INTEGRATION_NAMES[kind]
 }

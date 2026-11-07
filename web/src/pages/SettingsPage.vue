@@ -4,93 +4,32 @@ import { useToast } from '@nuxt/ui/composables'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { api } from '../api'
-import { useAction, useChannels } from '../composables'
-import BaseUrlField from '../components/settings/BaseUrlField.vue'
+import { useAction } from '../composables'
 import SettingsCard from '../components/settings/SettingsCard.vue'
-import { baseUrlError, useSettingsSection } from '../components/settings/section'
+import { hoursError, useSettingsSection } from '../components/settings/section'
 
 const run = useAction()
 const toast = useToast()
 const cache = useQueryCache()
 const { data: settings, error, refetch } = useQuery({ key: ['settings'], query: () => api.settings() })
 const { data: status } = useQuery({ key: ['status'], query: () => api.status() })
-const { data: channels, error: channelsError, refetch: refetchChannels } = useChannels()
 const {
   data: sources,
   error: sourcesError,
   refetch: refetchSources
 } = useQuery({ key: ['epg-sources'], query: () => api.epgSources() })
 
-const hours = (v: number) => (Number.isInteger(v) && v >= 0 && v <= 168 ? null : 'Enter whole hours from 0 to 168')
-const cards = {
-  acexy: useSettingsSection(['acexy_base'], settings, { validate: (d) => baseUrlError(d.acexy_base) }),
-  engine: useSettingsSection(['engine_base', 'probe_interval_hours'], settings, {
-    validate: (d) => baseUrlError(d.engine_base) ?? hours(d.probe_interval_hours)
-  }),
-  vk: useSettingsSection(['vk_base'], settings, { validate: (d) => baseUrlError(d.vk_base) }),
-  guide: useSettingsSection(['epg_refresh_hours'], settings, { validate: (d) => hours(d.epg_refresh_hours) })
-}
-const sections = Object.values(cards)
+const guide = useSettingsSection(['epg_refresh_hours'], settings, {
+  validate: (d) => hoursError(d.epg_refresh_hours)
+})
 
-/** The three service cards share one layout. */
-const sourceCards = computed(() => [
-  {
-    target: 'acexy' as const,
-    field: 'acexy_base',
-    section: cards.acexy,
-    title: 'acexy',
-    icon: 'i-lucide-radio',
-    description: channelsLine('acestream'),
-    help: 'Acestream channels play from {base}/ace/getstream?id=…; health checks also ask it whether a stream is being watched.',
-    placeholder: 'http://media-host:8080'
-  },
-  {
-    target: 'engine' as const,
-    field: 'engine_base',
-    section: cards.engine,
-    title: 'Acestream engine',
-    icon: 'i-lucide-cpu',
-    description: 'Looks up channel names when you add one, and runs health checks. Players never connect to it.',
-    help: 'Reachable from the lineup server.',
-    placeholder: 'http://media-host:6878'
-  },
-  {
-    target: 'vk' as const,
-    field: 'vk_base',
-    section: cards.vk,
-    title: 'VK proxy',
-    icon: 'i-lucide-video',
-    description: channelsLine('vk'),
-    help: 'VK channels play from {base}/vk/{owner}_{video}[?list=…].',
-    placeholder: 'http://media-host:8099'
-  }
-])
-
-function draftOf(section: { draft: object }, key: string): string {
-  return String((section.draft as Record<string, unknown>)[key] ?? '')
-}
-
-/** Edit a card's draft (kept out of the template: vue-tsc mistypes deep v-model targets). */
+/** Edit the draft (kept out of the template: vue-tsc mistypes deep v-model targets). */
 function setDraft(section: { draft: object }, key: string, value: string | number) {
   ;(section.draft as Record<string, unknown>)[key] = value
 }
 
 const loading = computed(() => !settings.value)
-const anyDirty = computed(() => sections.some((s) => s.dirty))
 
-/** Other pages (playlist URLs, channel stream URLs) depend on the base URLs. */
-function saved() {
-  cache.invalidateQueries({ key: ['channels'] })
-  cache.invalidateQueries({ key: ['playlist'] })
-}
-
-const count = (kind: string) => (channels.value ?? []).filter((c) => c.source.kind === kind).length
-const channelsLine = (kind: string) => {
-  if (channelsError.value && !channels.value) return 'Channel count unavailable.'
-  if (!channels.value) return undefined
-  const n = count(kind)
-  return n === 1 ? 'Used by 1 channel.' : `Used by ${n} channels.`
-}
 const guideSummary = computed(() => {
   if (!sources.value) return sourcesError.value ? 'Could not load guide sources.' : 'Loading guide sources…'
   const list = sources.value
@@ -106,14 +45,7 @@ const guideSummary = computed(() => {
   return `${list.length} source${list.length > 1 ? 's' : ''}: ${detail.join(', ')}.`
 })
 
-// ---------------------------------------------------------------- actions on saved settings
-
-const probing = ref(false)
-async function checkAll() {
-  probing.value = true
-  await run(() => api.probe([]), 'Checking all acestream channels in the background')
-  probing.value = false
-}
+// ---------------------------------------------------------------- actions
 
 const fetching = ref(false)
 async function fetchAll() {
@@ -132,10 +64,10 @@ async function fetchAll() {
 
 // ---------------------------------------------------------------- unsaved changes
 
-onBeforeRouteLeave(() => !anyDirty.value || window.confirm('Discard unsaved settings?'))
+onBeforeRouteLeave(() => !guide.dirty || window.confirm('Discard unsaved settings?'))
 const onUnload = (e: BeforeUnloadEvent) => e.preventDefault()
 watch(
-  anyDirty,
+  () => guide.dirty,
   (d) => (d ? window.addEventListener('beforeunload', onUnload) : window.removeEventListener('beforeunload', onUnload)),
   { immediate: true }
 )
@@ -163,73 +95,10 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
           :actions="[{ label: 'Retry', onClick: () => refetch() }]"
         />
 
-        <section class="flex flex-col gap-4">
-          <div>
-            <h2 class="text-lg font-semibold">Sources</h2>
-            <UAlert
-              v-if="channelsError && !channels"
-              class="my-2"
-              color="warning"
-              variant="subtle"
-              title="Could not load channels, so channel counts are missing"
-              :actions="[{ label: 'Retry', onClick: () => refetchChannels() }]"
-            />
-            <p class="text-sm text-muted">
-              Playlists send your players and media server to acexy and the VK proxy, so use addresses they can
-              reach, not localhost. Only the lineup server talks to the Acestream engine.
-            </p>
-          </div>
-
-          <SettingsCard
-            v-for="c in sourceCards"
-            :key="c.target"
-            :title="c.title"
-            :icon="c.icon"
-            :description="c.description"
-            :section="c.section"
-            :loading="loading"
-            @saved="saved"
-          >
-            <BaseUrlField
-              :model-value="draftOf(c.section, c.field)"
-              :label="'Base URL'"
-              :help="c.help"
-              :target="c.target"
-              :placeholder="c.placeholder"
-              :error="baseUrlError(draftOf(c.section, c.field))"
-              @update:model-value="(v: string) => setDraft(c.section, c.field, v)"
-            />
-            <UFormField
-              v-if="c.target === 'engine'"
-              label="Health checks every (hours)"
-              help="Checks each acestream channel's swarm, skipping streams someone is watching. 0 turns the schedule off; you can still check by hand."
-            >
-              <UInput
-                :model-value="cards.engine.draft.probe_interval_hours"
-                type="number"
-                min="0"
-                max="168"
-                class="w-32"
-                size="lg"
-                @update:model-value="(v: unknown) => setDraft(cards.engine, 'probe_interval_hours', Number(v))"
-              />
-            </UFormField>
-            <template v-if="c.target === 'engine'" #actions>
-              <UButton
-                icon="i-lucide-activity"
-                color="neutral"
-                variant="subtle"
-                size="lg"
-                class="min-h-11"
-                label="Check all now"
-                :loading="probing"
-                :disabled="cards.engine.dirty || loading"
-                :title="cards.engine.dirty ? 'Save first: checks use the saved engine URL' : undefined"
-                @click="checkAll"
-              />
-            </template>
-          </SettingsCard>
-        </section>
+        <p class="text-sm text-muted">
+          Service addresses (the Acestream engine, acexy, the VK proxy) are set on the
+          <ULink to="/integrations" class="underline">Integrations</ULink> page.
+        </p>
 
         <section class="flex flex-col gap-4">
           <h2 class="text-lg font-semibold">Guide</h2>
@@ -240,13 +109,26 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
             title="Could not load guide sources"
             :actions="[{ label: 'Retry', onClick: () => refetchSources() }]"
           />
-          <SettingsCard title="Guide data" icon="i-lucide-calendar-range" :description="guideSummary" :section="cards.guide" :loading="loading">
+          <SettingsCard
+            title="Guide data"
+            icon="i-lucide-calendar-range"
+            :description="guideSummary"
+            :section="guide"
+            :loading="loading"
+          >
             <UFormField
               label="Refresh every (hours)"
               help="Sources are fetched 3 minutes after start, then at this interval. 0 turns the schedule off."
             >
-              <UInput :model-value="cards.guide.draft.epg_refresh_hours"
-              @update:model-value="(v: unknown) => setDraft(cards.guide, 'epg_refresh_hours', Number(v))" type="number" min="0" max="168" class="w-32" size="lg" />
+              <UInput
+                :model-value="guide.draft.epg_refresh_hours"
+                type="number"
+                min="0"
+                max="168"
+                class="w-32"
+                size="lg"
+                @update:model-value="(v: unknown) => setDraft(guide, 'epg_refresh_hours', Number(v))"
+              />
             </UFormField>
             <template #actions>
               <UButton
@@ -257,11 +139,18 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
                 class="min-h-11"
                 label="Fetch all now"
                 :loading="fetching"
-                :disabled="cards.guide.dirty || loading || !sources?.length"
+                :disabled="guide.dirty || loading || !sources?.length"
                 @click="fetchAll"
               />
-              <UButton color="neutral" variant="ghost" size="lg" class="min-h-11"
-                label="Manage sources" trailing-icon="i-lucide-arrow-right" to="/epg" />
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="lg"
+                class="min-h-11"
+                label="Manage sources"
+                trailing-icon="i-lucide-arrow-right"
+                to="/epg"
+              />
             </template>
           </SettingsCard>
         </section>

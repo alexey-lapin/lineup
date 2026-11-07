@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { api, sourceLabel, type Channel, type EpgChannel, type ResolveResponse } from '../api'
+import { api, integrationName, sourceLabel, type Channel, type EpgChannel, type ResolveResponse } from '../api'
 import EpgSearch from './EpgSearch.vue'
 import { useAction, useChannels, useInvalidateAll, usePlaylists } from '../composables'
 import { floating } from '../safe-area'
@@ -225,11 +225,14 @@ async function save() {
           variant="subtle"
           :icon="currentResolution.duplicate_of != null ? 'i-lucide-copy' : 'i-lucide-link'"
           :title="currentResolution.duplicate_of != null ? `Already exists as channel ${currentResolution.duplicate_of}` : sourceLabel(currentResolution.source)"
-          :description="currentResolution.stream_url"
           :ui="{ description: 'break-all' }"
         >
-          <template v-if="currentResolution.engine_name || currentResolution.warnings?.length" #description>
-            <div class="break-all">{{ currentResolution.stream_url }}</div>
+          <template #description>
+            <div v-if="currentResolution.stream_url" class="break-all">{{ currentResolution.stream_url }}</div>
+            <div v-else>
+              The {{ integrationName(currentResolution.source.kind) }} integration is not set up: the channel can be
+              saved, but stays out of playlists until it is.
+            </div>
             <div v-if="currentResolution.engine_name" class="mt-1">Engine name: {{ currentResolution.engine_name }}</div>
             <div v-for="w in currentResolution.warnings ?? []" :key="w" class="mt-1 text-warning">{{ w }}</div>
           </template>

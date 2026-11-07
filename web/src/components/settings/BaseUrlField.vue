@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { api, type SettingsTestResult, type SettingsTestTarget } from '../../api'
+import { api, type Component, type ConnectionTestResult, type SourceKind } from '../../api'
 
 const props = defineProps<{
   label: string
   help: string
-  target: SettingsTestTarget
+  /** The integration and component the Test button checks (with the typed, unsaved URL). */
+  kind: SourceKind
+  component: Component
   placeholder: string
   /** Why the typed URL is not usable, if it is not. */
   error?: string | null
@@ -13,7 +15,7 @@ const props = defineProps<{
 const model = defineModel<string>({ required: true })
 
 const testing = ref(false)
-const result = ref<(SettingsTestResult & { forValue: string }) | null>(null)
+const result = ref<(ConnectionTestResult & { forValue: string }) | null>(null)
 const failed = ref('')
 let seq = 0
 
@@ -32,7 +34,7 @@ async function test() {
   result.value = null
   failed.value = ''
   try {
-    const r = await api.testSetting(props.target, value)
+    const r = await api.testIntegration(props.kind, props.component, value)
     if (mine === seq) result.value = { ...r, forValue: value }
   } catch (e) {
     if (mine === seq) failed.value = (e as Error).message
@@ -64,7 +66,7 @@ async function test() {
         size="lg"
         label="Test"
         :loading="testing"
-        :disabled="!!error"
+        :disabled="!!error || !model.trim()"
         class="justify-center min-h-11"
         @click="test"
       />

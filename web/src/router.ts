@@ -10,6 +10,7 @@ export const router = createRouter({
     { path: '/epg', component: () => import('./pages/EpgPage.vue') },
     { path: '/hooks', component: () => import('./pages/HooksPage.vue') },
     { path: '/import', component: () => import('./pages/ImportPage.vue') },
+    { path: '/integrations', component: () => import('./pages/IntegrationsPage.vue') },
     { path: '/settings', component: () => import('./pages/SettingsPage.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/channels' }
   ]

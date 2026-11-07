@@ -12,6 +12,7 @@ const emit = defineEmits<{ saved: [] }>()
       <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2 flex-wrap">
           <h3 class="font-semibold">{{ title }}</h3>
+          <slot name="badges" />
           <UBadge v-if="section.dirty" color="warning" variant="subtle" size="sm" label="Unsaved" />
         </div>
         <p v-if="description" class="text-sm text-muted">{{ description }}</p>

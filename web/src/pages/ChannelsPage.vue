@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { useQuery } from '@pinia/colada'
 import { useToast } from '@nuxt/ui/composables'
 import type { DropdownMenuItem, TableColumn } from '@nuxt/ui'
 import { computed, ref } from 'vue'
-import { api, sourceLabel, type Channel } from '../api'
+import { api, INTEGRATION_NAMES, sourceLabel, type Channel } from '../api'
 import ChannelForm from '../components/ChannelForm.vue'
 import { copy, playerLinks, useAction, useChannels, useInvalidateAll } from '../composables'
 import { floating } from '../safe-area'
@@ -11,6 +12,13 @@ const toast = useToast()
 const run = useAction()
 const invalidate = useInvalidateAll()
 const { data, isPending, error } = useChannels()
+const { data: integrations } = useQuery({ key: ['integrations'], query: () => api.integrations() })
+/** Whether acestream checks can run, and why not (unknown until the integrations load). */
+const checks = computed(() => integrations.value?.find((i) => i.kind === 'acestream')?.checks)
+
+function notSetUp(c: Channel) {
+  return `The ${INTEGRATION_NAMES[c.source.kind]} integration is not set up: this channel is left out of playlists and guides.`
+}
 
 const search = ref('')
 const group = ref('All')
@@ -107,7 +115,8 @@ async function confirmDelete() {
 }
 
 function actions(c: Channel): DropdownMenuItem[][] {
-  const links = playerLinks(c.stream_url)
+  const url = c.stream_url
+  const links = url ? playerLinks(url) : null
   return [
     [
       { label: 'Edit', icon: 'i-lucide-pencil', onSelect: () => openEdit(c) },
@@ -119,11 +128,22 @@ function actions(c: Channel): DropdownMenuItem[][] {
     ],
     [
       ...(c.source.kind === 'acestream'
-        ? [{ label: 'Check health', icon: 'i-lucide-activity', onSelect: () => probe(c) }]
+        ? [
+            {
+              label: 'Check health',
+              icon: 'i-lucide-activity',
+              disabled: checks.value?.available === false,
+              onSelect: () => probe(c)
+            }
+          ]
         : []),
-      { label: 'Copy stream URL', icon: 'i-lucide-clipboard', onSelect: () => copy(c.stream_url, toast) },
-      { label: 'Open in VLC', icon: 'i-lucide-play', href: links.vlc },
-      { label: 'Open in Infuse', icon: 'i-lucide-play', href: links.infuse }
+      ...(url && links
+        ? [
+            { label: 'Copy stream URL', icon: 'i-lucide-clipboard', onSelect: () => copy(url, toast) },
+            { label: 'Open in VLC', icon: 'i-lucide-play', href: links.vlc },
+            { label: 'Open in Infuse', icon: 'i-lucide-play', href: links.infuse }
+          ]
+        : [])
     ],
     [{ label: 'Delete', icon: 'i-lucide-trash', color: 'error', onSelect: () => (deleting.value = c) }]
   ]
@@ -145,6 +165,8 @@ function actions(c: Channel): DropdownMenuItem[][] {
             label="Check all"
             class="hidden sm:inline-flex"
             :loading="probing === 'all'"
+            :disabled="checks?.available === false"
+            :title="checks?.reason ?? undefined"
             @click="probeAll"
           />
           <UButton icon="i-lucide-plus" label="Add" @click="openAdd" />
@@ -180,6 +202,9 @@ function actions(c: Channel): DropdownMenuItem[][] {
               <div v-if="row.original.tvg_id" class="text-xs text-muted truncate">{{ row.original.tvg_id }}</div>
             </div>
             <UBadge v-if="row.original.is_event" label="event" color="warning" variant="subtle" size="sm" />
+            <UTooltip v-if="!row.original.configured" :content="floating()" :text="notSetUp(row.original)">
+              <UBadge label="not set up" color="neutral" variant="outline" size="sm" icon="i-lucide-plug" />
+            </UTooltip>
             <UTooltip v-if="health(row.original)" :content="floating()" :text="health(row.original)!.hint">
               <UBadge
                 :label="health(row.original)!.label"

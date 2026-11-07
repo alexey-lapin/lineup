@@ -12,7 +12,10 @@ const items: NavigationMenuItem[][] = [
     { label: 'Hooks', icon: 'i-lucide-webhook', to: '/hooks' },
     { label: 'Import', icon: 'i-lucide-file-down', to: '/import' }
   ],
-  [{ label: 'Settings', icon: 'i-lucide-settings', to: '/settings' }]
+  [
+    { label: 'Integrations', icon: 'i-lucide-plug', to: '/integrations' },
+    { label: 'Settings', icon: 'i-lucide-settings', to: '/settings' }
+  ]
 ]
 </script>
 
