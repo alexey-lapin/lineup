@@ -19,11 +19,14 @@
 }
 
 /*
- * Only the panels scroll. The page itself never does: when iOS sizes the viewport differently from
- * the screen (seen with the translucent status bar), a swipe dragged the whole app instead of the list.
+ * Home-screen app: only the panels scroll, never the page. When iOS sized the viewport differently
+ * from the screen (seen with the translucent status bar), a swipe dragged the whole app instead of
+ * the list. Browsers keep page overscroll (pull to refresh).
  */
-html,
-body {
-  overflow: hidden;
-  overscroll-behavior: none;
+@media (display-mode: standalone) {
+  html,
+  body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
 }
