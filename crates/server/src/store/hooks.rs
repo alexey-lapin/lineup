@@ -56,7 +56,6 @@ impl Store {
             None => default_events(&config),
         };
         let debounce = validate_debounce(req.debounce_secs.unwrap_or(DEFAULT_DEBOUNCE_SECS))?;
-        check_complete(&config, req.enabled)?;
         let ts = now();
         let id = sqlx::query(
             "INSERT INTO hooks(name, kind, config, events, debounce_secs, enabled, created_at, updated_at)
@@ -101,7 +100,6 @@ impl Store {
         if let Some(e) = patch.enabled {
             next.enabled = e;
         }
-        check_complete(&next.config, next.enabled)?;
         if next != cur {
             sqlx::query(
                 "UPDATE hooks SET name=?, kind=?, config=?, events=?, debounce_secs=?, enabled=?, updated_at=?
@@ -313,18 +311,6 @@ fn validate_config(c: HookConfig) -> Result<HookConfig> {
             HookConfig::Webhook { method, url, headers }
         }
     })
-}
-
-/// An enabled hook must not point at the placeholder URL left by migration 0005.
-fn check_complete(c: &HookConfig, enabled: bool) -> Result<()> {
-    let HookConfig::Webhook { url, .. } = c;
-    if enabled && url.contains(crate::hooks::MISSING_TASK_ID) {
-        return Err(invalid(format!(
-            "replace {} in the URL with the real task id before enabling this hook",
-            crate::hooks::MISSING_TASK_ID
-        )));
-    }
-    Ok(())
 }
 
 fn contains_mask(c: &HookConfig) -> bool {

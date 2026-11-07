@@ -2,8 +2,9 @@
 //! whether playback works.
 //!
 //! A probe starts a session with `format=json` and a unique pid, polls its stat URL (rebased onto
-//! `engine_base`, since the engine reports its own loopback address) and always stops the session.
-//! Before each probe an activity guard asks acexy whether the stream is being watched.
+//! the engine URL, since the engine reports its own loopback address) and always stops the session.
+//! Before each probe an activity guard asks acexy whether the stream is being watched, so checks
+//! need acexy. The guard only sees acexy's clients, not players connected to the engine directly.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -11,7 +12,7 @@ use std::time::{Duration, SystemTime};
 use api_types::{ProbeOutcome, ProbeResult, Source, SourceKind};
 use serde_json::{Value, json};
 
-use crate::error::{Result, invalid};
+use crate::error::{Result, conflict, invalid};
 use crate::store::{ChannelFilter, ProbeIdentity, Store};
 
 /// Timing, shortened in tests.
@@ -93,6 +94,7 @@ impl Prober {
     /// Runs never overlap. Unless `force`, the activity guard applies; if it stops the run, the
     /// remaining channels are reported (not recorded) as skipped.
     pub async fn probe(self: &Arc<Self>, ids: &[i64], force: bool) -> Result<Vec<ProbeResult>> {
+        self.ensure_available().await?;
         let mut targets = Vec::new();
         for id in ids {
             let c = self.store.get_channel(*id).await?;
@@ -110,6 +112,7 @@ impl Prober {
 
     /// All enabled acestream channels. Returns whether the guard stopped the run early.
     pub async fn probe_all(self: &Arc<Self>, force: bool) -> Result<(Vec<ProbeResult>, bool)> {
+        self.ensure_available().await?;
         let channels = self
             .store
             .list_channels(&ChannelFilter {
@@ -130,6 +133,22 @@ impl Prober {
             })
             .collect();
         Ok(self.run_owned(targets, force).await)
+    }
+
+    /// Checks need a configured engine and acexy (for the activity guard), even when forced.
+    async fn ensure_available(&self) -> Result<()> {
+        let checks = self.store.integration_configs().await?.checks(SourceKind::Acestream);
+        match checks.reason {
+            Some(why) if !checks.available => Err(conflict(format!("channel checks are unavailable: {why}"))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Start a run over all channels in the background; fails at once when checks are unavailable.
+    pub async fn start_all(self: &Arc<Self>, force: bool) -> Result<()> {
+        self.ensure_available().await?;
+        self.spawn_all(force);
+        Ok(())
     }
 
     /// Run in a task of its own: once started, a run finishes (stopping its sessions and recording
@@ -154,15 +173,22 @@ impl Prober {
         });
     }
 
-    /// Boot-relative schedule over all channels; off while `probe_interval_hours` is 0.
+    /// Boot-relative schedule over all channels; off while `probe_interval_hours` is 0 or checks are
+    /// unavailable (no engine or no acexy).
     pub fn spawn_scheduler(self: &Arc<Self>) {
         let me = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(me.timing.first_run).await;
             let mut next_due: Option<SystemTime> = None; // None: due now
             loop {
-                let hours = me.store.settings().await.map(|s| s.probe_interval_hours).unwrap_or(0);
-                let due = hours > 0 && next_due.is_none_or(|t| SystemTime::now() >= t);
+                let (hours, available) = match me.store.integration_configs().await {
+                    Ok(c) => (
+                        c.acestream.probe_interval_hours,
+                        c.checks(SourceKind::Acestream).available,
+                    ),
+                    Err(_) => (0, false),
+                };
+                let due = hours > 0 && available && next_due.is_none_or(|t| SystemTime::now() >= t);
                 if due {
                     match me.probe_all(false).await {
                         Ok((_, stopped)) if stopped => {
@@ -237,18 +263,26 @@ impl Prober {
 
     /// Guard, probe and record one target.
     async fn attempt(&self, t: Target, force: bool) -> Attempt {
-        let settings = match self.store.settings().await {
-            Ok(s) => s,
+        // Each attempt uses the config as it is now; a change during the run applies to the next one.
+        let ace = match self.store.integration_configs().await {
+            Ok(c) => c.acestream,
             Err(e) => {
-                let why = format!("reading settings: {e}");
+                let why = format!("reading the Acestream integration: {e}");
+                return Attempt::Stop(skipped(t.channel_id, &why), why);
+            }
+        };
+        let acexy = match (&ace.acexy_url, ace.engine_url.is_empty()) {
+            (Some(a), false) => a.clone(),
+            _ => {
+                let why = "the Acestream integration changed: checks are unavailable".to_string();
                 return Attempt::Stop(skipped(t.channel_id, &why), why);
             }
         };
         let (outcome, detail) = if force {
-            self.probe_one(&settings.engine_base, &t.ace).await
+            self.probe_one(&ace.engine_url, &t.ace).await
         } else {
-            match self.guard(&settings.acexy_base, &t.ace).await {
-                Guard::Go => self.probe_one(&settings.engine_base, &t.ace).await,
+            match self.guard(&acexy, &t.ace).await {
+                Guard::Go => self.probe_one(&ace.engine_url, &t.ace).await,
                 Guard::Skip(why) => (ProbeOutcome::Skipped, json!({ "reason": why })),
                 Guard::Stop(why) => return Attempt::Stop(skipped(t.channel_id, &why), why),
             }
@@ -257,6 +291,7 @@ impl Prober {
             channel_id: t.channel_id,
             created_at: t.created_at,
             ace: &t.ace,
+            engine_url: &ace.engine_url,
         };
         tracing::info!("probe of channel {} ({}): {outcome:?} {detail}", t.channel_id, t.ace);
         let mut detail = detail;
@@ -455,11 +490,14 @@ fn active_count(body: &Value) -> Option<u64> {
         })
 }
 
-/// Keep the path and query of `url`, but on `base`'s scheme, host and port.
-fn rebase(url: &str, base: &str) -> Option<String> {
+/// Move an engine-reported URL onto the configured engine `base`: its scheme, host and port, with
+/// any base path (an engine behind a reverse proxy under `/engine`) put in front of the URL's path.
+/// The query is kept.
+pub fn rebase(url: &str, base: &str) -> Option<String> {
     let u = url::Url::parse(url).ok()?;
     let mut b = url::Url::parse(base).ok()?;
-    b.set_path(u.path());
+    let prefix = b.path().trim_end_matches('/').to_string();
+    b.set_path(&format!("{prefix}{}", u.path()));
     b.set_query(u.query());
     Some(b.to_string())
 }
@@ -486,6 +524,11 @@ mod tests {
         assert_eq!(
             rebase("http://127.0.0.1:6878/ace/stat/abc/def?x=1", "http://media-host:6878").as_deref(),
             Some("http://media-host:6878/ace/stat/abc/def?x=1")
+        );
+        assert_eq!(
+            rebase("http://127.0.0.1:6878/ace/stat/abc", "https://proxy/engine/").as_deref(),
+            Some("https://proxy/engine/ace/stat/abc"),
+            "a base path is kept"
         );
     }
 

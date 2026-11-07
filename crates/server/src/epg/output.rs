@@ -71,7 +71,7 @@ impl Epg {
             .items
             .into_iter()
             .map(|i| i.channel)
-            .filter(|c| c.enabled)
+            .filter(crate::store::eligible)
             .collect();
         let rendered = Arc::new(self.build(channels, hour).await?);
         let mut cache = self.xml_cache.lock().unwrap();

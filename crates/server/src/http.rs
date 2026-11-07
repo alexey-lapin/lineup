@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use api_types::{
-    Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgSource, EpgSourceCreate,
-    EpgSourcePatch, ErrorBody, ErrorDetail, Hook, HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest,
+    Channel, ChannelCreate, ChannelInfo, ChannelPatch, ConnectionTestRequest, ConnectionTestResult, EpgChannel,
+    EpgFetchRequest, EpgFetchResult, EpgSource, EpgSourceCreate, EpgSourcePatch, ErrorBody, ErrorDetail, Hook,
+    HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest, Integration, IntegrationPatch, IntegrationStatus,
     ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeOutcome, ProbeRequest,
     ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch,
-    SettingsTestRequest, SettingsTestResult, SourceKind, Status,
+    SourceKind, Status,
 };
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
@@ -91,6 +92,7 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(status))
         .routes(routes!(list_channels, create_channel))
         .routes(routes!(get_channel, patch_channel, delete_channel))
+        .routes(routes!(channel_info))
         .routes(routes!(resolve))
         .routes(routes!(probe))
         .routes(routes!(list_playlists, create_playlist))
@@ -99,7 +101,10 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(remove_item))
         .routes(routes!(move_item))
         .routes(routes!(get_settings, patch_settings))
-        .routes(routes!(test_settings))
+        .routes(routes!(list_integrations))
+        .routes(routes!(get_integration, patch_integration))
+        .routes(routes!(test_integration))
+        .routes(routes!(integration_status))
         .routes(routes!(import))
         .routes(routes!(refresh))
         .routes(routes!(list_epg_sources, create_epg_source))
@@ -328,17 +333,39 @@ async fn resolve(State(s): State<AppState>, Body(req): Body<ResolveRequest>) -> 
     ))
 }
 
-/// Probe acestream channels. With `ids`, waits and returns their results; without, starts a run over
-/// all enabled acestream channels in the background (202).
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct InfoQuery {
+    /// Also ask the engine for the content's name (an extra request; once per view is enough).
+    #[serde(default)]
+    name: bool,
+}
+
+/// What the services report about a channel right now. For acestream channels: live numbers of the
+/// session acexy has open (never starts one), and the engine's name with `name=true`.
+#[utoipa::path(get, path = "/channels/{id}/info", params(("id" = i64, Path), InfoQuery),
+    responses((status = 200, body = ChannelInfo), (status = 404, body = ErrorBody)))]
+async fn channel_info(
+    State(s): State<AppState>,
+    ApiPath(id): ApiPath<i64>,
+    ApiQuery(q): ApiQuery<InfoQuery>,
+) -> ApiResult<Json<ChannelInfo>> {
+    Ok(Json(crate::live::channel_info(&s.store, id, q.name).await?))
+}
+
+/// Check acestream channels (a short engine session each, skipped while acexy reports the stream
+/// being watched). With `ids`, waits and returns their results; without, starts a run over all
+/// enabled acestream channels in the background (202). 409 when checks are unavailable (no engine
+/// or no acexy).
 #[utoipa::path(post, path = "/probe", request_body = ProbeRequest,
     responses((status = 200, body = ProbeResponse), (status = 202, body = ProbeResponse),
-        (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn probe(
     State(s): State<AppState>,
     Body(req): Body<ProbeRequest>,
 ) -> ApiResult<(StatusCode, Json<ProbeResponse>)> {
     if req.ids.is_empty() {
-        s.prober.spawn_all(req.force);
+        s.prober.start_all(req.force).await?;
         return Ok((
             StatusCode::ACCEPTED,
             Json(ProbeResponse {
@@ -443,7 +470,7 @@ async fn move_item(
     Ok(Json(s.move_item(&slug, channel_id, req.position).await?))
 }
 
-// -------------------------------------------------------------------- settings, import, refresh
+// -------------------------------------------------------------------- settings
 
 #[utoipa::path(get, path = "/settings", responses((status = 200, body = Settings)))]
 async fn get_settings(State(s): State<AppState>) -> ApiResult<Json<Settings>> {
@@ -456,18 +483,61 @@ async fn patch_settings(State(s): State<AppState>, Body(req): Body<SettingsPatch
     Ok(Json(s.patch_settings(req).await?))
 }
 
-/// Check that a service answers at a base URL (the saved one, or `base` to try an unsaved value).
-/// Runs from the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
-#[utoipa::path(post, path = "/settings/test", request_body = SettingsTestRequest,
-    responses((status = 200, body = SettingsTestResult), (status = 422, body = ErrorBody)))]
-async fn test_settings(
+// -------------------------------------------------------------------- integrations
+
+#[utoipa::path(get, path = "/integrations", responses((status = 200, body = Vec<Integration>)))]
+async fn list_integrations(State(s): State<AppState>) -> ApiResult<Json<Vec<Integration>>> {
+    Ok(Json(s.list_integrations().await?))
+}
+
+#[utoipa::path(get, path = "/integrations/{kind}", params(("kind" = SourceKind, Path)),
+    responses((status = 200, body = Integration), (status = 422, body = ErrorBody)))]
+async fn get_integration(
     State(s): State<AppState>,
-    Body(req): Body<SettingsTestRequest>,
-) -> ApiResult<Json<SettingsTestResult>> {
+    ApiPath(kind): ApiPath<SourceKind>,
+) -> ApiResult<Json<Integration>> {
+    Ok(Json(s.get_integration(kind).await?))
+}
+
+/// Change an integration's config. A change that alters playback URLs, or turns the integration on
+/// or off, announces `playlist.changed` for the playlists with its channels.
+#[utoipa::path(patch, path = "/integrations/{kind}", params(("kind" = SourceKind, Path)),
+    request_body = IntegrationPatch,
+    responses((status = 200, body = Integration), (status = 422, body = ErrorBody)))]
+async fn patch_integration(
+    State(s): State<AppState>,
+    ApiPath(kind): ApiPath<SourceKind>,
+    Body(req): Body<IntegrationPatch>,
+) -> ApiResult<Json<Integration>> {
+    Ok(Json(s.patch_integration(kind, req).await?))
+}
+
+/// Check that a component answers (at its saved URL, or `url` to try an unsaved value). Runs from
+/// the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
+#[utoipa::path(post, path = "/integrations/{kind}/test", params(("kind" = SourceKind, Path)),
+    request_body = ConnectionTestRequest,
+    responses((status = 200, body = ConnectionTestResult), (status = 422, body = ErrorBody)))]
+async fn test_integration(
+    State(s): State<AppState>,
+    ApiPath(kind): ApiPath<SourceKind>,
+    Body(req): Body<ConnectionTestRequest>,
+) -> ApiResult<Json<ConnectionTestResult>> {
     Ok(Json(
-        crate::settings_test::test(&s.store, req.target, req.base.as_deref()).await?,
+        crate::connection::test(&s.store, kind, req.component, req.url.as_deref()).await?,
     ))
 }
+
+/// Test every configured component with its saved URL (versions, acexy's active stream count).
+#[utoipa::path(get, path = "/integrations/{kind}/status", params(("kind" = SourceKind, Path)),
+    responses((status = 200, body = IntegrationStatus), (status = 422, body = ErrorBody)))]
+async fn integration_status(
+    State(s): State<AppState>,
+    ApiPath(kind): ApiPath<SourceKind>,
+) -> ApiResult<Json<IntegrationStatus>> {
+    Ok(Json(crate::connection::status(&s.store, kind).await?))
+}
+
+// -------------------------------------------------------------------- import, refresh
 
 #[utoipa::path(post, path = "/import", request_body = ImportRequest,
     responses((status = 200, body = ImportReport), (status = 422, body = ErrorBody)))]

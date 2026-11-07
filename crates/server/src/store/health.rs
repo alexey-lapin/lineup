@@ -33,12 +33,15 @@ pub struct ProbeIdentity<'a> {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// The acestream content id that was probed.
     pub ace: &'a str,
+    /// The engine it was probed through.
+    pub engine_url: &'a str,
 }
 
 impl Store {
     /// Record a probe attempt. Emits `channel.unhealthy` on `null|ok → dead`, `channel.recovered` on
     /// `dead → ok`, and `channel.probed` otherwise. Returns false, recording nothing, if the channel
-    /// was deleted (even if its id was reused) or no longer has the probed source.
+    /// was deleted (even if its id was reused), no longer has the probed source, or the engine URL
+    /// changed meanwhile.
     pub async fn record_probe(
         &self,
         who: ProbeIdentity<'_>,
@@ -57,6 +60,10 @@ impl Store {
             && row.try_get::<String, _>("source_kind")? == "acestream"
             && row.try_get::<String, _>("source_key")? == who.ace;
         if !same {
+            return Ok(false);
+        }
+        // A result measured through an engine that is no longer configured is not current.
+        if super::integrations::load_configs(&mut tx).await?.acestream.engine_url != who.engine_url {
             return Ok(false);
         }
         let name: String = row.try_get("name")?;

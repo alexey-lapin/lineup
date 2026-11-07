@@ -237,6 +237,52 @@
         }
       }
     },
+    "/channels/{id}/info": {
+      "get": {
+        "summary": "What the services report about a channel right now. For acestream channels: live numbers of the\nsession acexy has open (never starts one), and the engine's name with `name=true`.",
+        "operationId": "channel_info",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Also ask the engine for the content's name (an extra request; once per view is enough).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/epg/channels": {
       "get": {
         "summary": "Channels offered by the enabled sources. With `q`, the best matches first.",
@@ -741,6 +787,186 @@
         }
       }
     },
+    "/integrations": {
+      "get": {
+        "operationId": "list_integrations",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Integration"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/integrations/{kind}": {
+      "get": {
+        "operationId": "get_integration",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/SourceKind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Integration"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Change an integration's config. A change that alters playback URLs, or turns the integration on\nor off, announces `playlist.changed` for the playlists with its channels.",
+        "operationId": "patch_integration",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/SourceKind"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IntegrationPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Integration"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/integrations/{kind}/status": {
+      "get": {
+        "summary": "Test every configured component with its saved URL (versions, acexy's active stream count).",
+        "operationId": "integration_status",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/SourceKind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/integrations/{kind}/test": {
+      "post": {
+        "summary": "Check that a component answers (at its saved URL, or `url` to try an unsaved value). Runs from\nthe lineup server; a failed connection is `ok: false`, an invalid URL is 422.",
+        "operationId": "test_integration",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/SourceKind"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionTestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/playlists": {
       "get": {
         "operationId": "list_playlists",
@@ -1120,7 +1346,7 @@
     },
     "/probe": {
       "post": {
-        "summary": "Probe acestream channels. With `ids`, waits and returns their results; without, starts a run over\nall enabled acestream channels in the background (202).",
+        "summary": "Check acestream channels (a short engine session each, skipped while acexy reports the stream\nbeing watched). With `ids`, waits and returns their results; without, starts a run over all\nenabled acestream channels in the background (202). 409 when checks are unavailable (no engine\nor no acexy).",
         "operationId": "probe",
         "requestBody": {
           "content": {
@@ -1152,6 +1378,15 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1291,42 +1526,6 @@
         }
       }
     },
-    "/settings/test": {
-      "post": {
-        "summary": "Check that a service answers at a base URL (the saved one, or `base` to try an unsaved value).\nRuns from the lineup server; a failed connection is `ok: false`, an invalid URL is 422.",
-        "operationId": "test_settings",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SettingsTestRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SettingsTestResult"
-                }
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/status": {
       "get": {
         "operationId": "status",
@@ -1346,6 +1545,130 @@
   },
   "components": {
     "schemas": {
+      "AcestreamInfo": {
+        "type": "object",
+        "description": "Acestream section of a channel's details.",
+        "required": [
+          "live"
+        ],
+        "properties": {
+          "engine_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name the engine reports for this content id (only when asked for with `name=true`)."
+          },
+          "engine_name_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the name could not be read."
+          },
+          "live": {
+            "$ref": "#/components/schemas/AcestreamLive"
+          }
+        }
+      },
+      "AcestreamLive": {
+        "type": "object",
+        "description": "Live numbers of an acestream channel, read from the session acexy already has open. Reading them\nnever starts or stops a session.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "clients": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Players connected to acexy for this stream.",
+            "minimum": 0
+          },
+          "downloaded": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bytes downloaded in this session.",
+            "minimum": 0
+          },
+          "peers": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the state is unavailable, or why the numbers are missing."
+          },
+          "speed_down": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Download speed, KB/s.",
+            "minimum": 0
+          },
+          "speed_up": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Upload speed, KB/s.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/LiveState"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Engine session status (`prebuf`, `dl`, ...)."
+          },
+          "uploaded": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bytes uploaded in this session.",
+            "minimum": 0
+          }
+        }
+      },
+      "Availability": {
+        "type": "object",
+        "description": "Whether a feature is available, and why not.",
+        "required": [
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it is unavailable (null when available)."
+          }
+        }
+      },
       "Channel": {
         "type": "object",
         "required": [
@@ -1353,7 +1676,7 @@
           "name",
           "source",
           "source_key",
-          "stream_url",
+          "configured",
           "is_event",
           "enabled",
           "playlists",
@@ -1361,6 +1684,10 @@
           "updated_at"
         ],
         "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether the channel's integration is configured. Channels of an unconfigured integration\nstay listed but are left out of playlists and guides."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -1417,8 +1744,11 @@
             "description": "Canonical key used for de-duplication (unique per source kind)."
           },
           "stream_url": {
-            "type": "string",
-            "description": "Stream URL as currently emitted in playlists."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Stream URL as emitted in playlists; null while the channel's integration is not configured."
           },
           "tvg_id": {
             "type": [
@@ -1544,6 +1874,55 @@
           }
         }
       },
+      "ChannelInfo": {
+        "type": "object",
+        "description": "What lineup can tell about a channel right now, beyond its stored fields.",
+        "required": [
+          "channel_id",
+          "kind",
+          "configured",
+          "checks"
+        ],
+        "properties": {
+          "acestream": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AcestreamInfo",
+                "description": "For acestream channels."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "channel_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "checks": {
+            "$ref": "#/components/schemas/Availability",
+            "description": "Whether \"Check now\" can run for this channel."
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "Whether the channel's integration is configured."
+          },
+          "health": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChannelHealth",
+                "description": "Latest check result and last conclusive result (null until checked)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SourceKind"
+          }
+        }
+      },
       "ChannelPatch": {
         "type": "object",
         "description": "Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.",
@@ -1606,6 +1985,89 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "Component": {
+        "type": "string",
+        "description": "A part of an integration with its own address.",
+        "enum": [
+          "engine",
+          "acexy",
+          "proxy"
+        ]
+      },
+      "ConnectionTestRequest": {
+        "type": "object",
+        "required": [
+          "component"
+        ],
+        "properties": {
+          "component": {
+            "$ref": "#/components/schemas/Component"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A base URL to test instead of the saved one (e.g. an unsaved edit)."
+          }
+        }
+      },
+      "ConnectionTestResult": {
+        "type": "object",
+        "description": "Outcome of a connection test, run from the lineup server (it cannot show whether your players\ncan reach the same address).",
+        "required": [
+          "component",
+          "ok",
+          "url",
+          "detail",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "active_streams": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Streams acexy is serving now (acexy only).",
+            "minimum": 0
+          },
+          "component": {
+            "$ref": "#/components/schemas/Component"
+          },
+          "detail": {
+            "type": "string",
+            "description": "What the answer shows, or why the test failed."
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string",
+            "description": "The URL that was requested."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service version, when it reports one (the engine does; acexy does not)."
           }
         }
       },
@@ -2253,6 +2715,222 @@
           }
         }
       },
+      "Integration": {
+        "type": "object",
+        "description": "A service lineup plays channels through (one per source kind).",
+        "required": [
+          "kind",
+          "config",
+          "configured",
+          "checks",
+          "channel_count",
+          "revision",
+          "updated_at"
+        ],
+        "properties": {
+          "channel_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Channels of this integration."
+          },
+          "checks": {
+            "$ref": "#/components/schemas/Availability",
+            "description": "Health checks of its channels (Check now and the schedule)."
+          },
+          "config": {
+            "$ref": "#/components/schemas/IntegrationConfig"
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "Its required URL is set (a stable property; see the status for reachability)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SourceKind"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Increases with every change; of two copies, the higher revision is newer. Read-only.",
+            "minimum": 0
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "IntegrationConfig": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The Acestream engine (required) and, optionally, acexy in front of it.",
+            "required": [
+              "engine_url",
+              "probe_interval_hours",
+              "kind"
+            ],
+            "properties": {
+              "acexy_url": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "acexy base URL. When set, playlists play through acexy (several viewers share one engine\nsession) and channel checks become available; when null, playlists use the engine directly."
+              },
+              "engine_url": {
+                "type": "string",
+                "description": "Engine base URL, e.g. `http://media-host:6878`; blank = not configured."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "acestream"
+                ]
+              },
+              "probe_interval_hours": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Hours between scheduled checks of all enabled acestream channels (the first runs 10\nminutes after start); 0 turns them off. Checks need acexy.",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The VK proxy (a thin layer over streamlink).",
+            "required": [
+              "url",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "vk"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Proxy base URL; blank = not configured."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Direct URLs, emitted as they are. Nothing to configure.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "direct"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What an integration needs, by type. Tagged by `kind`, which matches the integration's kind.\nA blank required URL means the integration is not configured."
+      },
+      "IntegrationPatch": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "acexy_url": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`null` or an empty string removes acexy."
+              },
+              "engine_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "acestream"
+                ]
+              },
+              "probe_interval_hours": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "vk"
+                ]
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "direct"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Partial update of an integration's config, tagged by `kind` (must match the integration).\nAbsent fields are left unchanged; an empty string turns a required URL off."
+      },
+      "IntegrationStatus": {
+        "type": "object",
+        "description": "Live state of an integration's services (from the saved config).",
+        "required": [
+          "kind",
+          "configured",
+          "components"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConnectionTestResult"
+            },
+            "description": "One result per configured component; empty when nothing is configured (or for Direct)."
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SourceKind"
+          }
+        }
+      },
       "ItemAdd": {
         "type": "object",
         "required": [
@@ -2288,6 +2966,15 @@
             "description": "Full new order of channel ids."
           }
         }
+      },
+      "LiveState": {
+        "type": "string",
+        "description": "Whether acexy reports a stream as being watched.",
+        "enum": [
+          "active",
+          "inactive",
+          "unavailable"
+        ]
       },
       "MoveRequest": {
         "type": "object",
@@ -2431,7 +3118,7 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "Channels to probe; all enabled acestream channels when empty (that run continues in the\nbackground)."
+            "description": "Channels to check; all enabled acestream channels when empty (that run continues in the\nbackground). Checks need acexy."
           }
         }
       },
@@ -2517,10 +3204,14 @@
         "required": [
           "source",
           "source_key",
-          "stream_url",
+          "configured",
           "suggestion"
         ],
         "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether the source's integration is configured."
+          },
           "duplicate_of": {
             "type": [
               "integer",
@@ -2550,7 +3241,11 @@
             "type": "string"
           },
           "stream_url": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null while the source's integration is not configured."
           },
           "suggestion": {
             "$ref": "#/components/schemas/Suggestion",
@@ -2567,30 +3262,15 @@
       },
       "Settings": {
         "type": "object",
+        "description": "App-wide settings. Service addresses live in the integrations.",
         "required": [
-          "acexy_base",
-          "engine_base",
-          "vk_base",
-          "epg_refresh_hours",
-          "probe_interval_hours"
+          "epg_refresh_hours"
         ],
         "properties": {
-          "acexy_base": {
-            "type": "string"
-          },
-          "engine_base": {
-            "type": "string"
-          },
           "epg_refresh_hours": {
             "type": "integer",
             "format": "int32",
             "description": "Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.",
-            "minimum": 0
-          },
-          "probe_interval_hours": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Hours between scheduled health probes of all acestream channels (the first runs 10 minutes\nafter start); 0, the default, turns them off.",
             "minimum": 0
           },
           "revision": {
@@ -2598,27 +3278,12 @@
             "format": "int64",
             "description": "Increases with every change; of two copies of the settings, the higher revision is newer.\nRead-only.",
             "minimum": 0
-          },
-          "vk_base": {
-            "type": "string"
           }
         }
       },
       "SettingsPatch": {
         "type": "object",
         "properties": {
-          "acexy_base": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "engine_base": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "epg_refresh_hours": {
             "type": [
               "integer",
@@ -2626,98 +3291,14 @@
             ],
             "format": "int32",
             "minimum": 0
-          },
-          "probe_interval_hours": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "vk_base": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
-      },
-      "SettingsTestRequest": {
-        "type": "object",
-        "required": [
-          "target"
-        ],
-        "properties": {
-          "base": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "A base URL to test instead of the saved one (e.g. an unsaved edit)."
-          },
-          "target": {
-            "$ref": "#/components/schemas/SettingsTestTarget"
-          }
-        }
-      },
-      "SettingsTestResult": {
-        "type": "object",
-        "description": "Outcome of a connection test, run from the lineup server (it cannot show whether your players\ncan reach the same address).",
-        "required": [
-          "ok",
-          "url",
-          "detail",
-          "elapsed_ms"
-        ],
-        "properties": {
-          "detail": {
-            "type": "string",
-            "description": "What the answer shows, or why the test failed."
-          },
-          "elapsed_ms": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "http_status": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "ok": {
-            "type": "boolean"
-          },
-          "url": {
-            "type": "string",
-            "description": "The URL that was requested."
-          },
-          "version": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Engine version, when testing the engine."
-          }
-        }
-      },
-      "SettingsTestTarget": {
-        "type": "string",
-        "description": "A service whose base URL can be tested.",
-        "enum": [
-          "acexy",
-          "engine",
-          "vk"
-        ]
       },
       "Source": {
         "oneOf": [
           {
             "type": "object",
-            "description": "Acestream content id (40 lowercase hex chars), played through acexy.",
+            "description": "Acestream content id (40 lowercase hex chars), played through acexy (or the engine).",
             "required": [
               "id",
               "kind"
@@ -2776,7 +3357,7 @@
               "kind": {
                 "type": "string",
                 "enum": [
-                  "raw"
+                  "direct"
                 ]
               },
               "url": {
@@ -2785,14 +3366,15 @@
             }
           }
         ],
-        "description": "A channel's stream source. The full URL is built from the per-kind base URL in settings."
+        "description": "A channel's stream source. Its kind is also the channel's integration, which builds the URL."
       },
       "SourceKind": {
         "type": "string",
+        "description": "A source kind, which is also the integration that plays it (one integration per kind).",
         "enum": [
           "acestream",
           "vk",
-          "raw"
+          "direct"
         ]
       },
       "Status": {

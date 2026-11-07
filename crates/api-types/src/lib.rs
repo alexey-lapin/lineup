@@ -32,8 +32,8 @@ pub struct ChannelHealth {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct ProbeRequest {
-    /// Channels to probe; all enabled acestream channels when empty (that run continues in the
-    /// background).
+    /// Channels to check; all enabled acestream channels when empty (that run continues in the
+    /// background). Checks need acexy.
     #[serde(default)]
     pub ids: Vec<i64>,
     /// Probe even if the stream seems to be in use.
@@ -58,11 +58,11 @@ pub struct ProbeResponse {
     pub results: Vec<ProbeResult>,
 }
 
-/// A channel's stream source. The full URL is built from the per-kind base URL in settings.
+/// A channel's stream source. Its kind is also the channel's integration, which builds the URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Source {
-    /// Acestream content id (40 lowercase hex chars), played through acexy.
+    /// Acestream content id (40 lowercase hex chars), played through acexy (or the engine).
     Acestream { id: String },
     /// VK video, played through the VK proxy.
     Vk {
@@ -72,7 +72,7 @@ pub enum Source {
         list: Option<String>,
     },
     /// Any other URL, emitted verbatim.
-    Raw { url: String },
+    Direct { url: String },
 }
 
 impl Source {
@@ -80,17 +80,18 @@ impl Source {
         match self {
             Source::Acestream { .. } => SourceKind::Acestream,
             Source::Vk { .. } => SourceKind::Vk,
-            Source::Raw { .. } => SourceKind::Raw,
+            Source::Direct { .. } => SourceKind::Direct,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+/// A source kind, which is also the integration that plays it (one integration per kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
     Acestream,
     Vk,
-    Raw,
+    Direct,
 }
 
 impl SourceKind {
@@ -98,15 +99,17 @@ impl SourceKind {
         match self {
             SourceKind::Acestream => "acestream",
             SourceKind::Vk => "vk",
-            SourceKind::Raw => "raw",
+            SourceKind::Direct => "direct",
         }
     }
+
+    pub const ALL: [SourceKind; 3] = [SourceKind::Acestream, SourceKind::Vk, SourceKind::Direct];
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "acestream" => Some(SourceKind::Acestream),
             "vk" => Some(SourceKind::Vk),
-            "raw" => Some(SourceKind::Raw),
+            "direct" => Some(SourceKind::Direct),
             _ => None,
         }
     }
@@ -122,8 +125,11 @@ pub struct Channel {
     pub source: Source,
     /// Canonical key used for de-duplication (unique per source kind).
     pub source_key: String,
-    /// Stream URL as currently emitted in playlists.
-    pub stream_url: String,
+    /// Stream URL as emitted in playlists; null while the channel's integration is not configured.
+    pub stream_url: Option<String>,
+    /// Whether the channel's integration is configured. Channels of an unconfigured integration
+    /// stay listed but are left out of playlists and guides.
+    pub configured: bool,
     pub is_event: bool,
     pub kickoff_at: Option<DateTime<Utc>>,
     pub enabled: bool,
@@ -278,16 +284,11 @@ pub struct ItemsReplace {
     pub channel_ids: Vec<i64>,
 }
 
+/// App-wide settings. Service addresses live in the integrations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Settings {
-    pub acexy_base: String,
-    pub engine_base: String,
-    pub vk_base: String,
     /// Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
     pub epg_refresh_hours: u32,
-    /// Hours between scheduled health probes of all acestream channels (the first runs 10 minutes
-    /// after start); 0, the default, turns them off.
-    pub probe_interval_hours: u32,
     /// Increases with every change; of two copies of the settings, the higher revision is newer.
     /// Read-only.
     #[serde(default)]
@@ -297,47 +298,253 @@ pub struct Settings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct SettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acexy_base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vk_base: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epg_refresh_hours: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_interval_hours: Option<u32>,
 }
 
-/// A service whose base URL can be tested.
+/// What an integration needs, by type. Tagged by `kind`, which matches the integration's kind.
+/// A blank required URL means the integration is not configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum IntegrationConfig {
+    /// The Acestream engine (required) and, optionally, acexy in front of it.
+    Acestream {
+        /// Engine base URL, e.g. `http://media-host:6878`; blank = not configured.
+        engine_url: String,
+        /// acexy base URL. When set, playlists play through acexy (several viewers share one engine
+        /// session) and channel checks become available; when null, playlists use the engine directly.
+        acexy_url: Option<String>,
+        /// Hours between scheduled checks of all enabled acestream channels (the first runs 10
+        /// minutes after start); 0 turns them off. Checks need acexy.
+        probe_interval_hours: u32,
+    },
+    /// The VK proxy (a thin layer over streamlink).
+    Vk {
+        /// Proxy base URL; blank = not configured.
+        url: String,
+    },
+    /// Direct URLs, emitted as they are. Nothing to configure.
+    Direct {},
+}
+
+impl IntegrationConfig {
+    pub fn kind(&self) -> SourceKind {
+        match self {
+            IntegrationConfig::Acestream { .. } => SourceKind::Acestream,
+            IntegrationConfig::Vk { .. } => SourceKind::Vk,
+            IntegrationConfig::Direct {} => SourceKind::Direct,
+        }
+    }
+
+    /// The blank configuration a new database starts with.
+    pub fn blank(kind: SourceKind) -> Self {
+        match kind {
+            SourceKind::Acestream => IntegrationConfig::Acestream {
+                engine_url: String::new(),
+                acexy_url: None,
+                probe_interval_hours: 0,
+            },
+            SourceKind::Vk => IntegrationConfig::Vk { url: String::new() },
+            SourceKind::Direct => IntegrationConfig::Direct {},
+        }
+    }
+
+    /// Whether channels of this integration can be played: its required URL is set. Says nothing
+    /// about whether the service is reachable right now.
+    pub fn configured(&self) -> bool {
+        match self {
+            IntegrationConfig::Acestream { engine_url, .. } => !engine_url.is_empty(),
+            IntegrationConfig::Vk { url } => !url.is_empty(),
+            IntegrationConfig::Direct {} => true,
+        }
+    }
+}
+
+/// Whether a feature is available, and why not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Availability {
+    pub available: bool,
+    /// Why it is unavailable (null when available).
+    pub reason: Option<String>,
+}
+
+impl Availability {
+    pub fn yes() -> Self {
+        Availability {
+            available: true,
+            reason: None,
+        }
+    }
+
+    pub fn no(reason: impl Into<String>) -> Self {
+        Availability {
+            available: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+/// A service lineup plays channels through (one per source kind).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Integration {
+    pub kind: SourceKind,
+    pub config: IntegrationConfig,
+    /// Its required URL is set (a stable property; see the status for reachability).
+    pub configured: bool,
+    /// Health checks of its channels (Check now and the schedule).
+    pub checks: Availability,
+    /// Channels of this integration.
+    pub channel_count: i64,
+    /// Increases with every change; of two copies, the higher revision is newer. Read-only.
+    pub revision: u64,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Partial update of an integration's config, tagged by `kind` (must match the integration).
+/// Absent fields are left unchanged; an empty string turns a required URL off.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum IntegrationPatch {
+    Acestream {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        engine_url: Option<String>,
+        /// `null` or an empty string removes acexy.
+        #[serde(default, with = "double_option", skip_serializing_if = "Option::is_none")]
+        #[schema(value_type = Option<String>)]
+        acexy_url: Option<Option<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        probe_interval_hours: Option<u32>,
+    },
+    Vk {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
+    Direct {},
+}
+
+impl IntegrationPatch {
+    pub fn kind(&self) -> SourceKind {
+        match self {
+            IntegrationPatch::Acestream { .. } => SourceKind::Acestream,
+            IntegrationPatch::Vk { .. } => SourceKind::Vk,
+            IntegrationPatch::Direct {} => SourceKind::Direct,
+        }
+    }
+}
+
+/// A part of an integration with its own address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum SettingsTestTarget {
-    Acexy,
+pub enum Component {
+    /// The Acestream engine.
     Engine,
-    Vk,
+    /// acexy, the Acestream proxy.
+    Acexy,
+    /// The VK proxy.
+    Proxy,
+}
+
+impl Component {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Component::Engine => "engine",
+            Component::Acexy => "acexy",
+            Component::Proxy => "proxy",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SettingsTestRequest {
-    pub target: SettingsTestTarget,
+pub struct ConnectionTestRequest {
+    pub component: Component,
     /// A base URL to test instead of the saved one (e.g. an unsaved edit).
     #[serde(default)]
-    pub base: Option<String>,
+    pub url: Option<String>,
 }
 
 /// Outcome of a connection test, run from the lineup server (it cannot show whether your players
 /// can reach the same address).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SettingsTestResult {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ConnectionTestResult {
+    pub component: Component,
     pub ok: bool,
     /// The URL that was requested.
     pub url: String,
     /// What the answer shows, or why the test failed.
     pub detail: String,
     pub http_status: Option<u16>,
-    /// Engine version, when testing the engine.
+    /// Service version, when it reports one (the engine does; acexy does not).
     pub version: Option<String>,
+    /// Streams acexy is serving now (acexy only).
+    pub active_streams: Option<u64>,
     pub elapsed_ms: u64,
+}
+
+/// Live state of an integration's services (from the saved config).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct IntegrationStatus {
+    pub kind: SourceKind,
+    pub configured: bool,
+    /// One result per configured component; empty when nothing is configured (or for Direct).
+    pub components: Vec<ConnectionTestResult>,
+}
+
+/// Whether acexy reports a stream as being watched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LiveState {
+    /// Someone is watching through acexy; the numbers are live.
+    Active,
+    /// Nobody is watching through acexy.
+    Inactive,
+    /// Cannot be told (no acexy, acexy unreachable, or no per-stream status).
+    Unavailable,
+}
+
+/// Live numbers of an acestream channel, read from the session acexy already has open. Reading them
+/// never starts or stops a session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AcestreamLive {
+    pub state: LiveState,
+    /// Why the state is unavailable, or why the numbers are missing.
+    pub reason: Option<String>,
+    /// Players connected to acexy for this stream.
+    pub clients: Option<u64>,
+    /// Engine session status (`prebuf`, `dl`, ...).
+    pub status: Option<String>,
+    pub peers: Option<u64>,
+    /// Download speed, KB/s.
+    pub speed_down: Option<u64>,
+    /// Upload speed, KB/s.
+    pub speed_up: Option<u64>,
+    /// Bytes downloaded in this session.
+    pub downloaded: Option<u64>,
+    /// Bytes uploaded in this session.
+    pub uploaded: Option<u64>,
+}
+
+/// Acestream section of a channel's details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AcestreamInfo {
+    /// The name the engine reports for this content id (only when asked for with `name=true`).
+    pub engine_name: Option<String>,
+    /// Why the name could not be read.
+    pub engine_name_error: Option<String>,
+    pub live: AcestreamLive,
+}
+
+/// What lineup can tell about a channel right now, beyond its stored fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ChannelInfo {
+    pub channel_id: i64,
+    pub kind: SourceKind,
+    /// Whether the channel's integration is configured.
+    pub configured: bool,
+    /// Whether "Check now" can run for this channel.
+    pub checks: Availability,
+    /// Latest check result and last conclusive result (null until checked).
+    pub health: Option<ChannelHealth>,
+    /// For acestream channels.
+    pub acestream: Option<AcestreamInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -349,7 +556,10 @@ pub struct ResolveRequest {
 pub struct ResolveResponse {
     pub source: Source,
     pub source_key: String,
-    pub stream_url: String,
+    /// Null while the source's integration is not configured.
+    pub stream_url: Option<String>,
+    /// Whether the source's integration is configured.
+    pub configured: bool,
     /// Existing channel with the same source, if any.
     pub duplicate_of: Option<i64>,
     /// Name the Acestream engine reports for this content id, as-is.

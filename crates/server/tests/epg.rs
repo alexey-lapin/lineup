@@ -268,6 +268,24 @@ mod output {
         let app = App::new(store.clone(), data.path());
         let epg = app.epg.clone();
         let router = router_for(app);
+        let engine = |url: &str| api_types::IntegrationPatch::Acestream {
+            engine_url: Some(url.into()),
+            acexy_url: None,
+            probe_interval_hours: None,
+        };
+        store
+            .patch_integration(api_types::SourceKind::Acestream, engine("http://e:6878"))
+            .await
+            .unwrap();
+        store
+            .patch_integration(
+                api_types::SourceKind::Vk,
+                api_types::IntegrationPatch::Vk {
+                    url: Some("http://v:8099".into()),
+                },
+            )
+            .await
+            .unwrap();
 
         store
             .create_playlist(PlaylistCreate {
@@ -356,6 +374,22 @@ mod output {
         let xml = std::str::from_utf8(&r.body).unwrap();
         assert!(xml.contains("SportsOne.uk") && !xml.contains("Arena1.de"), "{xml}");
 
+        // Turning the Acestream integration off removes its channels from the guide too, and turning
+        // it on again brings them back.
+        store
+            .patch_integration(api_types::SourceKind::Acestream, engine(""))
+            .await
+            .unwrap();
+        let off = epg.playlist_xml_at("jf", now).await.unwrap();
+        let off = std::str::from_utf8(&off.body).unwrap();
+        assert!(!off.contains("SportsOne.uk") && off.contains(&ev_id), "{off}");
+        store
+            .patch_integration(api_types::SourceKind::Acestream, engine("http://e:6878"))
+            .await
+            .unwrap();
+        let on = epg.playlist_xml_at("jf", now).await.unwrap();
+        assert!(std::str::from_utf8(&on.body).unwrap().contains("SportsOne.uk"));
+
         // Over HTTP: ETag and 304; unknown playlist is 404; the m3u announces the guide URL.
         let get = |uri: &str, inm: Option<&str>| {
             let mut req = Request::builder().uri(uri).header("host", "media-host:9300");
@@ -391,7 +425,6 @@ mod output {
 
 mod resolve {
     use super::*;
-    use api_types::SettingsPatch;
 
     #[tokio::test]
     async fn suggestions_from_engine_and_guide() {
@@ -414,10 +447,14 @@ mod resolve {
         let store = Arc::new(Store::open(&data.path().join("lineup.db")).await.unwrap());
         let epg = Epg::new(store.clone(), data.path());
         store
-            .patch_settings(SettingsPatch {
-                engine_base: Some(format!("http://{engine_addr}")),
-                ..Default::default()
-            })
+            .patch_integration(
+                api_types::SourceKind::Acestream,
+                api_types::IntegrationPatch::Acestream {
+                    engine_url: Some(format!("http://{engine_addr}")),
+                    acexy_url: None,
+                    probe_interval_hours: None,
+                },
+            )
             .await
             .unwrap();
         store
@@ -452,10 +489,14 @@ mod resolve {
 
         // Engine down: a warning, and the placeholder name.
         store
-            .patch_settings(SettingsPatch {
-                engine_base: Some("http://127.0.0.1:1".into()),
-                ..Default::default()
-            })
+            .patch_integration(
+                api_types::SourceKind::Acestream,
+                api_types::IntegrationPatch::Acestream {
+                    engine_url: Some("http://127.0.0.1:1".into()),
+                    acexy_url: None,
+                    probe_interval_hours: None,
+                },
+            )
             .await
             .unwrap();
         let r = lineup_server::resolve::resolve(&store, epg.client(), ace)

@@ -1,10 +1,12 @@
+pub mod connection;
 pub mod epg;
 pub mod error;
 pub mod hooks;
+pub mod integrations;
+pub mod live;
 pub mod m3u;
 pub mod probe;
 pub mod resolve;
-pub mod settings_test;
 pub mod source;
 pub mod store;
 pub mod suggest;
@@ -31,7 +33,6 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let store = Arc::new(Store::open(&cfg.data_dir.join("lineup.db")).await?);
     let app = http::App::new(store, &cfg.data_dir);
     app.epg.recover().await?;
-    hooks::warn_unfinished(&app.store).await;
     app.epg.spawn_scheduler();
     app.hooks.spawn();
     app.prober.spawn_scheduler();

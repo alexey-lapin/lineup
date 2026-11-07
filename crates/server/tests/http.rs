@@ -100,6 +100,14 @@ async fn crud_and_errors() {
 #[tokio::test]
 async fn m3u_output_and_etag() {
     let app = app().await;
+    let (s, _, i) = call(
+        &app,
+        "PATCH",
+        "/api/v1/integrations/acestream",
+        Some(json!({"kind": "acestream", "engine_url": "http://10.0.0.9:6878"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{i}");
     call(&app, "POST", "/api/v1/playlists", Some(json!({"slug": "jf"}))).await;
     call(
         &app,
@@ -132,12 +140,12 @@ async fn m3u_output_and_etag() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
 
-    // a base-URL change changes the body, so the old ETag no longer matches
+    // a playback URL change changes the body, so the old ETag no longer matches
     call(
         &app,
         "PATCH",
-        "/api/v1/settings",
-        Some(json!({"acexy_base": "http://10.0.0.9:8080"})),
+        "/api/v1/integrations/acestream",
+        Some(json!({"kind": "acestream", "acexy_url": "http://10.0.0.9:8080"})),
     )
     .await;
     let res = app
@@ -315,18 +323,13 @@ async fn fake_services() -> String {
 }
 
 #[tokio::test]
-async fn settings_connection_test() {
+async fn integration_connection_test() {
     let base = fake_services().await;
     let app = app().await;
-    let t = |target: &str, b: Option<String>| json!({ "target": target, "base": b });
+    let t = |component: &str, url: Option<String>| json!({ "component": component, "url": url });
+    let test = |kind: &str| format!("/api/v1/integrations/{kind}/test");
 
-    let (s, _, r) = call(
-        &app,
-        "POST",
-        "/api/v1/settings/test",
-        Some(t("engine", Some(base.clone()))),
-    )
-    .await;
+    let (s, _, r) = call(&app, "POST", &test("acestream"), Some(t("engine", Some(base.clone())))).await;
     assert_eq!(s, StatusCode::OK, "{r}");
     assert_eq!(r["ok"], true);
     assert_eq!(r["version"], "3.2.3");
@@ -335,24 +338,24 @@ async fn settings_connection_test() {
     let (_, _, r) = call(
         &app,
         "POST",
-        "/api/v1/settings/test",
+        &test("acestream"),
         Some(t("acexy", Some(format!("{base}/")))),
     )
     .await;
     assert_eq!(
-        (r["ok"].clone(), r["url"].clone()),
-        (json!(true), json!(format!("{base}/ace/status")))
+        (r["ok"].clone(), r["url"].clone(), r["active_streams"].clone()),
+        (json!(true), json!(format!("{base}/ace/status")), json!(0))
     );
 
     // The VK proxy root answers 404 here: something listens, and that is all it shows.
-    let (_, _, r) = call(&app, "POST", "/api/v1/settings/test", Some(t("vk", Some(base.clone())))).await;
+    let (_, _, r) = call(&app, "POST", &test("vk"), Some(t("proxy", Some(base.clone())))).await;
     assert_eq!((r["ok"].clone(), r["http_status"].clone()), (json!(true), json!(404)));
 
     // Nothing listening, or too slow: a negative result, not an error.
     let (s, _, r) = call(
         &app,
         "POST",
-        "/api/v1/settings/test",
+        &test("acestream"),
         Some(t("engine", Some("http://127.0.0.1:1".into()))),
     )
     .await;
@@ -360,30 +363,128 @@ async fn settings_connection_test() {
     let (_, _, r) = call(
         &app,
         "POST",
-        "/api/v1/settings/test",
+        &test("acestream"),
         Some(t("acexy", Some(format!("{base}/slow")))),
     )
     .await;
     assert_eq!(r["ok"], false);
     assert!(r["detail"].as_str().unwrap().contains("timed out"), "{r}");
 
-    // An invalid URL is a 422; without `base` the saved value is used.
+    // An invalid URL, a component of another integration, or nothing saved to test: 422.
+    for (kind, body) in [
+        ("vk", t("proxy", Some("ftp://x".into()))),
+        ("vk", t("engine", Some(base.clone()))),
+        ("direct", t("proxy", Some(base.clone()))),
+        ("acestream", json!({ "component": "acexy" })),
+    ] {
+        let (s, _, r) = call(&app, "POST", &test(kind), Some(body)).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {r}");
+    }
+
+    // Without `url` the saved value is used; the status tests every configured component.
+    call(
+        &app,
+        "PATCH",
+        "/api/v1/integrations/acestream",
+        Some(json!({ "kind": "acestream", "engine_url": base, "acexy_url": base })),
+    )
+    .await;
+    let (_, _, r) = call(&app, "POST", &test("acestream"), Some(json!({ "component": "acexy" }))).await;
+    assert_eq!(r["url"], format!("{base}/ace/status"));
+    let (s, _, st) = call(&app, "GET", "/api/v1/integrations/acestream/status", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(st["configured"], true);
+    let parts: Vec<_> = st["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["component"].clone(), c["ok"].clone()))
+        .collect();
+    assert_eq!(parts, [(json!("engine"), json!(true)), (json!("acexy"), json!(true))]);
+    let (_, _, st) = call(&app, "GET", "/api/v1/integrations/vk/status", None).await;
+    assert_eq!(
+        (st["configured"].clone(), st["components"].clone()),
+        (json!(false), json!([]))
+    );
+    let (s, _, _) = call(&app, "GET", "/api/v1/integrations/bogus/status", None).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn integrations_api() {
+    let app = app().await;
+    let (s, _, list) = call(&app, "GET", "/api/v1/integrations", None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        list,
+        json!([
+            {"kind": "acestream", "configured": false, "channel_count": 0, "revision": 0,
+             "config": {"kind": "acestream", "engine_url": "", "acexy_url": null, "probe_interval_hours": 0},
+             "checks": {"available": false, "reason": "the Acestream engine is not configured"},
+             "updated_at": list[0]["updated_at"]},
+            {"kind": "vk", "configured": false, "channel_count": 0, "revision": 0,
+             "config": {"kind": "vk", "url": ""},
+             "checks": {"available": false, "reason": "this integration has no channel checks"},
+             "updated_at": list[1]["updated_at"]},
+            {"kind": "direct", "configured": true, "channel_count": 0, "revision": 0,
+             "config": {"kind": "direct"},
+             "checks": {"available": false, "reason": "this integration has no channel checks"},
+             "updated_at": list[2]["updated_at"]},
+        ])
+    );
+    // The kind in the body must match the route; unknown fields of another kind are not accepted.
     let (s, _, _) = call(
         &app,
-        "POST",
-        "/api/v1/settings/test",
-        Some(t("vk", Some("ftp://x".into()))),
+        "PATCH",
+        "/api/v1/integrations/vk",
+        Some(json!({"kind": "acestream", "engine_url": "http://e"})),
     )
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+    let (s, _, i) = call(
+        &app,
+        "PATCH",
+        "/api/v1/integrations/acestream",
+        Some(json!({"kind": "acestream", "engine_url": "http://e:6878/", "probe_interval_hours": 6})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(i["config"]["engine_url"], "http://e:6878");
+    assert_eq!(
+        (i["configured"].clone(), i["revision"].clone()),
+        (json!(true), json!(1))
+    );
+    assert_eq!(i["checks"]["available"], false, "no acexy");
+    let (_, _, i) = call(&app, "GET", "/api/v1/integrations/acestream", None).await;
+    assert_eq!(i["config"]["probe_interval_hours"], 6);
+
+    // A channel of an unconfigured integration: no stream URL, and no checks.
+    let (s, _, ch) = call(
+        &app,
+        "POST",
+        "/api/v1/channels",
+        Some(json!({"name": "V", "input": "https://vk.com/video-1_2"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(
+        (ch["stream_url"].clone(), ch["configured"].clone()),
+        (Value::Null, json!(false))
+    );
     let (_, _, r) = call(
         &app,
         "POST",
-        "/api/v1/settings/test",
-        Some(json!({ "target": "acexy" })),
+        "/api/v1/resolve",
+        Some(json!({"input": "https://vk.com/video-1_3"})),
     )
     .await;
-    assert_eq!(r["url"], "http://127.0.0.1:8080/ace/status");
+    assert_eq!(
+        (r["stream_url"].clone(), r["configured"].clone()),
+        (Value::Null, json!(false))
+    );
+    let (s, _, r) = call(&app, "POST", "/api/v1/probe", Some(json!({"ids": []}))).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{r}");
+    assert!(r["error"]["message"].as_str().unwrap().contains("acexy"), "{r}");
 }
 
 #[tokio::test]
@@ -392,32 +493,42 @@ async fn settings_changes_are_announced() {
     let mut events = store.subscribe();
     let patch = |v: Value| serde_json::from_value::<api_types::SettingsPatch>(v).unwrap();
     store
-        .patch_settings(patch(
-            json!({ "engine_base": "http://e:6878", "probe_interval_hours": 6 }),
-        ))
+        .patch_settings(patch(json!({ "epg_refresh_hours": 12 })))
         .await
         .unwrap();
     assert_eq!(
         events.try_recv().unwrap(),
         lineup_server::Event::SettingsChanged {
-            keys: vec!["engine_base".into(), "probe_interval_hours".into()],
+            keys: vec!["epg_refresh_hours".into()],
             revision: 1
         }
     );
     assert_eq!(store.settings().await.unwrap().revision, 1);
     // Same values again: nothing, and the revision stays.
     let same = store
-        .patch_settings(patch(json!({ "engine_base": "http://e:6878/" })))
+        .patch_settings(patch(json!({ "epg_refresh_hours": 12 })))
         .await
         .unwrap();
     assert!(events.try_recv().is_err());
     assert_eq!(same.revision, 1);
     // The revision is read-only: a client cannot set it.
     let s = store
-        .patch_settings(patch(json!({ "vk_base": "http://v:8099", "revision": 99 })))
+        .patch_settings(patch(json!({ "epg_refresh_hours": 3, "revision": 99 })))
         .await
         .unwrap();
     assert_eq!(s.revision, 2);
+    // Service URLs are no longer settings.
+    let app = router(store);
+    let (s, _, _) = call(
+        &app,
+        "PATCH",
+        "/api/v1/settings",
+        Some(json!({ "acexy_base": "http://a" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "unknown fields are ignored");
+    let (_, _, v) = call(&app, "GET", "/api/v1/settings", None).await;
+    assert_eq!(v, json!({ "epg_refresh_hours": 3, "revision": 2 }));
 }
 
 #[tokio::test]
@@ -439,8 +550,8 @@ async fn vk_test_needs_only_headers() {
     let (_, _, r) = call(
         &app,
         "POST",
-        "/api/v1/settings/test",
-        Some(json!({ "target": "vk", "base": format!("http://{addr}") })),
+        "/api/v1/integrations/vk/test",
+        Some(json!({ "component": "proxy", "url": format!("http://{addr}") })),
     )
     .await;
     assert_eq!(

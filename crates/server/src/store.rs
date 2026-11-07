@@ -13,6 +13,7 @@ use api_types::{
     Channel, ChannelCreate, ChannelPatch, FieldDiff, ImportAction, ImportEntry, ImportReport, Playlist, PlaylistCreate,
     PlaylistDetail, PlaylistItem, PlaylistPatch, ResolveResponse, Settings, SettingsPatch, Source, SourceKind,
 };
+
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqliteConnection, SqlitePool};
@@ -51,6 +52,12 @@ pub enum Event {
         keys: Vec<String>,
         revision: u64,
     },
+    /// An integration's config changed (live UI updates only; playlist output changes are announced
+    /// by `playlist.changed`).
+    IntegrationChanged {
+        kind: SourceKind,
+        revision: u64,
+    },
 }
 
 impl Event {
@@ -63,6 +70,7 @@ impl Event {
             Event::ChannelRecovered { .. } => "channel.recovered",
             Event::ChannelProbed { .. } => "channel.probed",
             Event::SettingsChanged { .. } => "settings.changed",
+            Event::IntegrationChanged { .. } => "integration.changed",
         }
     }
 
@@ -80,6 +88,9 @@ impl Event {
             }
             Event::ChannelProbed { channel_id } => serde_json::json!({ "channel_id": channel_id }),
             Event::SettingsChanged { keys, revision } => serde_json::json!({ "keys": keys, "revision": revision }),
+            Event::IntegrationChanged { kind, revision } => {
+                serde_json::json!({ "kind": kind, "revision": revision })
+            }
         }
     }
 }
@@ -104,9 +115,6 @@ pub struct Store {
     hooks_version: tokio::sync::watch::Sender<u64>,
 }
 
-const DEFAULT_ACEXY: &str = "http://127.0.0.1:8080";
-const DEFAULT_ENGINE: &str = "http://127.0.0.1:6878";
-const DEFAULT_VK: &str = "http://127.0.0.1:8099";
 const DEFAULT_EPG_REFRESH_HOURS: u32 = 6;
 /// Upper bound for `epg_refresh_hours` (one week).
 const MAX_EPG_REFRESH_HOURS: u32 = 24 * 7;
@@ -118,8 +126,17 @@ impl Store {
             .filename(path)
             .create_if_missing(true)
             .foreign_keys(true)
-            .journal_mode(SqliteJournalMode::Wal)
             .busy_timeout(std::time::Duration::from_secs(5));
+        // Check the lineage before anything changes the file: the WAL switch below rewrites the
+        // header of a database that may belong to another release.
+        let probe = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts.clone())
+            .await?;
+        let checked = check_lineage(&probe).await;
+        probe.close().await;
+        checked?;
+        let opts = opts.journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new().max_connections(4).connect_with(opts).await?;
         Self::init(pool).await
     }
@@ -133,7 +150,8 @@ impl Store {
     }
 
     async fn init(pool: SqlitePool) -> Result<Self> {
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        check_lineage(&pool).await?;
+        MIGRATOR.run(&pool).await?;
         let (events, _) = broadcast::channel(64);
         let store = Store {
             pool,
@@ -161,15 +179,6 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let old = load_settings(&mut tx).await?;
         let mut new = old.clone();
-        if let Some(v) = patch.acexy_base {
-            new.acexy_base = source::normalize_base("acexy_base", &v)?;
-        }
-        if let Some(v) = patch.engine_base {
-            new.engine_base = source::normalize_base("engine_base", &v)?;
-        }
-        if let Some(v) = patch.vk_base {
-            new.vk_base = source::normalize_base("vk_base", &v)?;
-        }
         if let Some(v) = patch.epg_refresh_hours {
             if v > MAX_EPG_REFRESH_HOURS {
                 return Err(invalid(format!(
@@ -178,46 +187,17 @@ impl Store {
             }
             new.epg_refresh_hours = v;
         }
-        if let Some(v) = patch.probe_interval_hours {
-            if v > MAX_EPG_REFRESH_HOURS {
-                return Err(invalid(format!(
-                    "probe_interval_hours must be at most {MAX_EPG_REFRESH_HOURS}"
-                )));
-            }
-            new.probe_interval_hours = v;
-        }
         let mut keys = Vec::new();
-        for (k, changed) in [
-            ("acexy_base", new.acexy_base != old.acexy_base),
-            ("engine_base", new.engine_base != old.engine_base),
-            ("vk_base", new.vk_base != old.vk_base),
-            ("epg_refresh_hours", new.epg_refresh_hours != old.epg_refresh_hours),
-            (
-                "probe_interval_hours",
-                new.probe_interval_hours != old.probe_interval_hours,
-            ),
-        ] {
-            if changed {
-                keys.push(k.to_string());
-            }
+        if new.epg_refresh_hours != old.epg_refresh_hours {
+            keys.push("epg_refresh_hours".to_string());
         }
         if keys.is_empty() {
             return Ok(old);
         }
         new.revision = old.revision + 1;
         save_settings(&mut tx, &new).await?;
-
-        let mut affected = BTreeSet::new();
-        if new.acexy_base != old.acexy_base {
-            affected.extend(slugs_with_kind(&mut tx, SourceKind::Acestream).await?);
-        }
-        if new.vk_base != old.vk_base {
-            affected.extend(slugs_with_kind(&mut tx, SourceKind::Vk).await?);
-        }
         tx.commit().await?;
-
-        self.outputs_changed_locked(affected);
-        // For open UIs only: outputs are covered by playlist.changed, and hooks cannot subscribe.
+        // For open UIs only: no setting affects output, and hooks cannot subscribe.
         let _ = self.events.send(Event::SettingsChanged {
             keys,
             revision: new.revision,
@@ -260,10 +240,11 @@ impl Store {
         let src = source::parse_input(input)?;
         let key = source::source_key(&src);
         let mut conn = self.pool.begin().await?; // read snapshot
-        let settings = load_settings(&mut conn).await?;
+        let configs = integrations::load_configs(&mut conn).await?;
         let duplicate_of = find_by_source(&mut conn, src.kind(), &key).await?;
         Ok(ResolveResponse {
-            stream_url: source::stream_url(&src, &settings),
+            stream_url: configs.stream_url(&src),
+            configured: configs.configured(src.kind()),
             suggestion: api_types::Suggestion {
                 name: source::default_name(&src),
                 ..Default::default()
@@ -862,6 +843,11 @@ fn clamp_index(position: Option<i64>, len: usize) -> usize {
     }
 }
 
+/// Whether a channel is in playlist and guide output: enabled, and its integration configured.
+pub fn eligible(c: &Channel) -> bool {
+    c.enabled && c.configured && c.stream_url.is_some()
+}
+
 fn effective_tvg_id(c: &Channel) -> String {
     c.tvg_id.clone().unwrap_or_else(|| format!("lineup.{}", c.id))
 }
@@ -918,22 +904,14 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
         .fetch_all(&mut *conn)
         .await?;
     let mut s = Settings {
-        acexy_base: DEFAULT_ACEXY.into(),
-        engine_base: DEFAULT_ENGINE.into(),
-        vk_base: DEFAULT_VK.into(),
         epg_refresh_hours: DEFAULT_EPG_REFRESH_HOURS,
-        probe_interval_hours: 0,
         revision: 0,
     };
     for r in rows {
         let key: String = r.try_get("key")?;
         let value: String = r.try_get("value")?;
         match key.as_str() {
-            "acexy_base" => s.acexy_base = serde_json::from_str(&value)?,
-            "engine_base" => s.engine_base = serde_json::from_str(&value)?,
-            "vk_base" => s.vk_base = serde_json::from_str(&value)?,
             "epg_refresh_hours" => s.epg_refresh_hours = serde_json::from_str(&value)?,
-            "probe_interval_hours" => s.probe_interval_hours = serde_json::from_str(&value)?,
             "revision" => s.revision = serde_json::from_str(&value)?,
             _ => {}
         }
@@ -943,11 +921,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
 
 async fn save_settings(conn: &mut SqliteConnection, s: &Settings) -> Result<()> {
     let pairs = [
-        ("acexy_base", serde_json::to_string(&s.acexy_base)?),
-        ("engine_base", serde_json::to_string(&s.engine_base)?),
-        ("vk_base", serde_json::to_string(&s.vk_base)?),
         ("epg_refresh_hours", serde_json::to_string(&s.epg_refresh_hours)?),
-        ("probe_interval_hours", serde_json::to_string(&s.probe_interval_hours)?),
         ("revision", serde_json::to_string(&s.revision)?),
     ];
     for (k, v) in pairs {
@@ -1016,7 +990,7 @@ async fn channel_exists(conn: &mut SqliteConnection, id: i64) -> Result<()> {
 }
 
 async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result<Vec<Channel>> {
-    let settings = load_settings(conn).await?;
+    let configs = integrations::load_configs(conn).await?;
     let rows = match only {
         Some(id) => {
             sqlx::query("SELECT * FROM channels WHERE id=?")
@@ -1051,7 +1025,8 @@ async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result
                 group_title: r.try_get("group_title")?,
                 tvg_id: r.try_get("tvg_id")?,
                 tvg_logo: r.try_get("tvg_logo")?,
-                stream_url: source::stream_url(&source, &settings),
+                stream_url: configs.stream_url(&source),
+                configured: configs.configured(source.kind()),
                 source,
                 source_key: r.try_get("source_key")?,
                 is_event: r.try_get("is_event")?,
@@ -1224,22 +1199,68 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str, url_tvg: Option<&st
         .items
         .iter()
         .zip(&ids)
-        .filter(|(i, _)| i.channel.enabled)
-        .map(|(i, id)| m3u::RenderItem {
+        .filter_map(|(i, id)| Some((i, id, i.channel.stream_url.as_deref().filter(|_| eligible(&i.channel))?)))
+        .map(|(i, id, url)| m3u::RenderItem {
             tvg_id: id,
             chno: i.position,
             logo: i.channel.tvg_logo.as_deref(),
             group: i.channel.group_title.as_deref(),
             name: &i.channel.name,
-            url: &i.channel.stream_url,
+            url,
         })
         .collect();
     Ok(m3u::render(&items, url_tvg))
 }
 
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+const OLD_DATABASE: &str = "this database is from lineup 0.3 or older, which this version cannot open. \
+    Move the data directory aside (keep it as a backup; only lineup 0.3 can read it), start with an \
+    empty one and set lineup up again (see the 0.4.0 release notes)";
+
+/// Refuse databases of another schema lineage before migrating. The lineage is identified by the
+/// checksum of migration 1: databases of lineup 0.3 and older applied a different 0001. Later
+/// migrations of this lineage, and newer-than-binary or dirty databases, are left to the migrator.
+async fn check_lineage(pool: &SqlitePool) -> Result<()> {
+    let ledger: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')")
+            .fetch_one(pool)
+            .await?;
+    let tables: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
+         AND name <> '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let first: Option<Vec<u8>> = if ledger {
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+            .fetch_optional(pool)
+            .await?
+    } else {
+        None
+    };
+    let expected = MIGRATOR
+        .iter()
+        .find(|m| m.version == 1)
+        .map(|m| m.checksum.as_ref())
+        .ok_or_else(|| Error::Internal("migration 1 is missing".into()))?;
+    match first {
+        Some(c) if c == expected => Ok(()),
+        Some(_) => Err(Error::UnsupportedDatabase(OLD_DATABASE.into())),
+        // Empty (new) database.
+        None if tables == 0 => Ok(()),
+        None => Err(Error::UnsupportedDatabase(
+            "the database has tables but no lineup schema history; it is not a lineup 0.4 database. \
+             Point lineup at an empty data directory"
+                .into(),
+        )),
+    }
+}
+
 mod epg;
 mod health;
 mod hooks;
+pub(crate) mod integrations;
 pub use epg::{FetchOutcome, IndexedChannel, PatchedSource};
 pub use health::ProbeIdentity;
 pub use hooks::{DELIVERIES_KEPT, NewDelivery};

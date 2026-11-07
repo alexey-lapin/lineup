@@ -197,22 +197,94 @@ async fn hook_commands() {
 }
 
 #[tokio::test]
-async fn settings_test_command() {
+async fn integration_commands() {
     let s = real_server().await;
     // Nothing listens on port 1: a completed negative test exits 1.
+    let engine_test = [
+        "integration",
+        "test",
+        "acestream",
+        "engine",
+        "--url",
+        "http://127.0.0.1:1",
+    ];
+    assert_eq!(lineup(&s, &engine_test).await, 1);
+    let mut json = vec!["--json"];
+    json.extend(["integration", "test", "vk", "proxy", "--url", "http://127.0.0.1:1"]);
+    assert_eq!(lineup(&s, &json).await, 1);
+    // An invalid URL is a usage error; the server itself answers as an HTTP service.
     assert_eq!(
-        lineup(&s, &["settings", "test", "engine", "--base", "http://127.0.0.1:1"]).await,
-        1
+        lineup(&s, &["integration", "test", "vk", "proxy", "--url", "ftp://x"]).await,
+        2
     );
+    assert_eq!(
+        lineup(&s, &["integration", "test", "vk", "proxy", "--url", &s]).await,
+        0
+    );
+    // Acestream has no proxy; nothing is configured yet to test.
+    assert_eq!(
+        lineup(&s, &["integration", "test", "acestream", "proxy", "--url", &s]).await,
+        2
+    );
+    assert_eq!(lineup(&s, &["integration", "test", "acestream"]).await, 2);
+    // Flags of another integration are refused before anything is sent.
+    assert_eq!(lineup(&s, &["integration", "set", "vk", "--engine-url", &s]).await, 2);
+    assert_eq!(lineup(&s, &["settings", "set", "acexy_base", &s]).await, 2);
+}
+
+/// A new installation: integrations start off, channels can still be imported, and appear in the
+/// playlist once their integration is configured.
+#[tokio::test]
+async fn fresh_owner_workflow() {
+    let store = Arc::new(Store::open_memory().await.unwrap());
+    let s = serve(router(store.clone())).await;
+    assert_eq!(lineup(&s, &["integration", "ls"]).await, 0);
+    let m3u = std::env::temp_dir().join(format!("lineup-cli-{}.m3u", std::process::id()));
+    std::fs::write(
+        &m3u,
+        format!("#EXTM3U\n#EXTINF:-1,Alpha\nhttp://old-host:8080/ace/getstream?id={ACE1}\n"),
+    )
+    .unwrap();
+    assert_eq!(lineup(&s, &["import", m3u.to_str().unwrap(), "-p", "jf"]).await, 0);
+    let _ = std::fs::remove_file(&m3u);
+    assert_eq!(lineup(&s, &["show", "Alpha"]).await, 0);
+    assert_eq!(lineup(&s, &["info", "Alpha"]).await, 0);
+    assert!(!store.render_m3u("jf").await.unwrap().contains("Alpha"));
+    // Checks are unavailable without acexy: a conflict.
+    assert_eq!(lineup(&s, &["probe", "Alpha"]).await, 4);
+
     assert_eq!(
         lineup(
             &s,
-            &["--json", "settings", "test", "vk", "--base", "http://127.0.0.1:1"]
+            &["integration", "set", "acestream", "--engine-url", "http://e:6878"]
         )
         .await,
-        1
+        0
     );
-    // An invalid URL is a usage error; the server itself answers as an HTTP service.
-    assert_eq!(lineup(&s, &["settings", "test", "vk", "--base", "ftp://x"]).await, 2);
-    assert_eq!(lineup(&s, &["settings", "test", "vk", "--base", &s]).await, 0);
+    let out = store.render_m3u("jf").await.unwrap();
+    assert!(out.contains(&format!("http://e:6878/ace/getstream?id={ACE1}")), "{out}");
+    assert_eq!(
+        lineup(&s, &["integration", "set", "acestream", "--acexy-url", "http://a:8080"]).await,
+        0
+    );
+    assert!(
+        store
+            .render_m3u("jf")
+            .await
+            .unwrap()
+            .contains("http://a:8080/ace/getstream")
+    );
+    // "" removes acexy again.
+    assert_eq!(
+        lineup(&s, &["integration", "set", "acestream", "--acexy-url", ""]).await,
+        0
+    );
+    assert!(
+        store
+            .render_m3u("jf")
+            .await
+            .unwrap()
+            .contains("http://e:6878/ace/getstream")
+    );
+    assert_eq!(lineup(&s, &["integration", "show", "acestream"]).await, 0);
 }

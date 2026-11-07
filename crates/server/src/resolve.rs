@@ -20,8 +20,13 @@ pub async fn resolve(store: &Store, client: &reqwest::Client, input: &str) -> Re
     let mut region = None;
     match &r.source {
         Source::Acestream { id } => {
-            let settings = store.settings().await?;
-            match engine_name(client, &settings.engine_base, id).await {
+            let engine = store.integration_configs().await?.acestream.engine_url;
+            let name = if engine.is_empty() {
+                Err("the Acestream engine is not configured".to_string())
+            } else {
+                engine_name(client, &engine, id).await
+            };
+            match name {
                 Ok(Some(raw)) => {
                     let (name, reg) = clean_name(&raw);
                     if !name.is_empty() {
@@ -41,7 +46,7 @@ pub async fn resolve(store: &Store, client: &reqwest::Client, input: &str) -> Re
             r.suggestion.group_title = Some("VK".into());
             r.suggestion.is_event = true;
         }
-        Source::Raw { .. } => {}
+        Source::Direct { .. } => {}
     }
     // Placeholder names ("Acestream 1a2b3c4d") match nothing useful.
     if r.engine_name.is_some() {
@@ -56,19 +61,26 @@ pub async fn resolve(store: &Store, client: &reqwest::Client, input: &str) -> Re
 }
 
 /// `GET {engine}/server/api?method=get_media_files&content_id=<id>`. The engine answers
-/// `{"result": {"0": "<name>"}, "error": null}`; the first name is used.
-async fn engine_name(client: &reqwest::Client, engine_base: &str, id: &str) -> anyhow::Result<Option<String>> {
+/// `{"result": {"0": "<name>"}, "error": null}`; the first name is used. Errors do not repeat the URL.
+pub async fn engine_name(
+    client: &reqwest::Client,
+    engine_base: &str,
+    id: &str,
+) -> std::result::Result<Option<String>, String> {
     let url = format!("{}/server/api", engine_base.trim_end_matches('/'));
     let res = client
         .get(url)
         .query(&[("method", "get_media_files"), ("content_id", id)])
         .timeout(ENGINE_TIMEOUT)
         .send()
-        .await?;
-    anyhow::ensure!(res.status().is_success(), "HTTP {}", res.status());
-    let body: serde_json::Value = res.json().await?;
+        .await
+        .map_err(|e| e.without_url().to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("HTTP {}", res.status()));
+    }
+    let body: serde_json::Value = res.json().await.map_err(|e| e.without_url().to_string())?;
     if let Some(e) = body.get("error").filter(|e| !e.is_null()) {
-        anyhow::bail!("engine error: {e}");
+        return Err(format!("engine error: {e}"));
     }
     Ok(first_string(body.get("result")).map(|s| strip_extension(&s)))
 }

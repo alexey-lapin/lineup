@@ -17,29 +17,6 @@ use tokio::time::Instant;
 use crate::error::{Error, Result};
 use crate::store::{Event, NewDelivery, Store};
 
-/// Placeholder in the URL of a Jellyfin hook converted by migration 0005 without a task id.
-pub const MISSING_TASK_ID: &str = "REFRESH_GUIDE_TASK_ID";
-
-/// Warn about hooks converted from Jellyfin hooks that still need their URL completed (every start,
-/// until fixed). Logs ids and names only: the URL's other parts and the headers may hold secrets.
-pub async fn warn_unfinished(store: &Store) {
-    let hooks = match store.list_hooks().await {
-        Ok(h) => h,
-        Err(e) => return tracing::warn!("listing hooks: {e}"),
-    };
-    for h in hooks {
-        let HookConfig::Webhook { url, .. } = &h.config;
-        if url.contains(MISSING_TASK_ID) {
-            tracing::warn!(
-                "hook {} ({}) was converted from a Jellyfin hook without a task id and is disabled: \
-                 replace {MISSING_TASK_ID} in its URL with the Refresh Guide task id, then enable it",
-                h.id,
-                h.name
-            );
-        }
-    }
-}
-
 /// A debounce window never stays open longer than this many debounce periods.
 const MAX_WAIT_FACTOR: u32 = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);

@@ -36,6 +36,26 @@ export interface paths {
         patch: operations["patch_channel"];
         trace?: never;
     };
+    "/channels/{id}/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the services report about a channel right now. For acestream channels: live numbers of the
+         *     session acexy has open (never starts one), and the engine's name with `name=true`.
+         */
+        get: operations["channel_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/epg/channels": {
         parameters: {
             query?: never;
@@ -195,6 +215,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/integrations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_integrations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/{kind}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_integration"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change an integration's config. A change that alters playback URLs, or turns the integration on
+         *     or off, announces `playlist.changed` for the playlists with its channels.
+         */
+        patch: operations["patch_integration"];
+        trace?: never;
+    };
+    "/integrations/{kind}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Test every configured component with its saved URL (versions, acexy's active stream count). */
+        get: operations["integration_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/integrations/{kind}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check that a component answers (at its saved URL, or `url` to try an unsaved value). Runs from
+         *     the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
+         */
+        post: operations["test_integration"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/playlists": {
         parameters: {
             query?: never;
@@ -285,8 +378,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Probe acestream channels. With `ids`, waits and returns their results; without, starts a run over
-         *     all enabled acestream channels in the background (202).
+         * Check acestream channels (a short engine session each, skipped while acexy reports the stream
+         *     being watched). With `ids`, waits and returns their results; without, starts a run over all
+         *     enabled acestream channels in the background (202). 409 when checks are unavailable (no engine
+         *     or no acexy).
          */
         post: operations["probe"];
         delete?: never;
@@ -343,26 +438,6 @@ export interface paths {
         patch: operations["patch_settings"];
         trace?: never;
     };
-    "/settings/test": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Check that a service answers at a base URL (the saved one, or `base` to try an unsaved value).
-         *     Runs from the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
-         */
-        post: operations["test_settings"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/status": {
         parameters: {
             query?: never;
@@ -383,7 +458,64 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Acestream section of a channel's details. */
+        AcestreamInfo: {
+            /** @description The name the engine reports for this content id (only when asked for with `name=true`). */
+            engine_name?: string | null;
+            /** @description Why the name could not be read. */
+            engine_name_error?: string | null;
+            live: components["schemas"]["AcestreamLive"];
+        };
+        /**
+         * @description Live numbers of an acestream channel, read from the session acexy already has open. Reading them
+         *     never starts or stops a session.
+         */
+        AcestreamLive: {
+            /**
+             * Format: int64
+             * @description Players connected to acexy for this stream.
+             */
+            clients?: number | null;
+            /**
+             * Format: int64
+             * @description Bytes downloaded in this session.
+             */
+            downloaded?: number | null;
+            /** Format: int64 */
+            peers?: number | null;
+            /** @description Why the state is unavailable, or why the numbers are missing. */
+            reason?: string | null;
+            /**
+             * Format: int64
+             * @description Download speed, KB/s.
+             */
+            speed_down?: number | null;
+            /**
+             * Format: int64
+             * @description Upload speed, KB/s.
+             */
+            speed_up?: number | null;
+            state: components["schemas"]["LiveState"];
+            /** @description Engine session status (`prebuf`, `dl`, ...). */
+            status?: string | null;
+            /**
+             * Format: int64
+             * @description Bytes uploaded in this session.
+             */
+            uploaded?: number | null;
+        };
+        /** @description Whether a feature is available, and why not. */
+        Availability: {
+            available: boolean;
+            /** @description Why it is unavailable (null when available). */
+            reason?: string | null;
+        };
         Channel: {
+            /**
+             * @description Whether the channel's integration is configured. Channels of an unconfigured integration
+             *     stay listed but are left out of playlists and guides.
+             */
+            configured: boolean;
             /** Format: date-time */
             created_at: string;
             enabled: boolean;
@@ -400,8 +532,8 @@ export interface components {
             source: components["schemas"]["Source"];
             /** @description Canonical key used for de-duplication (unique per source kind). */
             source_key: string;
-            /** @description Stream URL as currently emitted in playlists. */
-            stream_url: string;
+            /** @description Stream URL as emitted in playlists; null while the channel's integration is not configured. */
+            stream_url?: string | null;
             tvg_id?: string | null;
             tvg_logo?: string | null;
             /** Format: date-time */
@@ -432,6 +564,18 @@ export interface components {
             /** Format: date-time */
             last_attempt_at: string;
         };
+        /** @description What lineup can tell about a channel right now, beyond its stored fields. */
+        ChannelInfo: {
+            acestream?: components["schemas"]["AcestreamInfo"] | null;
+            /** Format: int64 */
+            channel_id: number;
+            /** @description Whether "Check now" can run for this channel. */
+            checks: components["schemas"]["Availability"];
+            /** @description Whether the channel's integration is configured. */
+            configured: boolean;
+            health?: components["schemas"]["ChannelHealth"] | null;
+            kind: components["schemas"]["SourceKind"];
+        };
         /** @description Partial update. Absent fields are left unchanged; for nullable fields, `null` clears. */
         ChannelPatch: {
             enabled?: boolean | null;
@@ -444,6 +588,39 @@ export interface components {
             source?: components["schemas"]["Source"] | null;
             tvg_id?: string | null;
             tvg_logo?: string | null;
+        };
+        /**
+         * @description A part of an integration with its own address.
+         * @enum {string}
+         */
+        Component: "engine" | "acexy" | "proxy";
+        ConnectionTestRequest: {
+            component: components["schemas"]["Component"];
+            /** @description A base URL to test instead of the saved one (e.g. an unsaved edit). */
+            url?: string | null;
+        };
+        /**
+         * @description Outcome of a connection test, run from the lineup server (it cannot show whether your players
+         *     can reach the same address).
+         */
+        ConnectionTestResult: {
+            /**
+             * Format: int64
+             * @description Streams acexy is serving now (acexy only).
+             */
+            active_streams?: number | null;
+            component: components["schemas"]["Component"];
+            /** @description What the answer shows, or why the test failed. */
+            detail: string;
+            /** Format: int64 */
+            elapsed_ms: number;
+            /** Format: int32 */
+            http_status?: number | null;
+            ok: boolean;
+            /** @description The URL that was requested. */
+            url: string;
+            /** @description Service version, when it reports one (the engine does; acexy does not). */
+            version?: string | null;
         };
         /** @enum {string} */
         DeliveryTrigger: "events" | "test";
@@ -642,6 +819,83 @@ export interface components {
             playlist_slug: string;
             url?: string | null;
         };
+        /** @description A service lineup plays channels through (one per source kind). */
+        Integration: {
+            /**
+             * Format: int64
+             * @description Channels of this integration.
+             */
+            channel_count: number;
+            /** @description Health checks of its channels (Check now and the schedule). */
+            checks: components["schemas"]["Availability"];
+            config: components["schemas"]["IntegrationConfig"];
+            /** @description Its required URL is set (a stable property; see the status for reachability). */
+            configured: boolean;
+            kind: components["schemas"]["SourceKind"];
+            /**
+             * Format: int64
+             * @description Increases with every change; of two copies, the higher revision is newer. Read-only.
+             */
+            revision: number;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /**
+         * @description What an integration needs, by type. Tagged by `kind`, which matches the integration's kind.
+         *     A blank required URL means the integration is not configured.
+         */
+        IntegrationConfig: {
+            /**
+             * @description acexy base URL. When set, playlists play through acexy (several viewers share one engine
+             *     session) and channel checks become available; when null, playlists use the engine directly.
+             */
+            acexy_url?: string | null;
+            /** @description Engine base URL, e.g. `http://media-host:6878`; blank = not configured. */
+            engine_url: string;
+            /** @enum {string} */
+            kind: "acestream";
+            /**
+             * Format: int32
+             * @description Hours between scheduled checks of all enabled acestream channels (the first runs 10
+             *     minutes after start); 0 turns them off. Checks need acexy.
+             */
+            probe_interval_hours: number;
+        } | {
+            /** @enum {string} */
+            kind: "vk";
+            /** @description Proxy base URL; blank = not configured. */
+            url: string;
+        } | {
+            /** @enum {string} */
+            kind: "direct";
+        };
+        /**
+         * @description Partial update of an integration's config, tagged by `kind` (must match the integration).
+         *     Absent fields are left unchanged; an empty string turns a required URL off.
+         */
+        IntegrationPatch: {
+            /** @description `null` or an empty string removes acexy. */
+            acexy_url?: string | null;
+            engine_url?: string | null;
+            /** @enum {string} */
+            kind: "acestream";
+            /** Format: int32 */
+            probe_interval_hours?: number | null;
+        } | {
+            /** @enum {string} */
+            kind: "vk";
+            url?: string | null;
+        } | {
+            /** @enum {string} */
+            kind: "direct";
+        };
+        /** @description Live state of an integration's services (from the saved config). */
+        IntegrationStatus: {
+            /** @description One result per configured component; empty when nothing is configured (or for Direct). */
+            components: components["schemas"]["ConnectionTestResult"][];
+            configured: boolean;
+            kind: components["schemas"]["SourceKind"];
+        };
         ItemAdd: {
             /** Format: int64 */
             channel_id: number;
@@ -655,6 +909,11 @@ export interface components {
             /** @description Full new order of channel ids. */
             channel_ids: number[];
         };
+        /**
+         * @description Whether acexy reports a stream as being watched.
+         * @enum {string}
+         */
+        LiveState: "active" | "inactive" | "unavailable";
         MoveRequest: {
             /**
              * Format: int64
@@ -699,8 +958,8 @@ export interface components {
             /** @description Probe even if the stream seems to be in use. */
             force?: boolean;
             /**
-             * @description Channels to probe; all enabled acestream channels when empty (that run continues in the
-             *     background).
+             * @description Channels to check; all enabled acestream channels when empty (that run continues in the
+             *     background). Checks need acexy.
              */
             ids?: number[];
         };
@@ -730,6 +989,8 @@ export interface components {
             input: string;
         };
         ResolveResponse: {
+            /** @description Whether the source's integration is configured. */
+            configured: boolean;
             /**
              * Format: int64
              * @description Existing channel with the same source, if any.
@@ -741,71 +1002,32 @@ export interface components {
             matches?: components["schemas"]["EpgChannel"][];
             source: components["schemas"]["Source"];
             source_key: string;
-            stream_url: string;
+            /** @description Null while the source's integration is not configured. */
+            stream_url?: string | null;
             /** @description Suggested values for a new channel; shown as editable defaults. */
             suggestion: components["schemas"]["Suggestion"];
             /** @description Problems that did not stop the resolve, such as an unreachable engine. */
             warnings?: string[];
         };
+        /** @description App-wide settings. Service addresses live in the integrations. */
         Settings: {
-            acexy_base: string;
-            engine_base: string;
             /**
              * Format: int32
              * @description Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
              */
             epg_refresh_hours: number;
             /**
-             * Format: int32
-             * @description Hours between scheduled health probes of all acestream channels (the first runs 10 minutes
-             *     after start); 0, the default, turns them off.
-             */
-            probe_interval_hours: number;
-            /**
              * Format: int64
              * @description Increases with every change; of two copies of the settings, the higher revision is newer.
              *     Read-only.
              */
             revision?: number;
-            vk_base: string;
         };
         SettingsPatch: {
-            acexy_base?: string | null;
-            engine_base?: string | null;
             /** Format: int32 */
             epg_refresh_hours?: number | null;
-            /** Format: int32 */
-            probe_interval_hours?: number | null;
-            vk_base?: string | null;
         };
-        SettingsTestRequest: {
-            /** @description A base URL to test instead of the saved one (e.g. an unsaved edit). */
-            base?: string | null;
-            target: components["schemas"]["SettingsTestTarget"];
-        };
-        /**
-         * @description Outcome of a connection test, run from the lineup server (it cannot show whether your players
-         *     can reach the same address).
-         */
-        SettingsTestResult: {
-            /** @description What the answer shows, or why the test failed. */
-            detail: string;
-            /** Format: int64 */
-            elapsed_ms: number;
-            /** Format: int32 */
-            http_status?: number | null;
-            ok: boolean;
-            /** @description The URL that was requested. */
-            url: string;
-            /** @description Engine version, when testing the engine. */
-            version?: string | null;
-        };
-        /**
-         * @description A service whose base URL can be tested.
-         * @enum {string}
-         */
-        SettingsTestTarget: "acexy" | "engine" | "vk";
-        /** @description A channel's stream source. The full URL is built from the per-kind base URL in settings. */
+        /** @description A channel's stream source. Its kind is also the channel's integration, which builds the URL. */
         Source: {
             id: string;
             /** @enum {string} */
@@ -820,11 +1042,14 @@ export interface components {
             video_id: number;
         } | {
             /** @enum {string} */
-            kind: "raw";
+            kind: "direct";
             url: string;
         };
-        /** @enum {string} */
-        SourceKind: "acestream" | "vk" | "raw";
+        /**
+         * @description A source kind, which is also the integration that plays it (one integration per kind).
+         * @enum {string}
+         */
+        SourceKind: "acestream" | "vk" | "direct";
         Status: {
             version: string;
         };
@@ -1001,6 +1226,38 @@ export interface operations {
                 };
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    channel_info: {
+        parameters: {
+            query?: {
+                /** @description Also ask the engine for the content's name (an extra request; once per view is enough). */
+                name?: boolean;
+            };
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelInfo"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1422,6 +1679,149 @@ export interface operations {
             };
         };
     };
+    list_integrations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Integration"][];
+                };
+            };
+        };
+    };
+    get_integration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: components["schemas"]["SourceKind"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Integration"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    patch_integration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: components["schemas"]["SourceKind"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IntegrationPatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Integration"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    integration_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: components["schemas"]["SourceKind"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationStatus"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    test_integration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: components["schemas"]["SourceKind"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConnectionTestRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionTestResult"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_playlists: {
         parameters: {
             query?: never;
@@ -1760,6 +2160,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -1870,37 +2278,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Settings"];
-                };
-            };
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    test_settings: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SettingsTestRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SettingsTestResult"];
                 };
             };
             422: {

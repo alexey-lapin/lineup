@@ -1,12 +1,12 @@
 //! Parsing user input into typed sources, canonical keys, and stream URL building.
 
-use api_types::{Settings, Source};
+use api_types::Source;
 use url::Url;
 
 use crate::error::{Result, invalid};
 
 /// Parse free-form input: `acestream://<id>`, a bare 40-hex id, an acexy/engine URL with `id=`,
-/// a vk.com / vkvideo.ru video URL, a VK proxy URL (`/vk/<owner>_<video>`), or any http(s) URL (raw).
+/// a vk.com / vkvideo.ru video URL, a VK proxy URL (`/vk/<owner>_<video>`), or any http(s) URL (direct).
 pub fn parse_input(input: &str) -> Result<Source> {
     parse_input_inner(input).and_then(normalize)
 }
@@ -70,7 +70,7 @@ fn parse_input_inner(input: &str) -> Result<Source> {
         return Err(invalid(format!("could not find a video id in VK URL: {s}")));
     }
 
-    Ok(Source::Raw { url: s.to_string() })
+    Ok(Source::Direct { url: s.to_string() })
 }
 
 /// A placeholder name derived from the source alone.
@@ -78,7 +78,7 @@ pub fn default_name(s: &Source) -> String {
     match s {
         Source::Acestream { id } => format!("Acestream {}", &id[..8.min(id.len())]),
         Source::Vk { owner_id, video_id, .. } => format!("VK {owner_id}_{video_id}"),
-        Source::Raw { url } => Url::parse(url)
+        Source::Direct { url } => Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_else(|| url.clone()),
@@ -104,13 +104,13 @@ pub fn normalize(source: Source) -> Result<Source> {
                 list,
             })
         }
-        Source::Raw { url } => {
+        Source::Direct { url } => {
             let url = url.trim().to_string();
-            let parsed = Url::parse(&url).map_err(|e| invalid(format!("invalid raw URL: {e}")))?;
+            let parsed = Url::parse(&url).map_err(|e| invalid(format!("invalid direct URL: {e}")))?;
             if !matches!(parsed.scheme(), "http" | "https") {
                 return Err(invalid(format!("unsupported URL scheme: {}", parsed.scheme())));
             }
-            Ok(Source::Raw { url })
+            Ok(Source::Direct { url })
         }
     }
 }
@@ -120,33 +120,33 @@ pub fn source_key(source: &Source) -> String {
     match source {
         Source::Acestream { id } => id.clone(),
         Source::Vk { owner_id, video_id, .. } => format!("{owner_id}_{video_id}"),
-        Source::Raw { url } => url.clone(),
+        Source::Direct { url } => url.clone(),
     }
 }
 
-/// The URL emitted in playlists for this source.
-pub fn stream_url(source: &Source, settings: &Settings) -> String {
+/// The URL emitted in playlists for this source, played through `base` (the integration's playback
+/// base URL; ignored for direct URLs).
+pub fn stream_url(source: &Source, base: &str) -> String {
+    let base = base.trim_end_matches('/');
     match source {
-        Source::Acestream { id } => {
-            format!("{}/ace/getstream?id={id}", base(&settings.acexy_base))
-        }
+        Source::Acestream { id } => format!("{base}/ace/getstream?id={id}"),
         Source::Vk {
             owner_id,
             video_id,
             list,
         } => {
-            let mut u = format!("{}/vk/{owner_id}_{video_id}", base(&settings.vk_base));
+            let mut u = format!("{base}/vk/{owner_id}_{video_id}");
             if let Some(list) = list {
                 u.push_str("?list=");
                 u.push_str(&url::form_urlencoded::byte_serialize(list.as_bytes()).collect::<String>());
             }
             u
         }
-        Source::Raw { url } => url.clone(),
+        Source::Direct { url } => url.clone(),
     }
 }
 
-/// Validate a base URL setting and strip any trailing slash.
+/// Validate a base URL and strip any trailing slash.
 pub fn normalize_base(name: &str, value: &str) -> Result<String> {
     let v = value.trim().trim_end_matches('/');
     let u = Url::parse(v).map_err(|e| invalid(format!("{name}: invalid URL: {e}")))?;
@@ -157,10 +157,6 @@ pub fn normalize_base(name: &str, value: &str) -> Result<String> {
         return Err(invalid(format!("{name}: must not contain a query or fragment")));
     }
     Ok(v.to_string())
-}
-
-fn base(b: &str) -> &str {
-    b.trim_end_matches('/')
 }
 
 fn acestream(id: &str) -> Result<Source> {
@@ -228,17 +224,6 @@ mod tests {
 
     const ACE: &str = "41169a3f280a5537b0611b775e926852d372743d";
 
-    fn settings() -> Settings {
-        Settings {
-            acexy_base: "http://10.0.0.5:8080".into(),
-            engine_base: "http://10.0.0.5:6878".into(),
-            vk_base: "http://10.0.0.5:8099/".into(),
-            epg_refresh_hours: 6,
-            probe_interval_hours: 0,
-            revision: 0,
-        }
-    }
-
     #[test]
     fn acestream_forms() {
         let want = Source::Acestream { id: ACE.into() };
@@ -288,10 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_errors() {
+    fn direct_and_errors() {
         assert_eq!(
             parse_input("https://example.com/live.m3u8").unwrap(),
-            Source::Raw {
+            Source::Direct {
                 url: "https://example.com/live.m3u8".into()
             }
         );
@@ -301,7 +286,7 @@ mod tests {
         // non-ASCII input must never panic
         assert_eq!(
             parse_input("http://x/канал").unwrap(),
-            Source::Raw {
+            Source::Direct {
                 url: "http://x/канал".into()
             }
         );
@@ -316,7 +301,7 @@ mod tests {
         // free-form and structured paths share normalisation
         assert!(parse_input("https://vk.com/video_ext.php?oid=1&id=-2").is_err());
         assert!(
-            normalize(Source::Raw {
+            normalize(Source::Direct {
                 url: "rtmp://x/y".into()
             })
             .is_err()
@@ -325,24 +310,29 @@ mod tests {
 
     #[test]
     fn keys_and_urls() {
-        let s = settings();
         let ace = parse_input(ACE).unwrap();
         assert_eq!(source_key(&ace), ACE);
         assert_eq!(
-            stream_url(&ace, &s),
+            stream_url(&ace, "http://10.0.0.5:8080"),
             format!("http://10.0.0.5:8080/ace/getstream?id={ACE}")
         );
 
         let vk = parse_input("https://vk.com/video-1_2?list=abc").unwrap();
         assert_eq!(source_key(&vk), "-1_2");
-        assert_eq!(stream_url(&vk, &s), "http://10.0.0.5:8099/vk/-1_2?list=abc");
+        assert_eq!(
+            stream_url(&vk, "http://10.0.0.5:8099/"),
+            "http://10.0.0.5:8099/vk/-1_2?list=abc"
+        );
 
         let vk_nolist = Source::Vk {
             owner_id: -1,
             video_id: 2,
             list: None,
         };
-        assert_eq!(stream_url(&vk_nolist, &s), "http://10.0.0.5:8099/vk/-1_2");
+        assert_eq!(
+            stream_url(&vk_nolist, "http://10.0.0.5:8099"),
+            "http://10.0.0.5:8099/vk/-1_2"
+        );
     }
 
     #[test]

@@ -1,16 +1,16 @@
 //! Human-readable rendering.
 
 use api_types::{
-    Channel, DeliveryTrigger, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource, Hook, HookConfig, HookDelivery,
-    ImportAction, ImportReport, Playlist, PlaylistDetail, ProbeOutcome, ProbeResult, ResolveResponse, Settings, Source,
-    Status,
+    Channel, ChannelInfo, ConnectionTestResult, DeliveryTrigger, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource,
+    Hook, HookConfig, HookDelivery, ImportAction, ImportReport, Integration, IntegrationConfig, IntegrationStatus,
+    LiveState, Playlist, PlaylistDetail, ProbeOutcome, ProbeResult, ResolveResponse, Settings, Source, Status,
 };
 
 pub fn source_label(s: &Source) -> String {
     match s {
         Source::Acestream { id } => format!("ace:{}", &id[..8.min(id.len())]),
         Source::Vk { owner_id, video_id, .. } => format!("vk:{owner_id}_{video_id}"),
-        Source::Raw { url } => format!("raw:{}", truncate(url, 40)),
+        Source::Direct { url } => format!("direct:{}", truncate(url, 40)),
     }
 }
 
@@ -124,7 +124,7 @@ pub fn channel(c: &Channel) {
     println!("tvg-id:     {}", opt(&c.tvg_id));
     println!("logo:       {}", opt(&c.tvg_logo));
     println!("source:     {}", serde_json::to_string(&c.source).unwrap_or_default());
-    println!("stream url: {}", c.stream_url);
+    println!("stream url: {}", stream_url(&c.stream_url));
     println!("enabled:    {}", c.enabled);
     if c.is_event {
         println!(
@@ -239,11 +239,154 @@ pub fn import(r: &ImportReport) {
 }
 
 pub fn settings(s: &Settings) {
-    println!("acexy_base:  {}", s.acexy_base);
-    println!("engine_base: {}", s.engine_base);
-    println!("vk_base:     {}", s.vk_base);
     println!("epg_refresh_hours: {}", s.epg_refresh_hours);
-    println!("probe_interval_hours: {}", s.probe_interval_hours);
+}
+
+/// A stream URL, or why there is none.
+pub fn stream_url(u: &Option<String>) -> String {
+    u.clone()
+        .unwrap_or_else(|| "- (integration not configured; left out of playlists)".into())
+}
+
+fn or_dash(o: &Option<String>) -> &str {
+    o.as_deref().filter(|s| !s.is_empty()).unwrap_or("-")
+}
+
+pub fn integrations(list: &[Integration]) {
+    table(
+        &["KIND", "CONFIGURED", "CHANNELS", "CONFIG"],
+        list.iter()
+            .map(|i| {
+                vec![
+                    i.kind.as_str().to_string(),
+                    if i.configured { "yes" } else { "no" }.to_string(),
+                    i.channel_count.to_string(),
+                    config_summary(&i.config),
+                ]
+            })
+            .collect(),
+    );
+}
+
+fn config_summary(c: &IntegrationConfig) -> String {
+    match c {
+        IntegrationConfig::Acestream {
+            engine_url,
+            acexy_url,
+            probe_interval_hours,
+        } => format!(
+            "engine {}, acexy {}, checks every {}",
+            if engine_url.is_empty() { "-" } else { engine_url },
+            or_dash(acexy_url),
+            if *probe_interval_hours == 0 {
+                "- (off)".to_string()
+            } else {
+                format!("{probe_interval_hours} h")
+            }
+        ),
+        IntegrationConfig::Vk { url } => format!("proxy {}", if url.is_empty() { "-" } else { url }),
+        IntegrationConfig::Direct {} => "URLs are played as they are".into(),
+    }
+}
+
+pub fn integration(i: &Integration, status: Option<&IntegrationStatus>) {
+    println!("kind:       {}", i.kind.as_str());
+    println!(
+        "configured: {}",
+        if i.configured {
+            "yes"
+        } else {
+            "no (its channels are left out of playlists and guides)"
+        }
+    );
+    match &i.config {
+        IntegrationConfig::Acestream {
+            engine_url,
+            acexy_url,
+            probe_interval_hours,
+        } => {
+            println!("engine:     {}", if engine_url.is_empty() { "-" } else { engine_url });
+            match acexy_url {
+                Some(a) => println!("acexy:      {a}"),
+                None => println!("acexy:      - (playlists use the engine directly; recommended for several viewers)"),
+            }
+            if *probe_interval_hours == 0 {
+                println!("schedule:   off");
+            } else {
+                println!("schedule:   checks every {probe_interval_hours} h");
+            }
+        }
+        IntegrationConfig::Vk { url } => println!("proxy:      {}", if url.is_empty() { "-" } else { url }),
+        IntegrationConfig::Direct {} => {}
+    }
+    if let Some(why) = &i.checks.reason
+        && i.kind == api_types::SourceKind::Acestream
+    {
+        println!("            checks unavailable: {why}");
+    }
+    println!("channels:   {}", i.channel_count);
+    if let Some(s) = status {
+        for c in &s.components {
+            connection_test(c);
+        }
+    }
+}
+
+pub fn connection_test(r: &ConnectionTestResult) {
+    println!(
+        "{:<7} {}: {} ({} ms)",
+        r.component.as_str(),
+        if r.ok { "ok" } else { "failed" },
+        r.detail,
+        r.elapsed_ms
+    );
+}
+
+pub fn channel_info(i: &ChannelInfo) {
+    println!("channel:    {} ({})", i.channel_id, i.kind.as_str());
+    if !i.configured {
+        println!("            integration not configured: left out of playlists and guides");
+    }
+    match &i.health {
+        Some(h) => {
+            let at = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
+            println!("last check: {} at {}", outcome(h.last_attempt), at(h.last_attempt_at));
+            if let (Some(c), Some(t)) = (h.conclusive, h.conclusive_at)
+                && h.conclusive != Some(h.last_attempt)
+            {
+                println!("last known: {} at {}", outcome(c), at(t));
+            }
+        }
+        None => println!("last check: never"),
+    }
+    if !i.checks.available
+        && let Some(why) = &i.checks.reason
+    {
+        println!("            checks unavailable: {why}");
+    }
+    let Some(a) = &i.acestream else { return };
+    match (&a.engine_name, &a.engine_name_error) {
+        (Some(n), _) => println!("engine name: {n}"),
+        (None, Some(e)) => println!("engine name: - ({e})"),
+        _ => {}
+    }
+    let l = &a.live;
+    let state = match l.state {
+        LiveState::Active => "watched now",
+        LiveState::Inactive => "not watched",
+        LiveState::Unavailable => "unknown",
+    };
+    match &l.reason {
+        Some(r) => println!("live:       {state} ({r})"),
+        None => println!("live:       {state}"),
+    }
+    if l.state == LiveState::Active {
+        let n = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
+        println!("  clients:  {}", n(l.clients));
+        println!("  status:   {}", l.status.as_deref().unwrap_or("-"));
+        println!("  peers:    {}", n(l.peers));
+        println!("  speed:    down {} KB/s, up {} KB/s", n(l.speed_down), n(l.speed_up));
+    }
 }
 
 /// The suggested metadata of a resolve, one field per line.

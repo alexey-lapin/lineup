@@ -43,6 +43,9 @@ pub enum Command {
     Ls(LsArgs),
     /// Show one channel.
     Show { channel: String },
+    /// Show what the services report about a channel now: for acestream, the engine's name for it
+    /// and, while someone watches through acexy, live peers and speeds (never starts a stream).
+    Info { channel: String },
     /// Edit a channel.
     Edit(EditArgs),
     /// Delete channels.
@@ -70,11 +73,11 @@ pub enum Command {
     /// Manage guide (XMLTV) sources and search their channels.
     #[command(subcommand)]
     Epg(EpgCmd),
-    /// Probe acestream channels' swarm health (all enabled ones when none are given; that run continues
-    /// on the server).
+    /// Check acestream channels' swarm health (all enabled ones when none are given; that run
+    /// continues on the server). Needs acexy, which tells whether a stream is being watched.
     Probe {
         channels: Vec<String>,
-        /// Probe even if a stream seems to be in use.
+        /// Check even if acexy reports the stream in use.
         #[arg(long)]
         force: bool,
     },
@@ -83,7 +86,10 @@ pub enum Command {
     Hook(HookCmd),
     /// Re-emit change notifications for playlists (all when none are given).
     Refresh { slugs: Vec<String> },
-    /// Show or change settings.
+    /// Show, configure and test integrations (the services channels play through).
+    #[command(subcommand)]
+    Integration(IntegrationCmd),
+    /// Show or change app-wide settings.
     #[command(subcommand)]
     Settings(SettingsCmd),
     /// Download a consistent copy of the server's database (restore: stop lineup, replace /data/lineup.db).
@@ -170,15 +176,19 @@ pub enum HealthArg {
 pub enum KindArg {
     Acestream,
     Vk,
-    Raw,
+    Direct,
 }
 
 impl KindArg {
     pub fn as_str(self) -> &'static str {
+        self.kind().as_str()
+    }
+
+    pub fn kind(self) -> api_types::SourceKind {
         match self {
-            KindArg::Acestream => "acestream",
-            KindArg::Vk => "vk",
-            KindArg::Raw => "raw",
+            KindArg::Acestream => api_types::SourceKind::Acestream,
+            KindArg::Vk => api_types::SourceKind::Vk,
+            KindArg::Direct => api_types::SourceKind::Direct,
         }
     }
 }
@@ -384,26 +394,58 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum TestTarget {
-    Acexy,
+pub enum ComponentArg {
     Engine,
-    Vk,
+    Acexy,
+    Proxy,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IntegrationCmd {
+    /// List integrations with their config and whether they are configured.
+    Ls,
+    /// Show one integration and test its configured components.
+    Show {
+        #[arg(value_enum)]
+        kind: KindArg,
+    },
+    /// Change an integration. An empty value turns a URL off ("" for --engine-url or --url turns the
+    /// integration off; --acexy-url "" removes acexy).
+    Set {
+        #[arg(value_enum)]
+        kind: KindArg,
+        /// Acestream: the engine's base URL (required for playback).
+        #[arg(long)]
+        engine_url: Option<String>,
+        /// Acestream: acexy's base URL (recommended; needed for checks and live numbers).
+        #[arg(long)]
+        acexy_url: Option<String>,
+        /// Acestream: hours between scheduled checks (0 = off).
+        #[arg(long)]
+        probe_interval: Option<u32>,
+        /// VK: the proxy's base URL.
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Check that a component answers (from the lineup server). Exits 1 if not.
+    Test {
+        #[arg(value_enum)]
+        kind: KindArg,
+        /// engine or acexy (Acestream), proxy (VK). Default: every configured component.
+        #[arg(value_enum)]
+        component: Option<ComponentArg>,
+        /// Try this base URL instead of the saved one (needs a component).
+        #[arg(long, requires = "component")]
+        url: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SettingsCmd {
     /// Show all settings.
     Get,
-    /// Set one setting: acexy_base, engine_base, vk_base, epg_refresh_hours or probe_interval_hours.
+    /// Set one setting: epg_refresh_hours.
     Set { key: String, value: String },
-    /// Check that a service answers at its base URL (from the lineup server). Exits 1 if not.
-    Test {
-        #[arg(value_enum)]
-        target: TestTarget,
-        /// Try this base URL instead of the saved one.
-        #[arg(long)]
-        base: Option<String>,
-    },
 }
 
 /// What the binary should do after parsing.

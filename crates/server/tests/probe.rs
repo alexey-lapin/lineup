@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use api_types::{ChannelCreate, ProbeOutcome, SettingsPatch};
+use api_types::{ChannelCreate, IntegrationPatch, ProbeOutcome, SourceKind};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -36,6 +36,8 @@ struct Fake {
     /// Sessions started and not yet stopped, and the most seen at once.
     open: i32,
     max_open: i32,
+    /// Every getstream request (sessions started).
+    starts: u32,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -43,6 +45,7 @@ type Shared = Arc<Mutex<Fake>>;
 async fn getstream(State(f): State<Shared>, Query(q): Query<HashMap<String, String>>) -> axum::response::Response {
     assert_eq!(q["format"], "json");
     assert!(q["pid"].starts_with("lineup-probe-"));
+    f.lock().unwrap().starts += 1;
     let id = &q["id"];
     if id == BROKEN {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -102,7 +105,12 @@ async fn cmd(
 async fn acexy_status(State(f): State<Shared>, Query(q): Query<HashMap<String, String>>) -> axum::response::Response {
     let f = f.lock().unwrap();
     match (q.get("id"), &f.watched) {
-        (Some(id), Some(w)) if w.contains(id) => axum::Json(json!({ "clients": 1 })).into_response(),
+        // acexy reports the stat URL of its own engine session (on the engine's loopback address).
+        (Some(id), Some(w)) if w.contains(id) => axum::Json(json!({
+            "clients": 1, "streams": 1, "stream_id": id,
+            "stat_url": format!("http://127.0.0.1:1/ace/stat/{id}/s")
+        }))
+        .into_response(),
         (Some(_), Some(_)) => StatusCode::NOT_FOUND.into_response(),
         (Some(_), None) => StatusCode::BAD_REQUEST.into_response(),
         (None, _) => axum::Json(json!({ "streams": f.global_streams })).into_response(),
@@ -124,11 +132,26 @@ async fn fake() -> (String, Shared) {
         .route("/ace/stat/{id}/s", get(stat))
         .route("/ace/cmd/{id}/s", get(cmd))
         .route("/ace/status", get(acexy_status))
+        .route(
+            "/server/api",
+            get(|Query(q): Query<HashMap<String, String>>| async move {
+                assert_eq!(q["method"], "get_media_files");
+                axum::Json(json!({ "result": { "0": "Arena 1 HD.mkv" }, "error": null }))
+            }),
+        )
         .with_state(shared.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), shared)
+}
+
+fn ace_config(engine: &str, acexy: Option<&str>) -> IntegrationPatch {
+    IntegrationPatch::Acestream {
+        engine_url: Some(engine.into()),
+        acexy_url: Some(acexy.map(Into::into)),
+        probe_interval_hours: None,
+    }
 }
 
 const TIMING: ProbeTiming = ProbeTiming {
@@ -145,11 +168,7 @@ async fn probes_record_health_and_emit_transitions() {
     let (base, fake) = fake().await;
     let store = Arc::new(Store::open_memory().await.unwrap());
     store
-        .patch_settings(SettingsPatch {
-            engine_base: Some(base.clone()),
-            acexy_base: Some(base.clone()),
-            ..Default::default()
-        })
+        .patch_integration(SourceKind::Acestream, ace_config(&base, Some(&base)))
         .await
         .unwrap();
     let mut ids = HashMap::new();
@@ -254,11 +273,7 @@ async fn probes_are_bound_to_their_channel_and_session() {
     let (base, fake) = fake().await;
     let store = Arc::new(Store::open_memory().await.unwrap());
     store
-        .patch_settings(SettingsPatch {
-            engine_base: Some(base.clone()),
-            acexy_base: Some(base.clone()),
-            ..Default::default()
-        })
+        .patch_integration(SourceKind::Acestream, ace_config(&base, Some(&base)))
         .await
         .unwrap();
     let add = |name: &str, ace: &str| {
@@ -311,6 +326,7 @@ async fn probes_are_bound_to_their_channel_and_session() {
         channel_id: ok.id,
         created_at: ok.created_at - chrono::Duration::seconds(1),
         ace: OK,
+        engine_url: &base,
     };
     assert!(!store.record_probe(stale, ProbeOutcome::Dead, None).await.unwrap());
     assert!(store.get_channel(ok.id).await.unwrap().health.is_none());
@@ -336,4 +352,113 @@ async fn probes_are_bound_to_their_channel_and_session() {
     let _ = tokio::time::timeout(Duration::from_millis(25), prober.probe(&[again.id], true)).await;
     prober.probe(&[ok.id, wobbly.id], true).await.unwrap();
     assert_eq!(fake.lock().unwrap().max_open, 1);
+}
+
+#[tokio::test]
+async fn channel_info_reads_live_numbers_without_starting_sessions() {
+    use api_types::LiveState;
+    let (base, fake) = fake().await;
+    let store = Arc::new(Store::open_memory().await.unwrap());
+    store
+        .patch_integration(SourceKind::Acestream, ace_config(&base, None))
+        .await
+        .unwrap();
+    let add = |name: &str, ace: &str| {
+        let store = store.clone();
+        let (name, ace) = (name.to_string(), ace.to_string());
+        async move {
+            store
+                .create_channel(ChannelCreate {
+                    name,
+                    input: Some(ace),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .id
+        }
+    };
+    let watched = add("watched", WATCHED).await;
+    let idle = add("idle", OK).await;
+    let prober = Prober::new(store.clone(), reqwest::Client::new(), TIMING);
+    let info = |id: i64, name: bool| {
+        let store = store.clone();
+        async move { lineup_server::live::channel_info(&store, id, name).await.unwrap() }
+    };
+
+    // Engine only: the name, but no live numbers and no checks (not even forced).
+    let i = info(watched, true).await;
+    let a = i.acestream.clone().unwrap();
+    assert_eq!(a.engine_name.as_deref(), Some("Arena 1 HD"));
+    assert_eq!(a.live.state, LiveState::Unavailable);
+    assert!(!i.checks.available && i.checks.reason.unwrap().contains("acexy"));
+    for force in [false, true] {
+        let e = prober.probe(&[watched], force).await.unwrap_err();
+        assert_eq!(e.code(), "conflict", "{e}");
+    }
+    assert_eq!(prober.probe_all(false).await.unwrap_err().code(), "conflict");
+
+    // With acexy: live numbers of acexy's session while it is watched, rebased onto the engine.
+    store
+        .patch_integration(SourceKind::Acestream, ace_config(&base, Some(&base)))
+        .await
+        .unwrap();
+    fake.lock().unwrap().swarm.insert(WATCHED.into(), ("dl".into(), 5));
+    let i = info(watched, false).await;
+    assert!(i.checks.available);
+    let a = i.acestream.unwrap();
+    assert_eq!(a.engine_name, None, "the name only when asked for");
+    assert_eq!(a.live.state, LiveState::Active, "{:?}", a.live);
+    assert_eq!((a.live.clients, a.live.peers), (Some(1), Some(5)));
+    assert_eq!(a.live.status.as_deref(), Some("dl"));
+    assert_eq!(
+        info(idle, false).await.acestream.unwrap().live.state,
+        LiveState::Inactive
+    );
+
+    // An acexy without per-stream status: unknown, not inferred from the global count.
+    fake.lock().unwrap().watched = None;
+    fake.lock().unwrap().global_streams = 1;
+    let live = info(watched, false).await.acestream.unwrap().live;
+    assert_eq!(live.state, LiveState::Unavailable);
+    assert!(live.reason.unwrap().contains("per-stream"));
+
+    // Nothing was started or stopped, and nothing was recorded as health.
+    let (starts, stops) = {
+        let f = fake.lock().unwrap();
+        (f.starts, f.stops.len())
+    };
+    assert_eq!((starts, stops), (0, 0));
+    assert!(store.get_channel(watched).await.unwrap().health.is_none());
+
+    // Not an acestream channel: no acestream section.
+    let d = add("direct", "http://example.org/x.m3u8").await;
+    let i = info(d, true).await;
+    assert!(i.acestream.is_none() && !i.checks.available);
+}
+
+#[tokio::test]
+async fn results_through_a_replaced_engine_are_dropped() {
+    let (base, _fake) = fake().await;
+    let store = Arc::new(Store::open_memory().await.unwrap());
+    store
+        .patch_integration(SourceKind::Acestream, ace_config(&base, Some(&base)))
+        .await
+        .unwrap();
+    let c = store
+        .create_channel(ChannelCreate {
+            name: "ok".into(),
+            input: Some(OK.into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let measured = lineup_server::store::ProbeIdentity {
+        channel_id: c.id,
+        created_at: c.created_at,
+        ace: OK,
+        engine_url: "http://old-engine:6878",
+    };
+    assert!(!store.record_probe(measured, ProbeOutcome::Ok, None).await.unwrap());
+    assert!(store.get_channel(c.id).await.unwrap().health.is_none());
 }

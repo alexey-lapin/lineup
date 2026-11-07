@@ -4,13 +4,24 @@ const ACE1: &str = "41169a3f280a5537b0611b775e926852d372743d";
 const ACE2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
 const ACE3: &str = "914c3344a2cb94beeb26c187ca10e5c862090dba";
 
+fn patch(json: serde_json::Value) -> api_types::IntegrationPatch {
+    serde_json::from_value(json).unwrap()
+}
+
 async fn store() -> Store {
     let s = Store::open_memory().await.unwrap();
-    s.patch_settings(SettingsPatch {
-        acexy_base: Some("http://10.0.0.5:8080".into()),
-        vk_base: Some("http://10.0.0.5:8099".into()),
-        ..Default::default()
-    })
+    s.patch_integration(
+        SourceKind::Acestream,
+        patch(serde_json::json!({
+            "kind": "acestream", "engine_url": "http://10.0.0.5:6878", "acexy_url": "http://10.0.0.5:8080"
+        })),
+    )
+    .await
+    .unwrap();
+    s.patch_integration(
+        SourceKind::Vk,
+        patch(serde_json::json!({ "kind": "vk", "url": "http://10.0.0.5:8099" })),
+    )
     .await
     .unwrap();
     s
@@ -53,7 +64,11 @@ async fn create_dedup_and_render() {
         .create_channel(ch("Alpha", &format!("acestream://{ACE1}"), &["jf"]))
         .await
         .unwrap();
-    assert_eq!(a.stream_url, format!("http://10.0.0.5:8080/ace/getstream?id={ACE1}"));
+    assert_eq!(
+        a.stream_url.as_deref(),
+        Some(format!("http://10.0.0.5:8080/ace/getstream?id={ACE1}").as_str())
+    );
+    assert!(a.configured);
     assert_eq!(a.playlists, vec!["jf"]);
 
     // duplicate by source key, regardless of input form
@@ -185,10 +200,10 @@ async fn events_follow_the_mutation_table() {
     .unwrap();
     assert!(rx.try_recv().is_err());
 
-    s.patch_settings(SettingsPatch {
-        vk_base: Some("http://10.0.0.1:8099".into()),
-        ..Default::default()
-    })
+    s.patch_integration(
+        SourceKind::Vk,
+        patch(serde_json::json!({ "kind": "vk", "url": "http://10.0.0.1:8099" })),
+    )
     .await
     .unwrap();
     assert_eq!(
@@ -197,16 +212,66 @@ async fn events_follow_the_mutation_table() {
             slugs: vec!["vk".into()]
         }
     );
-    assert!(matches!(rx.try_recv().unwrap(), Event::SettingsChanged { keys, .. } if keys == ["vk_base"]));
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        Event::IntegrationChanged {
+            kind: SourceKind::Vk,
+            ..
+        }
+    ));
 
-    // engine_base does not affect output: only the UI notice
+    // The engine URL does not affect output while acexy plays: only the UI notice. So does the
+    // schedule.
+    for change in [
+        serde_json::json!({ "kind": "acestream", "engine_url": "http://10.0.0.1:6878" }),
+        serde_json::json!({ "kind": "acestream", "probe_interval_hours": 6 }),
+    ] {
+        s.patch_integration(SourceKind::Acestream, patch(change)).await.unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::IntegrationChanged {
+                kind: SourceKind::Acestream,
+                ..
+            }
+        ));
+    }
+    assert!(rx.try_recv().is_err());
+    // An unchanged value is not a change.
+    s.patch_integration(
+        SourceKind::Acestream,
+        patch(serde_json::json!({ "kind": "acestream", "probe_interval_hours": 6 })),
+    )
+    .await
+    .unwrap();
+    assert!(rx.try_recv().is_err());
+    // Removing acexy moves playback onto the engine.
+    s.patch_integration(
+        SourceKind::Acestream,
+        patch(serde_json::json!({ "kind": "acestream", "acexy_url": null })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Event::PlaylistChanged {
+            slugs: vec!["jf".into()]
+        }
+    );
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        Event::IntegrationChanged {
+            kind: SourceKind::Acestream,
+            revision: 4
+        }
+    ));
+
+    // Settings: the UI notice only.
     s.patch_settings(SettingsPatch {
-        engine_base: Some("http://10.0.0.1:6878".into()),
-        ..Default::default()
+        epg_refresh_hours: Some(12),
     })
     .await
     .unwrap();
-    assert!(matches!(rx.try_recv().unwrap(), Event::SettingsChanged { keys, .. } if keys == ["engine_base"]));
+    assert!(matches!(rx.try_recv().unwrap(), Event::SettingsChanged { keys, .. } if keys == ["epg_refresh_hours"]));
     assert!(rx.try_recv().is_err());
 
     s.delete_channel(a.id).await.unwrap();
@@ -259,7 +324,7 @@ async fn import_commit_and_reimport() {
     let r = s.import(SAMPLE_M3U, "jellyfin", false).await.unwrap();
     assert_eq!(r.entries.iter().filter(|e| e.action == ImportAction::Create).count(), 3);
     let out = s.render_m3u("jellyfin").await.unwrap();
-    // the wrong-subnet engine URL was normalised onto acexy_base
+    // the wrong-subnet engine URL was normalised onto acexy
     assert!(
         out.contains(&format!("http://10.0.0.5:8080/ace/getstream?id={ACE2}")),
         "{out}"
@@ -358,6 +423,12 @@ async fn failed_mutations_roll_back() {
 async fn reads_are_consistent_under_concurrent_writes() {
     let dir = tempfile::tempdir().unwrap();
     let s = std::sync::Arc::new(Store::open(&dir.path().join("t.db")).await.unwrap());
+    s.patch_integration(
+        SourceKind::Acestream,
+        patch(serde_json::json!({ "kind": "acestream", "engine_url": "http://e:6878" })),
+    )
+    .await
+    .unwrap();
     pl(&s, "jf").await;
     let keep = s.create_channel(ch("Persistent", ACE1, &["jf"])).await.unwrap();
 
@@ -418,4 +489,71 @@ fn rand_suffix() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos()
+}
+
+#[tokio::test]
+async fn unconfigured_integrations_leave_output() {
+    let s = Store::open_memory().await.unwrap();
+    // A new database: only direct URLs play.
+    let ints = s.list_integrations().await.unwrap();
+    assert_eq!(
+        ints.iter().map(|i| (i.kind, i.configured)).collect::<Vec<_>>(),
+        [
+            (SourceKind::Acestream, false),
+            (SourceKind::Vk, false),
+            (SourceKind::Direct, true)
+        ]
+    );
+    pl(&s, "jf").await;
+    let a = s.create_channel(ch("Ace", ACE1, &["jf"])).await.unwrap();
+    let d = s
+        .create_channel(ch("Direct", "http://x/live.m3u8", &["jf"]))
+        .await
+        .unwrap();
+    assert_eq!(a.stream_url, None);
+    assert!(!a.configured);
+    assert_eq!(d.stream_url.as_deref(), Some("http://x/live.m3u8"));
+    let r = s.resolve(ACE2).await.unwrap();
+    assert_eq!((r.stream_url, r.configured), (None, false));
+    let out = s.render_m3u("jf").await.unwrap();
+    assert!(!out.contains("Ace"), "{out}");
+    assert!(out.contains("tvg-chno=\"2\""), "positions are kept: {out}");
+
+    // Configuring the engine brings the channel back, playing from the engine.
+    let mut rx = s.subscribe();
+    let i = s
+        .patch_integration(
+            SourceKind::Acestream,
+            patch(serde_json::json!({ "kind": "acestream", "engine_url": "http://e:6878" })),
+        )
+        .await
+        .unwrap();
+    assert!(i.configured);
+    assert!(!i.checks.available, "no acexy: no checks");
+    assert_eq!(i.channel_count, 1);
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Event::PlaylistChanged {
+            slugs: vec!["jf".into()]
+        }
+    );
+    let out = s.render_m3u("jf").await.unwrap();
+    assert!(out.contains(&format!("http://e:6878/ace/getstream?id={ACE1}")), "{out}");
+
+    // Turning it off again keeps the channel and its membership.
+    s.patch_integration(
+        SourceKind::Acestream,
+        patch(serde_json::json!({ "kind": "acestream", "engine_url": "" })),
+    )
+    .await
+    .unwrap();
+    assert!(!s.render_m3u("jf").await.unwrap().contains("Ace"));
+    assert_eq!(s.get_channel(a.id).await.unwrap().playlists, ["jf"]);
+
+    // The route kind must match the patch.
+    let err = s
+        .patch_integration(SourceKind::Vk, patch(serde_json::json!({ "kind": "acestream" })))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "invalid");
 }

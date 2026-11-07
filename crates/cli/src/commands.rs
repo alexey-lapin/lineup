@@ -1,14 +1,15 @@
 use api_types::{
-    Channel, ChannelCreate, ChannelPatch, EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource,
-    EpgSourceCreate, EpgSourcePatch, Hook, HookConfig, HookCreate, HookDelivery, HookPatch, ImportReport,
-    ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeRequest,
+    Channel, ChannelCreate, ChannelInfo, ChannelPatch, Component, ConnectionTestRequest, ConnectionTestResult,
+    EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource, EpgSourceCreate, EpgSourcePatch, Hook,
+    HookConfig, HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest, Integration, IntegrationPatch,
+    IntegrationStatus, ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeRequest,
     ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch,
-    SettingsTestRequest, SettingsTestResult, SettingsTestTarget, Status,
+    SourceKind, Status,
 };
 use serde::Serialize;
 
 use crate::client::{CliError, Client};
-use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, HookCmd, PlaylistCmd, SettingsCmd, output};
+use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, HookCmd, IntegrationCmd, PlaylistCmd, SettingsCmd, output};
 
 type R<T = ()> = Result<T, CliError>;
 
@@ -160,7 +161,7 @@ pub async fn run(cli: Cli) -> R {
             x.emit(&r, |r| {
                 println!("source:     {}", serde_json::to_string(&r.source).unwrap_or_default());
                 println!("key:        {}", r.source_key);
-                println!("stream url: {}", r.stream_url);
+                println!("stream url: {}", output::stream_url(&r.stream_url));
                 match r.duplicate_of {
                     Some(id) => println!("duplicate:  yes, channel {id}"),
                     None => println!("duplicate:  no"),
@@ -187,7 +188,12 @@ pub async fn run(cli: Cli) -> R {
                             if x.quiet {
                                 println!("{}", ch.id);
                             } else {
-                                println!("added {} {:?} -> {}", ch.id, ch.name, ch.stream_url);
+                                println!(
+                                    "added {} {:?} -> {}",
+                                    ch.id,
+                                    ch.name,
+                                    output::stream_url(&ch.stream_url)
+                                );
                             }
                         }
                         results.push(serde_json::json!({ "input": input, "ok": true, "channel": ch }));
@@ -195,9 +201,10 @@ pub async fn run(cli: Cli) -> R {
                     Ok(AddOutcome::WouldCreate(req, url)) => {
                         if !x.json {
                             println!(
-                                "would add {:?} ({}) -> {url}",
+                                "would add {:?} ({}) -> {}",
                                 req.name,
-                                output::source_label(req.source.as_ref().unwrap())
+                                output::source_label(req.source.as_ref().unwrap()),
+                                output::stream_url(&url)
                             );
                         }
                         results.push(serde_json::json!({ "input": input, "ok": true, "would_create": req }));
@@ -272,6 +279,12 @@ pub async fn run(cli: Cli) -> R {
             let id = x.channel_id(&channel).await?;
             let ch: Channel = x.c.get(&format!("/channels/{id}")).await?;
             x.emit(&ch, output::channel);
+        }
+
+        Command::Info { channel } => {
+            let id = x.channel_id(&channel).await?;
+            let info: ChannelInfo = x.c.get(&format!("/channels/{id}/info?name=true")).await?;
+            x.emit(&info, output::channel_info);
         }
 
         Command::Edit(e) => {
@@ -363,23 +376,7 @@ pub async fn run(cli: Cli) -> R {
             x.emit(&r, |r| println!("refreshed: {}", r.slugs.join(", ")));
         }
 
-        Command::Settings(SettingsCmd::Test { target, base }) => {
-            let target = match target {
-                crate::TestTarget::Acexy => SettingsTestTarget::Acexy,
-                crate::TestTarget::Engine => SettingsTestTarget::Engine,
-                crate::TestTarget::Vk => SettingsTestTarget::Vk,
-            };
-            let r: SettingsTestResult =
-                x.c.post("/settings/test", &SettingsTestRequest { target, base })
-                    .await?;
-            x.emit(&r, |r| {
-                println!("{}: {}", if r.ok { "ok" } else { "failed" }, r.detail);
-                println!("url: {} ({} ms, from the lineup server)", r.url, r.elapsed_ms);
-            });
-            if !r.ok {
-                return Err(CliError::Reported(1));
-            }
-        }
+        Command::Integration(cmd) => integration(&mut x, cmd).await?,
         Command::Settings(SettingsCmd::Get) => {
             let s: Settings = x.c.get("/settings").await?;
             x.emit(&s, output::settings);
@@ -387,16 +384,6 @@ pub async fn run(cli: Cli) -> R {
         Command::Settings(SettingsCmd::Set { key, value }) => {
             let mut patch = SettingsPatch::default();
             match key.as_str() {
-                "acexy_base" => patch.acexy_base = Some(value),
-                "engine_base" => patch.engine_base = Some(value),
-                "vk_base" => patch.vk_base = Some(value),
-                "probe_interval_hours" => {
-                    patch.probe_interval_hours = Some(
-                        value
-                            .parse()
-                            .map_err(|_| CliError::Usage(format!("probe_interval_hours: not a number: {value:?}")))?,
-                    )
-                }
                 "epg_refresh_hours" => {
                     patch.epg_refresh_hours = Some(
                         value
@@ -404,10 +391,113 @@ pub async fn run(cli: Cli) -> R {
                             .map_err(|_| CliError::Usage(format!("epg_refresh_hours: not a number: {value:?}")))?,
                     )
                 }
+                "acexy_base" | "engine_base" | "vk_base" | "probe_interval_hours" => {
+                    return Err(CliError::Usage(format!(
+                        "{key} is now part of an integration: see `lineup integration set --help`"
+                    )));
+                }
                 other => return Err(CliError::Usage(format!("unknown setting {other:?}"))),
             }
             let s: Settings = x.c.patch("/settings", &patch).await?;
             x.emit(&s, output::settings);
+        }
+    }
+    Ok(())
+}
+
+async fn integration(x: &mut Ctx, cmd: IntegrationCmd) -> R {
+    match cmd {
+        IntegrationCmd::Ls => {
+            let list: Vec<Integration> = x.c.get("/integrations").await?;
+            x.emit(&list, |l| output::integrations(l));
+        }
+        IntegrationCmd::Show { kind } => {
+            let k = kind.as_str();
+            let i: Integration = x.c.get(&format!("/integrations/{k}")).await?;
+            let status: IntegrationStatus = x.c.get(&format!("/integrations/{k}/status")).await?;
+            let both = serde_json::json!({ "integration": i, "status": status });
+            x.emit(&both, |_| output::integration(&i, Some(&status)));
+        }
+        IntegrationCmd::Set {
+            kind,
+            engine_url,
+            acexy_url,
+            probe_interval,
+            url,
+        } => {
+            let kind = kind.kind();
+            let unused = |flags: &[(&str, bool)]| -> R {
+                match flags.iter().find(|(_, set)| *set) {
+                    Some((name, _)) => Err(CliError::Usage(format!(
+                        "--{name} does not apply to the {} integration",
+                        kind.as_str()
+                    ))),
+                    None => Ok(()),
+                }
+            };
+            let patch = match kind {
+                SourceKind::Acestream => {
+                    unused(&[("url", url.is_some())])?;
+                    IntegrationPatch::Acestream {
+                        engine_url,
+                        // "" clears acexy.
+                        acexy_url: acexy_url.map(|a| Some(a).filter(|a| !a.trim().is_empty())),
+                        probe_interval_hours: probe_interval,
+                    }
+                }
+                SourceKind::Vk => {
+                    unused(&[
+                        ("engine-url", engine_url.is_some()),
+                        ("acexy-url", acexy_url.is_some()),
+                        ("probe-interval", probe_interval.is_some()),
+                    ])?;
+                    IntegrationPatch::Vk { url }
+                }
+                SourceKind::Direct => {
+                    return Err(CliError::Usage(
+                        "the direct integration has nothing to configure".into(),
+                    ));
+                }
+            };
+            let i: Integration = x.c.patch(&format!("/integrations/{}", kind.as_str()), &patch).await?;
+            x.emit(&i, |i| output::integration(i, None));
+        }
+        IntegrationCmd::Test { kind, component, url } => {
+            let k = kind.as_str();
+            let results: Vec<ConnectionTestResult> = match component {
+                Some(c) => {
+                    let component = match c {
+                        crate::ComponentArg::Engine => Component::Engine,
+                        crate::ComponentArg::Acexy => Component::Acexy,
+                        crate::ComponentArg::Proxy => Component::Proxy,
+                    };
+                    vec![
+                        x.c.post(
+                            &format!("/integrations/{k}/test"),
+                            &ConnectionTestRequest { component, url },
+                        )
+                        .await?,
+                    ]
+                }
+                None => {
+                    let s: IntegrationStatus = x.c.get(&format!("/integrations/{k}/status")).await?;
+                    if s.components.is_empty() {
+                        return Err(CliError::Usage(format!(
+                            "the {k} integration has nothing configured to test"
+                        )));
+                    }
+                    s.components
+                }
+            };
+            x.emit(&results, |rs| {
+                for r in rs {
+                    output::connection_test(r);
+                    println!("        url: {} (from the lineup server)", r.url);
+                }
+            });
+            if results.iter().any(|r| !r.ok) {
+                return Err(CliError::Reported(1));
+            }
         }
     }
     Ok(())
@@ -711,7 +801,7 @@ async fn playlist(x: &mut Ctx, cmd: PlaylistCmd) -> R {
 
 enum AddOutcome {
     Created(Channel),
-    WouldCreate(ChannelCreate, String),
+    WouldCreate(ChannelCreate, Option<String>),
 }
 
 async fn add_one(x: &Ctx, a: &crate::AddArgs, input: &str) -> R<AddOutcome> {
