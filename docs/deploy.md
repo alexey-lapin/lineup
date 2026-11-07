@@ -10,15 +10,30 @@ docker compose -f deploy/compose.yaml up -d
 
 Pin a release tag rather than `latest`. The container runs as uid 10001 and stores everything under `/data`.
 
-Open `http://<host>:9300` and set the base URLs under **Settings**. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI. Use addresses that your players and media server can reach for acexy and the VK proxy, not `localhost`; the engine only needs to be reachable from lineup:
+Open `http://<host>:9300`. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI.
 
-| Setting | What it is | Example |
-|---|---|---|
-| `acexy_base` | acexy, which plays Acestream ids | `http://media-host:8080` |
-| `engine_base` | the Acestream engine, used for name lookups and health checks | `http://media-host:6878` |
-| `vk_base` | a VK proxy that serves `/vk/{owner}_{video}[?list=…]` | `http://media-host:8099` |
+## Set up integrations
 
-Each has a **Test** button (or `lineup settings test acexy|engine|vk [--base URL]`) that checks, from the lineup server, that the service answers: acexy's status endpoint, the engine's version, or any HTTP answer from the VK proxy. It tests the URL as typed, before you save it. A passing test does not prove your players can reach the address, only that lineup can.
+Integrations are the services your channels play through, set up under **Integrations** (or with `lineup integration set`). A new installation starts with Acestream and VK off: their channels can be added and imported, but stay out of playlists and guides until their integration is set up. Direct URLs need nothing.
+
+| Integration | Address | What it is | Example |
+|---|---|---|---|
+| Acestream | Engine URL (required) | the Acestream engine: name lookups, health checks, and playback when acexy is not set | `http://media-host:6878` |
+| Acestream | acexy URL (recommended) | [acexy](https://github.com/Javinator9889/acexy) in front of the engine: playback (several viewers share one engine session), and what health checks and live details need | `http://media-host:8080` |
+| VK proxy | URL | a VK proxy (a thin layer over streamlink) serving `/vk/{owner}_{video}[?list=…]` | `http://media-host:8099` |
+
+Playlists send players to acexy (or to the engine, without acexy) and to the VK proxy, so use addresses that your players and media server can reach, not `localhost`.
+
+```sh
+lineup integration set acestream --engine-url http://media-host:6878 --acexy-url http://media-host:8080
+lineup integration set vk --url http://media-host:8099
+lineup integration ls
+lineup integration test acestream            # every configured part; or: test acestream engine --url URL
+```
+
+Each address has a **Test** button that checks, from the lineup server, that the service answers: the engine's version, acexy's status (with its active stream count), or any HTTP answer from the VK proxy. It tests the URL as typed, before you save it; the card also shows the live status of the saved addresses. A passing test does not prove your players can reach the address, only that lineup can.
+
+Clearing the engine URL (or the VK URL) turns that integration off; its channels keep their playlists and positions and come back when it is set again. Clearing acexy moves Acestream playback to the engine and turns health checks off.
 
 ## Point the CLI at it
 
@@ -48,7 +63,7 @@ lineup import ./channels.m3u -p tv --dry-run
 lineup import ./channels.m3u -p tv
 ```
 
-Acestream and VK links are recognised in any of their usual forms (acexy or engine URLs, `acestream://` ids, vk.com and vkvideo.ru links, proxy URLs). Anything else is kept as a raw URL. Re-importing is safe: channels that already exist are reused and their details are kept, and the report shows where the file differs.
+Acestream and VK links are recognised in any of their usual forms (acexy or engine URLs, `acestream://` ids, vk.com and vkvideo.ru links, proxy URLs). Anything else is kept as a direct URL. Re-importing is safe: channels that already exist are reused and their details are kept, and the report shows where the file differs.
 
 ## Use the playlist
 
@@ -131,13 +146,23 @@ Jellyfin's **Refresh Guide** task re-reads tuners and guide providers. To run it
 
 If the task id ever changes (a 404 in `lineup hook deliveries`), look it up again and `lineup hook edit <id> --url …`. Jellyfin reuses a downloaded XMLTV guide for a while (about an hour), so a refresh right after a guide change may still show the old programmes until a later refresh.
 
-### Upgrading from 0.2
+## Upgrading from 0.3
 
-0.3.0 replaced the built-in Jellyfin hook with webhooks. Existing Jellyfin hooks are converted on first start into the webhook above, keeping the API key. A hook that had no task id stored (the default, since 0.2 looked it up itself) is converted **disabled**, with `REFRESH_GUIDE_TASK_ID` in its URL; lineup logs a warning about it at every start. Look up the task id as above, then `lineup hook edit <id> --url http://jellyfin:8096/ScheduledTasks/Running/<task id>` and `lineup hook enable <id>` (or edit it under **Hooks**). The 65-minute follow-up refresh is gone.
+lineup 0.4 starts from a new database and cannot open a 0.3 one: it refuses to start and leaves the old file untouched. To move over:
+
+1. Before upgrading, export each playlist from 0.3 (`curl -o tv.m3u http://media-host:9300/p/tv.m3u`) and note your guide sources (`lineup epg sources ls`), hooks (`lineup hook ls`; header secrets are masked, so take the Jellyfin API key from Jellyfin) and base URLs (`lineup settings get`). Disabled channels are not in the M3U; note them if you want them back.
+2. Stop lineup 0.3 and keep its data directory (or volume) aside as the backup. Only the 0.3 binary can read it, so keep the 0.3 image tag too if you might roll back.
+3. Start 0.4 with an empty data directory.
+4. Set up the integrations (above), then import each exported playlist (`lineup import tv.m3u -p tv`). Acestream and VK channels are recognised from their stream URLs.
+5. Add the guide sources and hooks again.
+
+Imported channels keep their name, group, tvg-id and logo from the M3U. Disabled channels, event flags and kickoff times are not in an M3U, so set those again.
 
 ## Health checks
 
-lineup can check whether each Acestream channel's swarm has peers, through the engine (`engine_base`). It starts a short session, reads its statistics and stops it again. Before each check it asks acexy whether anyone is watching that stream, and skips it if so.
+lineup can check whether each Acestream channel's swarm has peers, through the engine. It starts a short session, reads its statistics and stops it again. Before each check it asks acexy whether anyone is watching that stream, and skips it if so. Checks therefore need acexy: without it they are unavailable (also with `--force`). acexy only knows about its own players, so a player connected to the engine directly can still be interrupted.
+
+Clicking a channel opens its details: the engine's original name, and while someone watches through acexy, live peers, speeds and players (read from acexy's session; opening it never starts a stream), plus the latest check and **Check now**. `lineup info <channel>` prints the same.
 
 ```sh
 lineup probe "Sports One"   # one channel, waits for the result
@@ -145,7 +170,7 @@ lineup probe                # all of them, in the background
 lineup ls --health dead
 ```
 
-Scheduled checks are off by default; set `probe_interval_hours` (Settings, or `lineup settings set probe_interval_hours 6`) to turn them on. Hooks can subscribe to `channel.unhealthy` and `channel.recovered`. A check measures the swarm, not whether playback works.
+Scheduled checks are off by default; set the schedule on the Acestream card (or `lineup integration set acestream --probe-interval 6`) to turn them on. Hooks can subscribe to `channel.unhealthy` and `channel.recovered`. A check measures the swarm, not whether playback works.
 
 ## Logs
 
@@ -175,4 +200,6 @@ docker stop lineup && sh deploy/restore.sh ./lineup-backup.db && docker start li
 
 It checks the backup (`integrity_check` plus a test query) before changing anything. It stages the copy next to the live database, then moves the current `lineup.db`, `-wal` and `-shm` into `/data/pre-restore-<timestamp>/` (WAL can hold committed rows, so nothing is deleted). It refuses to run while lineup is up. If validation fails, the live files are untouched, and because `&&` chains the commands, lineup stays stopped until the restore succeeds.
 
-Re-importing an exported M3U is **not** a full restore. It brings back that playlist's channels and their M3U fields, but not disabled channels, other playlists, settings, event flags or kickoff times. Use the database backup for that.
+A backup restores into the same lineup version line: 0.4 refuses a 0.3 database (see Upgrading from 0.3).
+
+Re-importing an exported M3U is **not** a full restore. It brings back that playlist's channels and their M3U fields, but not disabled channels, other playlists, integrations, settings, event flags or kickoff times. Use the database backup for that.

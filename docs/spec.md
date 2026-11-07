@@ -9,7 +9,7 @@ lineup is a standalone service that owns the channels. It serves playlists and t
 ## 2. Goals and non-goals
 
 **Goals (v1)**
-- Channel library with typed sources and base URLs configured once.
+- Channel library with typed sources, played through integrations (Acestream, VK proxy, direct URLs) configured once.
 - Named playlists with channels picked by hand, served as `/p/<slug>.m3u` with a per-playlist `/p/<slug>/epg.xml`.
 - The app fetches the EPG itself.
 - An add flow that suggests a name and matching tvg-id and logo.
@@ -34,18 +34,24 @@ lineup is a standalone service that owns the channels. It serves playlists and t
   - `LINEUP_BIND` (default `0.0.0.0:9300`)
   - `LINEUP_DATA_DIR` (default `/data`)
   - `LINEUP_LOG`
-- Everything else is runtime settings stored in SQLite.
+- Everything else is runtime configuration stored in SQLite: integrations (§4b) and settings.
 - Every schedule is boot-relative (run shortly after start, then every N hours), so hosts that sleep or power off overnight still get fresh data soon after they come back.
 
 ## 4. Data model (SQLite via sqlx, with migrations)
 
+0.4.0 squashed the schema into one new migration 0001. lineup identifies a database's lineage by the
+checksum of its applied migration 1: a database of lineup 0.3 or older (or one with tables but no
+migration history) is refused at startup, untouched, before anything is written to it. Later
+migrations of the 0.4 lineage are handled by the migrator as usual.
+
 ```
-settings(key TEXT PK, value JSON)          -- base URLs, EPG schedule, probe schedule
+settings(key TEXT PK, value JSON)          -- epg_refresh_hours, revision
+integrations(kind TEXT PK ('acestream','vk','direct'), config JSON, revision INT, updated_at)   -- §4b
 channels(
   id INTEGER PK, name TEXT, group_title TEXT NULL,
   tvg_id TEXT NULL, tvg_logo TEXT NULL,
-  source_kind TEXT CHECK IN ('acestream','vk','raw'),
-  source JSON,          -- acestream: {id:"<40hex>"}; vk: {owner_id:-100200300, video_id:456000001, list:"4d2c…"|null}; raw: {url}
+  source_kind TEXT CHECK IN ('acestream','vk','direct'),   -- also the channel's integration
+  source JSON,          -- acestream: {id:"<40hex>"}; vk: {owner_id:-100200300, video_id:456000001, list:"4d2c…"|null}; direct: {url}
   source_key TEXT NOT NULL,   -- computed in Rust on write, see below
   is_event BOOL DEFAULT false, kickoff_at DATETIME NULL,   -- VK events
   enabled BOOL DEFAULT true,
@@ -62,20 +68,20 @@ playlist_items(playlist_id REFERENCES playlists ON DELETE CASCADE,
 epg_sources(id INTEGER PK, name TEXT, url TEXT, priority INTEGER, enabled BOOL,
   current_gen INTEGER NULL, previous_gen INTEGER NULL, last_fetch_at, last_status, last_error)   -- validators live in the generation dir (§6)
 epg_channels(source_id, xmltv_id TEXT, display_names JSON, icon TEXT NULL)   -- index used for matching and suggestions
-hooks(id INTEGER PK, name, kind ('jellyfin','webhook'), config JSON, events JSON, debounce_secs INT, enabled BOOL)
-hook_deliveries(id, hook_id, event, status, http_code, error, at)   -- ring buffer, last ~200 per hook
+hooks(id INTEGER PK, name, kind ('webhook'), config JSON, events JSON, debounce_secs INT, enabled BOOL)
+hook_deliveries(id, hook_id, events, trigger ('events','test'), attempt, ok, http_code, error, at)   -- last 200 per hook
 ```
 
-**URL building**
-- Settings hold `acexy_base` (e.g. `http://media-host:8080`), `engine_base` (`http://media-host:6878`) and `vk_base` (`http://media-host:8099`).
-- acestream → `{acexy_base}/ace/getstream?id={id}`
-- vk → `{vk_base}/vk/{owner_id}_{video_id}`, plus `?list={list}` only when `list` is set. If it is null, the query is left out entirely.
-- raw → the URL as stored.
+**URL building** (from the channel's integration, §4b)
+- acestream → `{acexy_url}/ace/getstream?id={id}`, or `{engine_url}/ace/getstream?id={id}` when acexy is not set.
+- vk → `{vk url}/vk/{owner_id}_{video_id}`, plus `?list={list}` only when `list` is set. If it is null, the query is left out entirely.
+- direct → the URL as stored.
+- A channel whose integration is not configured has no stream URL (`stream_url: null`).
 
 **Source keys** (used for de-duplication and import matching):
 - acestream: the 40-hex id, lowercased.
 - vk: `"{owner_id}_{video_id}"` with signed integers. `list` is not part of the key.
-- raw: the URL exactly as given, after trimming whitespace. No normalization.
+- direct: the URL exactly as given, after trimming whitespace. No normalization.
 
 **Positions**
 - `position` counts from 1 and is emitted as `tvg-chno`.
@@ -89,6 +95,34 @@ hook_deliveries(id, hook_id, event, status, http_code, error, at)   -- ring buff
 - `effective_tvg_id = tvg_id ?? "lineup.<channel_id>"`.
 - Used the same way in both the M3U and the XMLTV.
 
+## 4b. Integrations
+
+An integration is a service channels are played through. There is one per source kind, and every
+channel belongs to the one of its kind.
+
+| Kind | Config | Configured when |
+|---|---|---|
+| acestream | `engine_url` (required), `acexy_url` (optional, recommended), `probe_interval_hours` | `engine_url` is set |
+| vk | `url` of the VK proxy (a thin layer over streamlink) | `url` is set |
+| direct | nothing | always |
+
+- A new database starts with Acestream and VK not configured. A blank required URL turns the
+  integration off; there is no separate switch. PATCH: an absent field is kept, `acexy_url: null`
+  or `""` removes acexy.
+- **Configured** is a stable property of the config; **reachable** is transient (the status
+  endpoint). A configured but unreachable integration stays in output, so brief outages never churn
+  playlists.
+- **Eligibility**: M3U and XMLTV output include a channel when it is enabled *and* its integration is
+  configured. Others stay listed (with `stream_url: null`, `configured: false`) and keep their
+  playlist memberships and positions; `tvg-chno` keeps counting them.
+- Each row has a `revision`, raised on every effective change; of two copies the higher is newer.
+- **Live details** (`GET /channels/{id}/info`): for acestream, acexy's per-stream status
+  (`/ace/status?id=`; 404 = not watched) gives the player count and the stat URL of acexy's own
+  engine session. lineup reads only that statistics endpoint (the reported path must be
+  `/ace/stat/…`, checked before rebasing; no redirects; bounded time and size) and never calls
+  getstream, command or stop for it. Without per-stream status, live numbers are unavailable (a
+  global stream count does not identify the channel). Nothing here is recorded as health.
+
 ## 5. Outputs
 
 ### `/p/<slug>.m3u`
@@ -97,13 +131,14 @@ hook_deliveries(id, hook_id, event, status, http_code, error, at)   -- ring buff
 #EXTINF:-1 tvg-id="Arena.1.de" tvg-chno="2" tvg-logo="…" group-title="Sports",Arena 1
 http://media-host:8080/ace/getstream?id=816b…
 ```
-- Built per request from the DB, which is cheap. The `ETag` is a hash of the rendered body, so base-URL changes invalidate it automatically.
+- Built per request from the DB, which is cheap. The `ETag` is a hash of the rendered body, so integration changes invalidate it automatically.
+- Only eligible channels are listed: enabled, with a configured integration (§4b). `tvg-chno` is the playlist position, so numbering does not shift when a channel is left out.
 - Channels use the effective tvg-id (§4).
 - `.m3u8` is also accepted as an alias.
 
 ### `/p/<slug>/epg.xml`
 
-Built per request from the per-source caches. Output order is all `<channel>` elements first, then all `<programme>` elements, as the XMLTV DTD requires.
+Built per request from the per-source caches, for the same eligible channels as the M3U (§4b). Output order is all `<channel>` elements first, then all `<programme>` elements, as the XMLTV DTD requires.
 
 **Upstream channels**
 - For each non-event channel in the playlist, take the matching `<channel>` and its programmes from the source caches.
@@ -164,10 +199,10 @@ A download is accepted only if it parses as a whole document, including the clos
 - `acestream://<id>`, a bare 40-hex id, or an acexy or engine URL containing `id=`.
 - A vk.com video URL in any form: `vk.com/video-OWNER_VIDEO?list=…`, `vkvideo.ru/…`, or `vk.com/…?z=video-OWNER_VIDEO%2F…`.
 - The VK proxy URL.
-- Any other http(s) URL, which becomes raw.
+- Any other http(s) URL, which becomes direct.
 
 It returns the parsed source and a duplicate check (an existing channel with the same source key). For acestream it also looks up the engine name:
-- `GET {engine_base}/server/api?method=get_media_files&content_id=<id>`, e.g. `"Arena 1 Bar HD [DE]"`.
+- `GET {engine_url}/server/api?method=get_media_files&content_id=<id>`, e.g. `"Arena 1 Bar HD [DE]"` (a warning when the engine is not configured).
 - Name cleanup: remove `[XX]` country tags, `HD`/`FHD`/`UHD`/`Bar` and similar quality words, and extra spaces. The country tag becomes a region hint.
 - Fuzzy match the cleaned name against `epg_channels.display_names`, using normalized token similarity (strsim), with a bonus for a matching region suffix (`.de`, `.uk`, `.us`).
 - Return the top 5 `{xmltv_id, display_name, icon, score}`.
@@ -181,6 +216,7 @@ Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` 
 - `epg.updated {sources?}`: guide content may have changed. Emitted by source publishes, source config changes, and event-channel guide changes.
 - `channel.unhealthy {channel_id, name, detail}`
 - `channel.recovered {channel_id, name}`
+- UI-only (SSE, not hook event types): `channel.probed {channel_id}`, `settings.changed {keys, revision}`, `integration.changed {kind, revision}`.
 
 **Which mutations affect which outputs.** Every write goes through one service function. It computes the affected slugs *before* deleting anything, then invalidates caches and emits events.
 
@@ -190,7 +226,9 @@ Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` 
 | channel delete | all that contained it (captured before delete) | `playlist.changed` |
 | item add / remove / move / replace | that playlist | `playlist.changed` |
 | playlist create / rename / delete | that slug | `playlist.changed` |
-| `acexy_base` / `vk_base` change | playlists with ≥1 channel of that kind | `playlist.changed` |
+| integration change that alters its playback base (acexy, or the engine without acexy, or the VK URL) or turns it on/off | playlists with ≥1 channel of that kind | `playlist.changed`, then `integration.changed` |
+| integration change with the same playback base (engine URL behind acexy, check schedule) | — | `integration.changed`, SSE only |
+| settings change (guide refresh) | — | `settings.changed`, SSE only |
 | EPG source publish | all | `epg.updated` |
 | EPG source enable / disable / delete / priority change | all (EPG cache flushed) | `epg.updated` |
 | EPG source URL change | — (current gen stays served until the new URL's first successful publish; fetches stay unconditional until then per §6, first one runs immediately) | `epg.updated` on that publish |
@@ -206,7 +244,6 @@ Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` 
 **Hook kind** (0.3.0: webhooks only; the Jellyfin kind and its follow-up resend were removed)
 - `webhook`: `{method, url, headers{}}`. The body is always the envelope above. Body templates are deferred.
 - Integrations are recipes, not kinds: Jellyfin is `POST {base}/ScheduledTasks/Running/{RefreshGuide task id}` with `Authorization: MediaBrowser Token="…"` (docs/deploy.md). lineup never discovers task ids or schedules extra refreshes; the user supplies the full URL.
-- Migration 0005 converts 0.2 Jellyfin hooks; one without a stored task id becomes disabled with `REFRESH_GUIDE_TASK_ID` in its URL, can't be enabled until the URL is fixed, and is reported at startup.
 - Every hook has a "test" action that sends a synthetic event.
 - Secrets (header values) are write-only in the API and masked in responses.
 
@@ -215,11 +252,13 @@ Final suggestions: `name` from the cleaned engine name, `tvg_id` and `tvg_logo` 
 This measures **swarm health**, not a guarantee that playback works.
 
 **Probe**
-1. `GET {engine_base}/ace/getstream?id=<id>&format=json&pid=lineup-probe-<uuid>` (a distinct pid per probe). Parse the `{response: {stat_url, command_url, …}, error}` envelope.
-2. The returned URLs point at the engine's own loopback address. **Rebase them** onto `engine_base`, keeping path and query.
+1. `GET {engine_url}/ace/getstream?id=<id>&format=json&pid=lineup-probe-<uuid>` (a distinct pid per probe). Parse the `{response: {stat_url, command_url, …}, error}` envelope.
+2. The returned URLs point at the engine's own loopback address. **Rebase them** onto the engine URL: its scheme, host and port, with its base path (an engine behind a reverse proxy) put in front of the returned path; the query is kept.
 3. Poll `stat_url` every 2s for up to 20s. Every request has a 5s timeout.
 4. Result: `ok` if `peers > 0` or `status == "dl"`, `dead` if the session started but stayed at `prebuf` with 0 peers. Any engine or network failure is `unknown`, with the detail recorded.
 5. Always send `command_url?method=stop` for the session this probe created, and only that one, with a 5s timeout.
+
+**Checks need acexy.** Without acexy (or without the engine) checks are unavailable: manual checks get 409, also with `force`, and the schedule does nothing. Only acexy can tell whether a stream is being watched; even then the guard sees acexy's clients, not players connected to the engine directly.
 
 **Activity guard (periodic runs)**
 - Before *each* probe, check acexy status.
@@ -230,12 +269,13 @@ This measures **swarm health**, not a guarantee that playback works.
 - Viewers can still start between checks. This is best effort; check concurrent playback behaviour before turning the schedule on.
 
 **Schedule**
-- 10 min after start, then every `probe_interval_hours` (default 0, which is **off**). A run stopped by the guard is retried after 30 min.
+- 10 min after start, then every `probe_interval_hours` of the Acestream integration (default 0, which is **off**). A run stopped by the guard is retried after 30 min.
 - One channel at a time.
 - Manual probes from the UI or CLI (`POST /probe {ids?: [], force: bool}`) apply the same guard unless `force` is set. With ids the request waits and returns the results; without, the run continues in the background (202).
 - An acexy per-id status that is a 200 is read for a client count (`clients`, `streams`, `viewers` or `active`); when it has none, the id is skipped rather than risk interrupting a viewer.
 
 **Results**
+- A result measured through an engine URL that has since changed is dropped, like one for a channel whose source changed.
 - Results only write `channel_health`.
   - Every attempt updates the `last_attempt*` fields.
   - Only `ok` and `dead` results update `conclusive`.
@@ -260,7 +300,11 @@ POST   /playlists/{slug}/items/{channel_id}/move {position}
        Channel/playlist DELETE return 204. Import-by-URL bodies are capped at 2 MiB.
 GET    /epg/sources  POST/PATCH/DELETE …     POST /epg/fetch         GET /epg/channels?q=  (search for tvg-id picker)
 GET    /hooks  POST/PATCH/DELETE …           POST /hooks/{id}/test   GET /hooks/{id}/deliveries
-GET/PATCH /settings
+GET/PATCH /settings                         -- {epg_refresh_hours, revision}
+GET    /integrations                         GET/PATCH /integrations/{kind}   (kind: acestream | vk | direct)
+POST   /integrations/{kind}/test {component: engine|acexy|proxy, url?}   -- connection test, saved or typed URL
+GET    /integrations/{kind}/status           -- the tests of every configured component, saved URLs
+GET    /channels/{id}/info?name=bool         -- live details (§4b); never starts a session
 GET    /backup   -- consistent SQLite snapshot (VACUUM INTO); not in OpenAPI
 POST   /import  {m3u_text | url, playlist_slug, dry_run}
        dry_run: strictly read-only; returns per-entry {parsed channel, kind, source_key, action: create|reuse|skip_in_playlist, diff vs existing}
@@ -290,7 +334,9 @@ probe [<id>...] [--force]     # POST /probe
 hook ls|add|rm|test <id> ; hook deliveries <id>
 refresh [<slug>...]           # POST /refresh
 import <file|url> --playlist <slug> [--dry-run]
-settings get|set <key> <value>
+settings get|set epg_refresh_hours <n>
+integration ls|show <kind>|set <kind> [--engine-url --acexy-url --probe-interval --url]|test <kind> [component] [--url]
+info <channel>          # GET /channels/{id}/info?name=true
 backup <file>
 usage                   # emit usage spec
 ```
@@ -301,13 +347,15 @@ usage                   # emit usage spec
 - **Channels**
   - Searchable table with group, health badge, source kind and playlist chips.
   - An "Add" slideover where you paste the input and see the suggestions with editable fields: tvg-id picker backed by `/epg/channels`, logo preview, playlist checkboxes.
-  - Row actions: probe, copy stream URL, open in VLC (`vlc-x-callback://x-callback-url/stream?url=…`) or Infuse (`infuse://x-callback-url/play?url=…`), edit, delete.
+  - Row actions: details, edit, probe, copy stream URL, open in VLC (`vlc-x-callback://x-callback-url/stream?url=…`) or Infuse (`infuse://x-callback-url/play?url=…`), delete. Channels of an unconfigured integration show a "not set up" badge and have no stream actions.
+  - Details (`/channels/:id`, a slideover; full width on phones): stored fields, the engine's name (once per opening), live acexy session numbers while watched (polled every 5 s while visible, one request at a time), latest check and Check now.
+- **Integrations**: one card each. Acestream: engine and acexy URLs with Test and live status, the check schedule, Check all. VK proxy: URL with Test and status. Direct: nothing to set up.
 - **Playlists**
   - A list, plus an editor with drag-to-reorder (position = chno) and add/remove channels.
   - Copy buttons for the m3u and epg URLs.
 - **EPG**: sources with last fetch status, a "fetch now" button, and a channel search.
 - **Hooks**: CRUD, test button, delivery log.
-- **Settings**: base URLs (with a "test" ping) and schedules.
+- **Settings**: the guide refresh schedule.
 - **Import**: paste or upload an m3u, preview, confirm.
 - **Live updates**: SSE invalidates queries.
 - **PWA**: manifest, icons, `apple-mobile-web-app-capable`, safe-area insets, mobile-first layout using UDashboard* components that collapse to a bottom nav or drawer on phones.
