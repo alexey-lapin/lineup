@@ -3,7 +3,7 @@ import { useQuery, useQueryCache } from '@pinia/colada'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { api, type ConnectionTestResult, type Integration, type IntegrationStatus, type SourceKind } from '../api'
-import { useAction, usePolling } from '../composables'
+import { liveEpoch, useAction, usePolling } from '../composables'
 import BaseUrlField from '../components/settings/BaseUrlField.vue'
 import StatusLine from '../components/settings/StatusLine.vue'
 import SettingsCard from '../components/settings/SettingsCard.vue'
@@ -37,14 +37,11 @@ const aceCard = useSection<Integration, AceDraft>(
       acexy_url: d.acexy_url.trim() || null,
       probe_interval_hours: d.probe_interval_hours
     }),
-  { validate: (d) => baseUrlError(d.engine_url, false) ?? baseUrlError(d.acexy_url, false) ?? aceRules(d) }
+  {
+    validate: (d) =>
+      baseUrlError(d.engine_url, false) ?? baseUrlError(d.acexy_url, false) ?? hoursError(d.probe_interval_hours)
+  }
 )
-
-/** Acestream rules beyond URL syntax (the URL fields show their own errors). */
-function aceRules(d: AceDraft): string | null {
-  if (!d.engine_url?.trim() && d.acexy_url?.trim()) return 'acexy needs the engine: set the engine URL too'
-  return hoursError(d.probe_interval_hours)
-}
 
 type VkDraft = { url: string }
 const vkCard = useSection<Integration, VkDraft>(
@@ -70,8 +67,8 @@ function setDraft(section: { draft: object }, key: string, value: string | numbe
 /** Poll the status of a configured integration; a saved change (new revision) polls again at once. */
 function useStatus(i: typeof ace) {
   return usePolling(
-    () => (i.value?.configured ? `${i.value.kind}:${i.value.revision}` : undefined),
-    () => api.integrationStatus(i.value!.kind),
+    () => (i.value?.configured ? `${i.value.kind}:${i.value.revision}:${liveEpoch.value}` : undefined),
+    (_, signal) => api.integrationStatus(i.value!.kind, signal),
     15000
   )
 }
@@ -188,6 +185,14 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
             />
             <StatusLine :result="statusOf(status.ace.data, 'acexy')" :error="status.ace.error" />
             <UAlert
+              v-if="!engineSet && acexySet"
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-power-off"
+              title="Acestream is off while the engine URL is empty"
+              description="Its channels are left out of playlists. The acexy address is kept for when you set the engine again."
+            />
+            <UAlert
               v-if="engineSet && !acexySet"
               color="info"
               variant="subtle"
@@ -213,8 +218,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
               @update:model-value="(v: unknown) => setDraft(aceCard, 'probe_interval_hours', Number(v))"
             />
           </UFormField>
-          <p v-if="aceCard.confirmed && aceRules(aceCard.draft)" class="text-sm text-error">
-            {{ aceRules(aceCard.draft) }}
+          <p v-if="aceCard.confirmed && hoursError(aceCard.draft.probe_interval_hours)" class="text-sm text-error">
+            {{ hoursError(aceCard.draft.probe_interval_hours) }}
           </p>
 
           <template #actions>

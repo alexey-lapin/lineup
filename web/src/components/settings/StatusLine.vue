@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import type { ConnectionTestResult } from '../../api'
 
-/** The live answer of a component at its saved URL (nothing while it is not configured). */
+/**
+ * The live answer of a component at its saved URL (nothing while it is not configured). A failed
+ * poll wins over an older answer, which may no longer be true.
+ */
 defineProps<{ result?: ConnectionTestResult; error?: string }>()
 </script>
 
 <template>
   <p v-if="result || error" role="status" aria-live="polite" class="text-sm flex items-start gap-1.5">
-    <template v-if="result">
+    <template v-if="result && !error">
       <UIcon
         :name="result.ok ? 'i-lucide-circle-check' : 'i-lucide-circle-alert'"
         class="size-4 mt-0.5 shrink-0"

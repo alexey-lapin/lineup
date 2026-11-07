@@ -184,9 +184,10 @@ describe('ImportPage', () => {
 
 describe('ChannelForm suggestions', () => {
   const resolution = (input: string, suggestion: Record<string, unknown>) => ({
-    source: { kind: 'raw', url: input },
+    source: { kind: 'direct', url: input },
     source_key: input,
     stream_url: input,
+    configured: true,
     duplicate_of: null,
     matches: [],
     warnings: [],

@@ -462,3 +462,38 @@ async fn results_through_a_replaced_engine_are_dropped() {
     assert!(!store.record_probe(measured, ProbeOutcome::Ok, None).await.unwrap());
     assert!(store.get_channel(c.id).await.unwrap().health.is_none());
 }
+
+/// A reported command URL is refused even when the engine's base path contains `/ace/stat/`.
+#[tokio::test]
+async fn passive_reads_only_request_statistics() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { break };
+            let mut buf = [0; 4096];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let line = String::from_utf8_lossy(&buf[..n])
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            log.lock().unwrap().push(line);
+            let body = r#"{"clients":1,"stat_url":"http://loopback/ace/command/session?method=stop"}"#;
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+        }
+    });
+    let live = lineup_server::live::acestream_live(&base, &format!("{base}/ace/stat/proxy"), OK).await;
+    assert_eq!(live.state, api_types::LiveState::Active);
+    assert!(live.reason.unwrap().contains("unexpected statistics URL"));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "only the acexy status was requested: {seen:?}");
+}

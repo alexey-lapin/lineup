@@ -104,8 +104,8 @@ export const api = {
 
   settings: () => unwrap(client.GET('/settings')),
   patchSettings: (body: SettingsPatch) => unwrap(client.PATCH('/settings', { body })),
-  channelInfo: (id: number, name = false) =>
-    unwrap(client.GET('/channels/{id}/info', { params: { path: { id }, query: { name } } })),
+  channelInfo: (id: number, name = false, signal?: AbortSignal) =>
+    unwrap(client.GET('/channels/{id}/info', { params: { path: { id }, query: { name } }, signal })),
 
   integrations: () => unwrap(client.GET('/integrations')),
   patchIntegration: (kind: SourceKind, body: IntegrationPatch) =>
@@ -114,8 +114,8 @@ export const api = {
     unwrap(
       client.POST('/integrations/{kind}/test', { params: { path: { kind } }, body: { component, url: url ?? null } })
     ),
-  integrationStatus: (kind: SourceKind) =>
-    unwrap(client.GET('/integrations/{kind}/status', { params: { path: { kind } } })),
+  integrationStatus: (kind: SourceKind, signal?: AbortSignal) =>
+    unwrap(client.GET('/integrations/{kind}/status', { params: { path: { kind } }, signal })),
   importM3u: (m3u_text: string, playlist_slug: string, dry_run: boolean) =>
     unwrap(client.POST('/import', { body: { m3u_text, playlist_slug, dry_run } })),
   refresh: (slugs: string[] = []) => unwrap(client.POST('/refresh', { body: { slugs } })),

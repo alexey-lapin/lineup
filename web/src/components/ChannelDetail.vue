@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { useQuery } from '@pinia/colada'
 import { useToast } from '@nuxt/ui/composables'
 import { computed, ref, watch } from 'vue'
 import { api, integrationName, sourceLabel, type AcestreamLive, type Channel } from '../api'
-import { copy, playerLinks, useAction, useInvalidateAll, usePolling } from '../composables'
+import { copy, liveEpoch, playerLinks, useAction, useInvalidateAll, usePolling } from '../composables'
 
 /**
  * What lineup knows about one channel: its stored fields, its integration's live view (for
@@ -17,23 +18,39 @@ const toast = useToast()
 const run = useAction()
 const invalidate = useInvalidateAll()
 
-const id = computed(() => (open.value ? props.channel?.id : undefined))
 const isAce = computed(() => props.channel?.source.kind === 'acestream')
+const { data: integrations } = useQuery({ key: ['integrations'], query: () => api.integrations() })
+const aceRevision = computed(() => integrations.value?.find((i) => i.kind === 'acestream')?.revision ?? -1)
+
+/**
+ * What the live answers describe: the open channel, its source, the Acestream config, and the event
+ * stream's epoch (reconnects and resyncs). A change drops answers in flight and asks again.
+ */
+const target = computed(() => {
+  const c = props.channel
+  if (!open.value || !c) return undefined
+  return { id: c.id, key: `${c.id}|${c.source_key}|${aceRevision.value}|${liveEpoch.value}` }
+})
 
 /** Live numbers, every 5 s while open and visible (no engine name: that is fetched once below). */
-const live = usePolling(() => id.value, (cid) => api.channelInfo(cid, false), 5000)
+const live = usePolling(
+  () => target.value?.key,
+  (_, signal) => api.channelInfo(target.value!.id, false, signal),
+  5000
+)
 
-/** The engine's name for the content id, once per opening. */
+/** The engine's name for the content id, once per opening (and again when the source or engine changes). */
 const engineName = ref<{ name?: string | null; error?: string | null } | null>(null)
 let nameSeq = 0
 watch(
-  [id, isAce],
-  async ([cid, ace]) => {
+  [() => target.value?.key, isAce],
+  async ([key, ace]) => {
     const mine = ++nameSeq
     engineName.value = null
-    if (cid === undefined || !ace) return
+    const t = target.value
+    if (key === undefined || !t || !ace) return
     try {
-      const info = await api.channelInfo(cid, true)
+      const info = await api.channelInfo(t.id, true)
       if (mine === nameSeq)
         engineName.value = { name: info.acestream?.engine_name, error: info.acestream?.engine_name_error }
     } catch (e) {
@@ -43,7 +60,7 @@ watch(
   { immediate: true }
 )
 
-const info = computed(() => (live.data.value?.channel_id === props.channel?.id ? live.data.value : undefined))
+const info = computed(() => live.data.value)
 const acestream = computed(() => info.value?.acestream ?? null)
 const checks = computed(() => info.value?.checks)
 
@@ -174,7 +191,8 @@ const links = computed(() => (props.channel?.stream_url ? playerLinks(props.chan
             </dd>
           </dl>
 
-          <div v-if="live.error.value && !acestream" class="text-sm text-error">
+          <!-- A failed poll hides older numbers: they may no longer be true. -->
+          <div v-if="live.error.value" class="text-sm text-error">
             Live numbers unavailable: {{ live.error.value }}
           </div>
           <template v-else-if="acestream">

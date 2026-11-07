@@ -82,13 +82,20 @@ export function useLiveUpdates() {
     es = new EventSource('/api/v1/events')
     // Refetch on every (re)connect, the first included: a change between the initial queries and
     // the subscription would otherwise go unnoticed.
-    es.addEventListener('ready', everything)
-    es.addEventListener('resync', everything)
+    const reload = () => {
+      liveEpoch.value++
+      return everything()
+    }
+    es.addEventListener('ready', reload)
+    es.addEventListener('resync', reload)
     es.addEventListener('playlist.changed', () => refetch('channels', 'playlists', 'playlist'))
     es.addEventListener('epg.updated', () => refetch('epg-sources'))
     es.addEventListener('settings.changed', () => refetch('settings'))
     // URL changes also come as playlist.changed; this covers the rest (schedule, acexy for checks).
-    es.addEventListener('integration.changed', () => refetch('integrations', 'channels'))
+    es.addEventListener('integration.changed', () => {
+      liveEpoch.value++
+      return refetch('integrations', 'channels')
+    })
     for (const e of ['channel.unhealthy', 'channel.recovered', 'channel.probed']) {
       es.addEventListener(e, () => refetch('channels', 'playlist'))
     }
@@ -97,49 +104,85 @@ export function useLiveUpdates() {
 }
 
 /**
- * Poll `fetch(key)` every `everyMs` while the component is mounted and the page is visible. A
- * request never overlaps the previous one, and an answer for an older key (or after unmounting) is
- * dropped. `key` returning undefined pauses polling; a new key clears the old data and polls now.
+ * Bumped when the event stream (re)connects, resyncs, or an integration changes: views that read
+ * live service data outside the query cache reload on it.
  */
-export function usePolling<K, T>(key: () => K | undefined, fetch: (key: K) => Promise<T>, everyMs: number) {
+export const liveEpoch = ref(0)
+
+/**
+ * Poll `fetch(key, signal)` every `everyMs` while the component is mounted and the page is visible.
+ * One request at a time: `refresh()` during a request runs once more right after it. Hiding the
+ * page, a new key, or unmounting aborts the request in flight and drops its answer. `key`
+ * returning undefined pauses polling; a new key clears the old data and polls now. A failed poll
+ * keeps the last data and sets `error` (show both: the data may be stale).
+ */
+export function usePolling<K, T>(
+  key: () => K | undefined,
+  fetch: (key: K, signal: AbortSignal) => Promise<T>,
+  everyMs: number
+) {
   const data = ref<T>()
   const error = ref('')
   const loading = ref(false)
   let timer: ReturnType<typeof setTimeout> | undefined
-  let seq = 0
+  let inflight: AbortController | undefined
+  let again = false
   let active = false
 
   const visible = () => typeof document === 'undefined' || !document.hidden
 
+  /** Abort the request in flight (its answer is dropped) and the pending timer. */
+  function stop() {
+    inflight?.abort()
+    inflight = undefined
+    again = false
+    clearTimeout(timer)
+    timer = undefined
+    loading.value = false
+  }
+
   async function tick() {
+    if (inflight) {
+      again = true
+      return
+    }
     clearTimeout(timer)
     timer = undefined
     const k = key()
     if (k === undefined || !active || !visible()) return
-    const mine = ++seq
+    const mine = new AbortController()
+    inflight = mine
     loading.value = true
     try {
-      const v = await fetch(k)
-      if (mine === seq) {
+      const v = await fetch(k, mine.signal)
+      if (!mine.signal.aborted) {
         data.value = v
         error.value = ''
       }
     } catch (e) {
-      if (mine === seq) error.value = e instanceof ApiError ? e.message : String(e)
+      if (!mine.signal.aborted) error.value = e instanceof ApiError ? e.message : String(e)
     } finally {
-      if (mine === seq) {
+      if (inflight === mine) {
+        inflight = undefined
         loading.value = false
-        if (active && visible()) timer = setTimeout(tick, everyMs)
+        if (again) {
+          again = false
+          void tick()
+        } else if (active && visible()) {
+          timer = setTimeout(tick, everyMs)
+        }
       }
     }
   }
 
-  const onVisibility = () => (visible() ? void tick() : clearTimeout(timer))
+  const onVisibility = () => {
+    stop()
+    if (visible()) void tick()
+  }
   watch(key, () => {
-    seq++ // drop answers for the old key
+    stop()
     data.value = undefined
     error.value = ''
-    loading.value = false
     void tick()
   })
   onMounted(() => {
@@ -149,8 +192,7 @@ export function usePolling<K, T>(key: () => K | undefined, fetch: (key: K) => Pr
   })
   onBeforeUnmount(() => {
     active = false
-    seq++
-    clearTimeout(timer)
+    stop()
     document.removeEventListener('visibilitychange', onVisibility)
   })
   return { data, error, loading, refresh: tick }

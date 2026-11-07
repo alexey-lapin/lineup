@@ -144,12 +144,13 @@ pub async fn acestream_live(acexy: &str, engine: &str, ace: &str) -> AcestreamLi
 
 /// The `response` of a stat URL, moved onto the configured engine. Ok(None): the session is gone.
 async fn read_stat(stat_url: &str, engine: &str) -> std::result::Result<Option<Value>, String> {
-    let url = crate::probe::rebase(stat_url, engine).ok_or("acexy reported an unusable statistics URL")?;
-    // Only the statistics endpoint, never a playback or command URL.
-    let path = url::Url::parse(&url).map(|u| u.path().to_string()).unwrap_or_default();
-    if !path.contains("/ace/stat/") {
+    // Only the statistics endpoint, never a playback or command URL. The reported path is checked
+    // before the engine's base path is put in front of it, so a base path cannot make it pass.
+    let reported = url::Url::parse(stat_url).map_err(|_| "acexy reported an unusable statistics URL")?;
+    if !is_stat_path(reported.path()) {
         return Err("acexy reported an unexpected statistics URL".into());
     }
+    let url = crate::probe::rebase(stat_url, engine).ok_or("acexy reported an unusable statistics URL")?;
     let (status, body) = connection::fetch_with(&CLIENT, &url, true, TIMEOUT).await?;
     if status == 404 {
         return Ok(None);
@@ -167,4 +168,38 @@ async fn read_stat(stat_url: &str, engine: &str) -> std::result::Result<Option<V
         return Err(format!("engine error: {text}"));
     }
     Ok(Some(v.get("response").cloned().unwrap_or(Value::Null)))
+}
+
+/// `/ace/stat/<segment>[/<segment>...]`: the engine's statistics endpoint, with plain segments only.
+fn is_stat_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/ace/stat/") else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stat_path;
+
+    #[test]
+    fn only_statistics_paths() {
+        assert!(is_stat_path("/ace/stat/abc/def"));
+        assert!(is_stat_path("/ace/stat/0f3a-1_b"));
+        for bad in [
+            "/ace/stat/",
+            "/ace/stat//x",
+            "/ace/stat/a/../cmd",
+            "/ace/cmd/abc/def",
+            "/ace/getstream",
+            "/ace/command/session",
+            "/proxy/ace/stat/abc",
+            "/ace/stat/a%2F..",
+        ] {
+            assert!(!is_stat_path(bad), "{bad}");
+        }
+    }
 }
