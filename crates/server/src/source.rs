@@ -191,10 +191,11 @@ fn query(url: &Url, key: &str) -> Option<String> {
     url.query_pairs().find(|(k, _)| k == key).map(|(_, v)| v.into_owned())
 }
 
-/// What follows the first `/<name>/` path segment, if there is one.
+/// What follows the last `/<name>/` path segment, if there is one. The last one: lineup appends the
+/// endpoint to a base URL, whose own path may contain the same segment (`http://proxy/vk`).
 fn segment_after<'a>(path: &'a str, name: &str) -> Option<&'a str> {
     let marker = format!("/{name}/");
-    path.find(&marker).map(|i| &path[i + marker.len()..])
+    path.rfind(&marker).map(|i| &path[i + marker.len()..])
 }
 
 fn is_vk_host(host: &str) -> bool {
@@ -254,6 +255,10 @@ mod tests {
             parse_input(&format!("http://proxy/acexy/ace/getstream?id={ACE}")).unwrap(),
             want
         );
+        assert_eq!(
+            parse_input(&format!("http://proxy/ace/ace/getstream?id={ACE}")).unwrap(),
+            want
+        );
         // Not an ace id: a direct URL.
         assert!(matches!(
             parse_input("http://x/ace/live.m3u8?id=1").unwrap(),
@@ -275,6 +280,9 @@ mod tests {
             "https://vk.com/somegroup?z=video-100200300_456000001%2Fpl_x&list=4d2c9e1a7f",
             "http://10.0.0.5:8099/vk/-100200300_456000001?list=4d2c9e1a7f",
             "http://proxy/vkproxy/vk/-100200300_456000001?list=4d2c9e1a7f",
+            // Base paths that contain the endpoint segment themselves.
+            "http://proxy/vk/vk/-100200300_456000001?list=4d2c9e1a7f",
+            "http://proxy/vk/-10_20/vk/-100200300_456000001?list=4d2c9e1a7f",
         ] {
             assert_eq!(parse_input(input).unwrap(), want, "{input}");
         }
@@ -358,5 +366,43 @@ mod tests {
         assert_eq!(normalize_base("x", "http://a:1/").unwrap(), "http://a:1");
         assert!(normalize_base("x", "a:1").is_err());
         assert!(normalize_base("x", "http://a/?q=1").is_err());
+    }
+}
+
+#[cfg(test)]
+mod round_trip {
+    use super::*;
+
+    /// What lineup renders under any base URL parses back to the same source.
+    #[test]
+    fn rendered_urls_parse_back() {
+        let sources = [
+            Source::Acestream {
+                id: "41169a3f280a5537b0611b775e926852d372743d".into(),
+            },
+            Source::Vk {
+                owner_id: -1,
+                video_id: 2,
+                list: Some("abc".into()),
+            },
+            Source::Vk {
+                owner_id: 5,
+                video_id: 6,
+                list: None,
+            },
+        ];
+        for base in [
+            "http://h:8080",
+            "http://proxy/acexy",
+            "http://proxy/vk",
+            "http://proxy/ace",
+            "http://proxy/vk/-10_20",
+            "https://proxy/a/vk/b/ace/",
+        ] {
+            for src in &sources {
+                let url = stream_url(src, base);
+                assert_eq!(&parse_input(&url).unwrap(), src, "{url}");
+            }
+        }
     }
 }
