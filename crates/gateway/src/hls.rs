@@ -37,6 +37,10 @@ pub struct Summary {
     /// A master playlist (has variants).
     pub master: bool,
     pub segments: usize,
+    /// `#EXT-X-MEDIA-SEQUENCE` of a media playlist.
+    pub media_sequence: Option<u64>,
+    /// `#EXT-X-TARGETDURATION` of a media playlist.
+    pub target_duration: Option<String>,
 }
 
 /// Rewrite `body` (fetched from `base`). `map` gets each absolute URI, its kind and its context,
@@ -92,6 +96,12 @@ pub fn rewrite(
                     }
                 }
                 "EXT-X-ENDLIST" => summary.ended = true,
+                "EXT-X-MEDIA-SEQUENCE" => {
+                    summary.media_sequence = tag.split_once(':').and_then(|(_, v)| v.trim().parse().ok())
+                }
+                "EXT-X-TARGETDURATION" => {
+                    summary.target_duration = tag.split_once(':').map(|(_, v)| v.trim().to_string())
+                }
                 "EXT-X-STREAM-INF" => {
                     summary.master = true;
                     variant_tag = Some(t.to_string());

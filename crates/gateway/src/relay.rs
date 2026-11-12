@@ -36,6 +36,10 @@ struct Session {
     last_used: Instant,
     /// The one compatible refresh after expired URLs was used.
     refreshed: bool,
+    /// Serialises refreshes: concurrent expired requests join the one in progress.
+    refresh_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// What each media playlist entry last served, to prove a refresh continues its timeline.
+    served: HashMap<usize, Summary>,
 }
 
 /// A session used this recently is treated as being watched and is never evicted.
@@ -84,7 +88,7 @@ impl Relay {
                 "too many streams are being watched; try again later",
             );
         };
-        let (body, _) = match self.fetch_playlist(&sid, &d.manifest_url, true).await {
+        let (body, _) = match self.fetch_playlist(&sid, &d.manifest_url, None).await {
             Ok(r) => r,
             Err(Refetch::Response(r)) => return r,
             Err(Refetch::Expired) => return self.expired(&sid),
@@ -115,10 +119,10 @@ impl Relay {
             return text(StatusCode::NOT_FOUND, "no such resource");
         };
         match kind {
-            Kind::Playlist => match self.fetch_playlist(sid, url.as_str(), false).await {
+            Kind::Playlist => match self.fetch_playlist(sid, url.as_str(), Some(n)).await {
                 Ok((body, _)) => playlist_response(body, head),
-                Err(Refetch::Expired) => match self.refresh(sid, n).await {
-                    Some(new_url) => match self.fetch_playlist(sid, new_url.as_str(), false).await {
+                Err(Refetch::Expired) => match self.refresh(sid, n, &url).await {
+                    Some(new_url) => match self.fetch_playlist(sid, new_url.as_str(), Some(n)).await {
                         Ok((body, _)) => playlist_response(body, head),
                         Err(_) => self.expired(sid),
                     },
@@ -136,22 +140,36 @@ impl Relay {
         text(StatusCode::GONE, "the stream's URLs expired; open the channel again")
     }
 
-    /// After expired URLs: look the page up again and, once per session, move entry `n` onto the
-    /// new master's playlist with the same definition. None when that is not possible.
-    async fn refresh(&self, sid: &str, n: usize) -> Option<Url> {
-        let (page, context) = {
+    /// After `failed` (entry `n`'s URL) expired: look the page up again and, once per session,
+    /// move entry `n` onto the new master's playlist with the same definition, if its timeline
+    /// provably continues the one served so far. Concurrent callers join one refresh; a caller whose
+    /// URL was already replaced gets the replacement. None when no continuation is possible.
+    async fn refresh(&self, sid: &str, n: usize, failed: &Url) -> Option<Url> {
+        let lock = self.sessions.lock().unwrap().get(sid)?.refresh_lock.clone();
+        let _one = lock.lock().await;
+        let (page, context, old_live, served) = {
             let sessions = self.sessions.lock().unwrap();
             let s = sessions.get(sid)?;
-            if s.refreshed {
+            let (current, _, context) = s.entries.get(n)?;
+            if current != failed {
+                // Another request already refreshed this entry: a late answer for the old URL.
+                return Some(current.clone());
+            }
+            if s.refreshed || context.is_empty() {
                 return None;
             }
-            (s.page.clone(), s.entries.get(n)?.2.clone())
+            (
+                s.page.clone(),
+                context.clone(),
+                s.descriptor.is_live,
+                s.served.get(&n).cloned()?,
+            )
         };
-        if context.is_empty() {
-            return None;
-        }
         self.extractor.invalidate(&page);
         let d = self.extractor.descriptor(&page, Priority::Playback).await.ok()?;
+        if d.is_live != old_live {
+            return None; // live and recording are different timelines
+        }
         let (body, final_url) = self.get_text(&d.manifest_url, &d.headers).await.ok()?;
         let mut found = None;
         hls::rewrite(&body, &final_url, |u, k, c| {
@@ -162,13 +180,19 @@ impl Relay {
         })
         .ok()?;
         let new_url = found?;
+        let (media, media_url) = self.get_text(new_url.as_str(), &d.headers).await.ok()?;
+        let (_, next) = hls::rewrite(&media, &media_url, |_, _, _| Ok(String::new())).ok()?;
+        if !continues(&served, &next) {
+            tracing::info!("session {sid}: refreshed playlist does not continue the timeline; ending the session");
+            return None;
+        }
         let mut sessions = self.sessions.lock().unwrap();
         let s = sessions.get_mut(sid)?;
         s.refreshed = true;
         s.descriptor = d;
         s.index.insert(new_url.to_string(), n);
         s.entries[n].0 = new_url.clone();
-        tracing::info!("session {sid}: refreshed expired URLs for a compatible playlist");
+        tracing::info!("session {sid}: refreshed expired URLs for the same playlist");
         Some(new_url)
     }
 
@@ -197,7 +221,7 @@ impl Relay {
             match (summary.master, first_variant) {
                 (true, Some(v)) => url = v,
                 _ => {
-                    if summary.ended {
+                    if summary.ended && summary.segments > 0 {
                         self.extractor.observed_ended(page, &d);
                     }
                     return Ok((d, summary));
@@ -231,6 +255,8 @@ impl Relay {
                 index: HashMap::new(),
                 last_used: now,
                 refreshed: false,
+                refresh_lock: Default::default(),
+                served: HashMap::new(),
             },
         );
         Some(sid)
@@ -238,7 +264,10 @@ impl Relay {
 
     /// Fetch and rewrite a playlist of session `sid`. `top`: the master, served at
     /// `/play/<rule>.m3u8`, whose URIs need the `s/<sid>/` prefix.
-    async fn fetch_playlist(&self, sid: &str, url: &str, top: bool) -> Result<(String, Summary), Refetch> {
+    /// `entry`: the media playlist's entry index; None for the master, served at
+    /// `/play/<rule>.m3u8`, whose URIs need the `s/<sid>/` prefix.
+    async fn fetch_playlist(&self, sid: &str, url: &str, entry: Option<usize>) -> Result<(String, Summary), Refetch> {
+        let top = entry.is_none();
         let headers = {
             let sessions = self.sessions.lock().unwrap();
             match sessions.get(sid) {
@@ -290,9 +319,15 @@ impl Relay {
         });
         match rewritten {
             Ok((body, summary)) => {
-                if summary.ended && !summary.master {
-                    // A finished media playlist: unless the lookup said live, keep it longer.
+                if summary.ended && !summary.master && summary.segments > 0 {
+                    // A finished media playlist with content: unless the lookup said live, keep it
+                    // longer. An empty one is a recording still being processed.
                     self.extractor.observed_ended(&s.page, &s.descriptor);
+                }
+                if let Some(n) = entry
+                    && !summary.master
+                {
+                    s.served.insert(n, summary.clone());
                 }
                 Ok((body, summary))
             }
@@ -399,6 +434,19 @@ impl Relay {
     }
 }
 
+/// Whether `next` (the refreshed media playlist) continues `prev` (what the session served): same
+/// target duration, its media sequence inside the window already served or just after it, and no
+/// switch from a growing playlist to a finished one: a live broadcast is never continued as a
+/// finished playlist (it might be the recording); the player reopens instead.
+fn continues(prev: &Summary, next: &Summary) -> bool {
+    let (a, b) = (prev.media_sequence.unwrap_or(0), next.media_sequence.unwrap_or(0));
+    prev.target_duration == next.target_duration
+        && !(next.ended && !prev.ended)
+        && next.segments > 0
+        && b >= a
+        && b <= a + prev.segments as u64
+}
+
 /// Statuses a CDN answers for an expired or rejected signed URL (VK: 400).
 fn expired_status(status: u16) -> bool {
     matches!(status, 400 | 401 | 403 | 404 | 410)
@@ -487,6 +535,42 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuity() {
+        let s = |seq: u64, segs: usize, ended: bool| Summary {
+            ended,
+            master: false,
+            segments: segs,
+            media_sequence: Some(seq),
+            target_duration: Some("6".into()),
+        };
+        assert!(
+            continues(&s(0, 1361, true), &s(0, 1361, true)),
+            "the same recording, re-signed"
+        );
+        assert!(
+            continues(&s(100, 10, false), &s(104, 10, false)),
+            "a live window that moved on"
+        );
+        assert!(
+            !continues(&s(100, 10, false), &s(105, 10, true)),
+            "live is never continued as finished"
+        );
+        assert!(
+            !continues(&s(5000, 10, false), &s(0, 1361, true)),
+            "live replaced by its recording"
+        );
+        assert!(
+            !continues(&s(0, 10, false), &s(0, 1361, true)),
+            "growing to finished with a reset"
+        );
+        assert!(!continues(&s(100, 10, false), &s(50, 10, false)), "sequence went back");
+        assert!(!continues(&s(100, 10, false), &s(200, 10, false)), "a gap");
+        let mut other = s(0, 1361, true);
+        other.target_duration = Some("4".into());
+        assert!(!continues(&s(0, 1361, true), &other), "another encode");
+    }
 
     #[test]
     fn ranges() {
