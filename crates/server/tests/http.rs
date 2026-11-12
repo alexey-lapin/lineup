@@ -210,6 +210,50 @@ async fn gateway_failures_fail_writes_and_keep_output() {
     assert_eq!(l.as_array().unwrap().len(), 1, "the import wrote nothing: {l}");
     assert_eq!(m3u(&app, "jf").await, before, "stored output is unaffected");
 
+    // A per-item gateway failure is a gateway error, not invalid input.
+    gw.fail(Failure::ItemErrors);
+    let (s, _, e) = call(
+        &app,
+        "POST",
+        "/api/v1/channels",
+        Some(json!({"name": "Beta", "route_id": ace, "input": ACE2})),
+    )
+    .await;
+    assert_eq!(
+        (s, e["error"]["code"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("gateway_error")),
+        "{e}"
+    );
+    // ... while an import skips and lists such entries.
+    let (s, _, r) = call(
+        &app,
+        "POST",
+        "/api/v1/import",
+        Some(json!({"m3u_text": format!("#EXTM3U\n#EXTINF:-1,B\n{ACE2}\n"), "playlist_slug": "x", "route_id": ace, "dry_run": true})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert!(
+        r["skipped_lines"][0].as_str().unwrap().contains("could not process"),
+        "{r}"
+    );
+
+    // Answers in another order than asked are refused, never assigned by position.
+    gw.fail(Failure::ReorderMatch);
+    let text = format!("#EXTM3U\n#EXTINF:-1,A\n{ACE}\n#EXTINF:-1,B\n{ACE2}\n");
+    let (s, _, e) = call(
+        &app,
+        "POST",
+        "/api/v1/import",
+        Some(json!({"m3u_text": text, "playlist_slug": "new", "route_id": ace})),
+    )
+    .await;
+    assert_eq!(
+        (s, e["error"]["code"].as_str()),
+        (StatusCode::BAD_GATEWAY, Some("gateway_error")),
+        "{e}"
+    );
+
     gw.fail(Failure::WrongContract);
     let (s, _, e) = call(
         &app,

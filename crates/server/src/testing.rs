@@ -30,6 +30,12 @@ pub enum Failure {
     ServerError,
     /// `/v1/info` reports another contract version.
     WrongContract,
+    /// `/v1/match` answers its results in reverse order.
+    ReorderMatch,
+    /// `/v1/match` answers an item error for every input.
+    ItemErrors,
+    /// `/v1/check` answers for another ref.
+    WrongCheckRef,
 }
 
 struct Inner {
@@ -204,7 +210,22 @@ async fn matching(State(s): St, Json(req): Json<MatchRequest>) -> Response {
     if let Some(r) = failing(&mut i, "match") {
         return r;
     }
-    let results = req
+    if i.failure == Failure::ItemErrors {
+        let results = req
+            .inputs
+            .iter()
+            .map(|input| MatchResult::Error {
+                input: input.clone(),
+                error: ErrorDetail {
+                    code: "engine_error".into(),
+                    message: "the engine failed".into(),
+                },
+            })
+            .collect();
+        return Json(MatchResponse { results }).into_response();
+    }
+    let reorder = i.failure == Failure::ReorderMatch;
+    let mut results: Vec<MatchResult> = req
         .inputs
         .iter()
         .map(|input| match req.rule.as_str() {
@@ -253,6 +274,9 @@ async fn matching(State(s): St, Json(req): Json<MatchRequest>) -> Response {
             },
         })
         .collect();
+    if reorder {
+        results.reverse();
+    }
     Json(MatchResponse { results }).into_response()
 }
 
@@ -292,8 +316,13 @@ async fn check(State(s): St, Json(req): Json<CheckRequest>) -> Response {
     } else {
         i.outcome
     };
+    let wrong = i.failure == Failure::WrongCheckRef;
     Json(CheckResponse {
-        reference: req.reference,
+        reference: if wrong {
+            "acestream://other".into()
+        } else {
+            req.reference
+        },
         outcome,
         reason: skipped.then(|| "busy".into()),
         content_state: i.content_state,

@@ -578,6 +578,8 @@ async fn resync_publishes_consistently() {
             rows: resync_rows(&[(a.id, ra, a_new), (b.id, rb, b_new), (c.id, rc + 1, c_new)]),
             report: new_report(ResyncTrigger::Manual, 3, Some("1".into()), Some("2".into())),
             all_or_nothing: false,
+            name: None,
+            enabled: None,
         })
         .await
         .unwrap();
@@ -611,23 +613,36 @@ async fn resync_publishes_consistently() {
             rows: vec![],
             report: new_report(ResyncTrigger::Manual, 0, None, None),
             all_or_nothing: false,
+            name: None,
+            enabled: None,
         })
         .await
         .unwrap_err();
     assert_eq!(err.code(), "conflict");
 
-    // A complete resync advances the synced revisions.
+    // A complete resync (every member validated) advances the synced revisions.
     let route_rev = s.route_row(2).await.unwrap().revision;
     let mut c_new = ace(ACE3);
     c_new.play_revision = Some("2".into());
+    let mut a2 = ace(ACE1);
+    a2.play = Some(format!("http://acexy-new:8080/ace/getstream?id={ACE1}"));
+    a2.play_revision = Some("2".into());
+    let mut b2 = ace(ACE2);
+    b2.play_revision = Some("2".into());
     let (route, report) = s
         .publish_resync(ResyncPublish {
             route_id: 2,
             expected_revision: route_rev,
             new_base: None,
-            rows: resync_rows(&[(c.id, srev(&s, c.id).await, c_new)]),
-            report: new_report(ResyncTrigger::RevisionChange, 1, Some("1".into()), Some("2".into())),
+            rows: resync_rows(&[
+                (a.id, srev(&s, a.id).await, a2),
+                (b.id, srev(&s, b.id).await, b2),
+                (c.id, srev(&s, c.id).await, c_new),
+            ]),
+            report: new_report(ResyncTrigger::RevisionChange, 3, Some("1".into()), Some("2".into())),
             all_or_nothing: false,
+            name: None,
+            enabled: None,
         })
         .await
         .unwrap();
@@ -655,6 +670,8 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
             rows: resync_rows(&[(a.id, ra, ace(ACE2)), (b.id, rb, ace(ACE2))]),
             report: new_report(ResyncTrigger::Manual, 2, None, None),
             all_or_nothing: false,
+            name: None,
+            enabled: None,
         })
         .await
         .unwrap();
@@ -678,6 +695,8 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
             rows: resync_rows(&[(a.id, ra, ace(ACE1))]),
             report: failed,
             all_or_nothing: true,
+            name: None,
+            enabled: None,
         })
         .await
         .unwrap_err();
@@ -703,6 +722,8 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
             rows: resync_rows(&[(a.id, ra, ace(ACE1)), (b.id, rb, ace(ACE2))]),
             report: new_report(ResyncTrigger::BaseUrlChange, 2, Some("1".into()), Some("1".into())),
             all_or_nothing: true,
+            name: None,
+            enabled: None,
         })
         .await
         .unwrap();
@@ -792,4 +813,93 @@ async fn a_new_database_has_one_direct_route() {
     assert_eq!(routes[0].config, RouteConfig::Direct {});
     assert_eq!(s.find_route("direct").await.unwrap().id, DIRECT);
     assert_eq!(s.find_route("1").await.unwrap().id, DIRECT);
+}
+
+#[tokio::test]
+async fn channel_ids_are_never_reused() {
+    let s = store().await;
+    let a = ch(&s, "A", 2, ace(ACE1), &[]).await.unwrap();
+    let staged = s.channel_source(a.id).await.unwrap();
+    s.delete_channel(a.id).await.unwrap();
+    let b = ch(&s, "B", 2, ace(ACE2), &[]).await.unwrap();
+    assert_ne!(a.id, b.id, "a deleted channel's id is not given to a new one");
+    // A resync staged for the deleted channel does not touch the new one.
+    let route_rev = s.route_row(2).await.unwrap().revision;
+    let (_, report) = s
+        .publish_resync(ResyncPublish {
+            route_id: 2,
+            expected_revision: route_rev,
+            new_base: None,
+            rows: resync_rows(&[(a.id, staged.source_revision, ace(ACE3))]),
+            report: new_report(ResyncTrigger::Manual, 1, None, None),
+            all_or_nothing: false,
+            name: None,
+            enabled: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.updated, 0);
+    assert_eq!(s.get_channel(b.id).await.unwrap().identity, format!("ace:{ACE2}"));
+}
+
+#[tokio::test]
+async fn channels_joining_during_a_resync_keep_it_incomplete() {
+    let s = store().await;
+    let a = ch(&s, "A", 2, ace(ACE1), &[]).await.unwrap();
+    let ra = srev(&s, a.id).await;
+    let route_rev = s.route_row(2).await.unwrap().revision;
+    // B joins after the snapshot was validated.
+    let b = ch(&s, "B", 2, ace(ACE2), &[]).await.unwrap();
+    let publish = |base: Option<&str>, all: bool| ResyncPublish {
+        route_id: 2,
+        expected_revision: route_rev,
+        new_base: base.map(Into::into),
+        rows: resync_rows(&[(a.id, ra, ace(ACE1))]),
+        report: new_report(ResyncTrigger::Manual, 1, Some("1".into()), Some("2".into())),
+        all_or_nothing: all,
+        name: None,
+        enabled: None,
+    };
+    // A base change is refused as a whole.
+    let err = s
+        .publish_resync(publish(Some("http://new:8099"), true))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "conflict");
+    assert!(err.to_string().contains("joined the route"), "{err}");
+    // A resync publishes what it validated but is not complete.
+    let (route, report) = s.publish_resync(publish(None, false)).await.unwrap();
+    assert!(!report.complete);
+    assert_eq!(report.skipped[0].channel_id, b.id);
+    assert_eq!(route.synced_play_revision, None);
+}
+
+#[tokio::test]
+async fn a_rejected_combined_route_edit_changes_nothing() {
+    let s = store().await;
+    s.create_route("Other", RouteConfig::Direct {}, true).await.unwrap();
+    let a = ch(&s, "A", 2, ace(ACE1), &[]).await.unwrap();
+    let ra = srev(&s, a.id).await;
+    let before = s.route_row(2).await.unwrap();
+    let mut rx = s.subscribe();
+    let err = s
+        .publish_resync(ResyncPublish {
+            route_id: 2,
+            expected_revision: before.revision,
+            new_base: Some("http://new:8099".into()),
+            rows: resync_rows(&[(a.id, ra, ace(ACE1))]),
+            report: new_report(ResyncTrigger::BaseUrlChange, 1, None, None),
+            all_or_nothing: true,
+            name: Some("Other".into()),
+            enabled: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "conflict");
+    let after = s.route_row(2).await.unwrap();
+    assert_eq!(
+        (after.config, after.name, after.revision),
+        (before.config, before.name, before.revision)
+    );
+    assert!(rx.try_recv().is_err(), "no events");
 }
