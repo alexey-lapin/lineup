@@ -41,6 +41,10 @@ pub struct Summary {
     pub media_sequence: Option<u64>,
     /// `#EXT-X-TARGETDURATION` of a media playlist.
     pub target_duration: Option<String>,
+    /// Each segment's `#EXTINF` duration, in order: identifies the encode's timeline.
+    pub durations: Vec<String>,
+    /// Init sections: their URL path (no query, which carries signatures) and byte range.
+    pub maps: Vec<String>,
 }
 
 /// Rewrite `body` (fetched from `base`). `map` gets each absolute URI, its kind and its context,
@@ -61,6 +65,7 @@ pub fn rewrite(
     out.push_str("#EXTM3U\n");
     let mut summary = Summary::default();
     let mut variant_tag: Option<String> = None;
+    let mut pending_duration: Option<String> = None;
     for raw in lines {
         let line = raw.trim_end_matches('\r');
         let t = line.trim();
@@ -96,6 +101,19 @@ pub fn rewrite(
                     }
                 }
                 "EXT-X-ENDLIST" => summary.ended = true,
+                "EXTINF" => {
+                    pending_duration = tag
+                        .split_once(':')
+                        .map(|(_, v)| v.split(',').next().unwrap_or("").trim().to_string())
+                }
+                "EXT-X-MAP" => {
+                    if let Some(uri) = attr(tag, "URI") {
+                        let path = resolve(base, &uri)?.path().to_string();
+                        summary
+                            .maps
+                            .push(format!("{path} {}", attr(tag, "BYTERANGE").unwrap_or_default()));
+                    }
+                }
                 "EXT-X-MEDIA-SEQUENCE" => {
                     summary.media_sequence = tag.split_once(':').and_then(|(_, v)| v.trim().parse().ok())
                 }
@@ -138,6 +156,7 @@ pub fn rewrite(
             Some(tag) => (Kind::Playlist, tag),
             None => {
                 summary.segments += 1;
+                summary.durations.push(pending_duration.take().unwrap_or_default());
                 (Kind::Resource, String::new())
             }
         };

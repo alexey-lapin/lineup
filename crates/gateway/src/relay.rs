@@ -434,17 +434,24 @@ impl Relay {
     }
 }
 
-/// Whether `next` (the refreshed media playlist) continues `prev` (what the session served): same
-/// target duration, its media sequence inside the window already served or just after it, and no
-/// switch from a growing playlist to a finished one: a live broadcast is never continued as a
-/// finished playlist (it might be the recording); the player reopens instead.
+/// Whether `next` (the refreshed media playlist) continues `prev` (what the session served). It
+/// must be provably the same encode: same target duration and init sections, its media sequence
+/// inside the window already served (so they overlap), every overlapping segment with exactly the
+/// same duration, and no switch from a growing playlist to a finished one (a live broadcast is
+/// never continued as a finished playlist, which might be its recording; the player reopens).
 fn continues(prev: &Summary, next: &Summary) -> bool {
     let (a, b) = (prev.media_sequence.unwrap_or(0), next.media_sequence.unwrap_or(0));
-    prev.target_duration == next.target_duration
-        && !(next.ended && !prev.ended)
-        && next.segments > 0
-        && b >= a
-        && b <= a + prev.segments as u64
+    if prev.target_duration != next.target_duration
+        || prev.maps != next.maps
+        || (next.ended && !prev.ended)
+        || next.segments == 0
+        || b < a
+    {
+        return false;
+    }
+    let offset = (b - a) as usize;
+    let overlap = prev.durations.len().saturating_sub(offset).min(next.durations.len());
+    overlap > 0 && prev.durations[offset..offset + overlap] == next.durations[..overlap]
 }
 
 /// Statuses a CDN answers for an expired or rejected signed URL (VK: 400).
@@ -538,38 +545,49 @@ mod tests {
 
     #[test]
     fn continuity() {
-        let s = |seq: u64, segs: usize, ended: bool| Summary {
+        let s = |seq: u64, durs: &[&str], ended: bool| Summary {
             ended,
             master: false,
-            segments: segs,
+            segments: durs.len(),
             media_sequence: Some(seq),
             target_duration: Some("6".into()),
+            durations: durs.iter().map(|d| d.to_string()).collect(),
+            maps: vec!["/v/init.mp4 ".into()],
         };
+        let rec = ["6.000", "6.000", "4.200"];
         assert!(
-            continues(&s(0, 1361, true), &s(0, 1361, true)),
+            continues(&s(0, &rec, true), &s(0, &rec, true)),
             "the same recording, re-signed"
         );
         assert!(
-            continues(&s(100, 10, false), &s(104, 10, false)),
+            continues(
+                &s(100, &["6.0", "6.0", "5.9"], false),
+                &s(101, &["6.0", "5.9", "6.0"], false)
+            ),
             "a live window that moved on"
         );
         assert!(
-            !continues(&s(100, 10, false), &s(105, 10, true)),
+            !continues(&s(0, &rec, true), &s(0, &["6.000", "6.000", "4.000"], true)),
+            "another encode with other segment timing"
+        );
+        let mut other_init = s(0, &rec, true);
+        other_init.maps = vec!["/v/other-init.mp4 ".into()];
+        assert!(!continues(&s(0, &rec, true), &other_init), "another init section");
+        assert!(
+            !continues(&s(100, &["6.0"; 10], false), &s(105, &["6.0"; 10], true)),
             "live is never continued as finished"
         );
         assert!(
-            !continues(&s(5000, 10, false), &s(0, 1361, true)),
-            "live replaced by its recording"
+            !continues(&s(100, &["6.0"; 10], false), &s(50, &["6.0"; 10], false)),
+            "sequence went back"
         );
         assert!(
-            !continues(&s(0, 10, false), &s(0, 1361, true)),
-            "growing to finished with a reset"
+            !continues(&s(100, &["6.0"; 10], false), &s(110, &["6.0"; 10], false)),
+            "no overlap to compare"
         );
-        assert!(!continues(&s(100, 10, false), &s(50, 10, false)), "sequence went back");
-        assert!(!continues(&s(100, 10, false), &s(200, 10, false)), "a gap");
-        let mut other = s(0, 1361, true);
-        other.target_duration = Some("4".into());
-        assert!(!continues(&s(0, 1361, true), &other), "another encode");
+        let mut td = s(0, &rec, true);
+        td.target_duration = Some("4".into());
+        assert!(!continues(&s(0, &rec, true), &td), "another target duration");
     }
 
     #[test]
