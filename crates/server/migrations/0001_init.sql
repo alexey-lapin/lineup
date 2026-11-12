@@ -1,4 +1,4 @@
--- lineup 0.4 schema. Databases of lineup 0.3 and older are not upgraded: the server refuses to
+-- lineup 0.5 schema. Databases of lineup 0.4 and older are not upgraded: the server refuses to
 -- open them (their migration 0001 differs from this one).
 
 -- App-wide settings; each value is JSON.
@@ -7,37 +7,50 @@ CREATE TABLE settings (
     value TEXT NOT NULL
 );
 
--- One row per integration type; a blank required URL means "not configured".
-CREATE TABLE integrations (
-    kind       TEXT PRIMARY KEY CHECK (kind IN ('acestream', 'vk', 'direct')),
-    config     TEXT    NOT NULL, -- JSON of api_types::IntegrationConfig
-    revision   INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT    NOT NULL
+-- Ways to play channels. `direct`: the channel's source URL is emitted as-is. `gateway`: a gateway
+-- service (base_url) and one of its rules turn the source into a play URL.
+CREATE TABLE routes (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                 TEXT    NOT NULL UNIQUE,
+    kind                 TEXT    NOT NULL CHECK (kind IN ('direct', 'gateway')),
+    base_url             TEXT,  -- gateway only
+    rule                 TEXT,  -- gateway only; immutable
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    revision             INTEGER NOT NULL DEFAULT 0,
+    -- The gateway rule's revisions at the last resync in which every channel succeeded.
+    synced_match_revision TEXT,
+    synced_play_revision  TEXT,
+    last_resync          TEXT, -- JSON of api_types::ResyncReport
+    created_at           TEXT    NOT NULL,
+    updated_at           TEXT    NOT NULL,
+    CHECK ((kind = 'direct' AND base_url IS NULL AND rule IS NULL)
+        OR (kind = 'gateway' AND base_url IS NOT NULL AND rule IS NOT NULL))
 );
 
-INSERT INTO integrations (kind, config, updated_at) VALUES
-    ('acestream', '{"kind":"acestream","engine_url":"","acexy_url":null,"probe_interval_hours":0}',
-     strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    ('vk', '{"kind":"vk","url":""}', strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    ('direct', '{"kind":"direct"}', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
+INSERT INTO routes (name, kind, created_at, updated_at) VALUES
+    ('Direct', 'direct', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
 
 CREATE TABLE channels (
-    id          INTEGER PRIMARY KEY,
-    name        TEXT    NOT NULL,
-    group_title TEXT,
-    tvg_id      TEXT,
-    tvg_logo    TEXT,
-    -- Also the channel's integration (one per kind).
-    source_kind TEXT    NOT NULL CHECK (source_kind IN ('acestream', 'vk', 'direct')),
-    source      TEXT    NOT NULL, -- JSON of api_types::Source
-    source_key  TEXT    NOT NULL,
-    is_event    INTEGER NOT NULL DEFAULT 0,
-    kickoff_at  TEXT,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    created_at  TEXT    NOT NULL,
-    updated_at  TEXT    NOT NULL,
-    UNIQUE (source_kind, source_key)
+    id              INTEGER PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    group_title     TEXT,
+    tvg_id          TEXT,
+    tvg_logo        TEXT,
+    route_id        INTEGER NOT NULL REFERENCES routes (id) ON DELETE RESTRICT,
+    source          TEXT    NOT NULL, -- canonical reference (the gateway's `ref`, or the direct URL)
+    identity        TEXT    NOT NULL, -- de-duplication key within the route
+    play            TEXT,             -- gateway play reference (relative to base_url, or absolute)
+    play_revision   TEXT,             -- the rule's play_revision when `play` was obtained
+    source_revision INTEGER NOT NULL DEFAULT 0, -- bumped on every change of route/source/identity/play
+    is_event        INTEGER NOT NULL DEFAULT 0,
+    kickoff_at      TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL,
+    UNIQUE (route_id, identity)
 );
+
+CREATE INDEX channels_route ON channels (route_id);
 
 CREATE TABLE playlists (
     id         INTEGER PRIMARY KEY,
@@ -57,13 +70,15 @@ CREATE TABLE playlist_items (
 
 CREATE INDEX playlist_items_channel ON playlist_items (channel_id);
 
--- Latest probe attempt and last conclusive result per channel (no history).
+-- Latest check attempt and last conclusive result per channel (no history).
 CREATE TABLE channel_health (
     channel_id      INTEGER PRIMARY KEY REFERENCES channels (id) ON DELETE CASCADE,
     conclusive      TEXT CHECK (conclusive IN ('ok', 'dead')),
     conclusive_at   TEXT,
     last_attempt    TEXT NOT NULL CHECK (last_attempt IN ('ok', 'dead', 'unknown', 'skipped')),
     last_attempt_at TEXT NOT NULL,
+    content_state   TEXT CHECK (content_state IN ('live', 'ended_processing', 'recording')),
+    reason          TEXT,
     detail          TEXT -- JSON
 );
 

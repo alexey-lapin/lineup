@@ -1,25 +1,26 @@
 <script setup lang="ts">
-import { useQuery } from '@pinia/colada'
 import { useToast } from '@nuxt/ui/composables'
 import type { DropdownMenuItem, TableColumn } from '@nuxt/ui'
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, INTEGRATION_NAMES, sourceLabel, type Channel } from '../api'
+import { api, sourceLabel, type Channel } from '../api'
 import ChannelDetail from '../components/ChannelDetail.vue'
 import ChannelForm from '../components/ChannelForm.vue'
-import { copy, playerLinks, useAction, useChannels, useInvalidateAll } from '../composables'
+import { copy, playerLinks, useAction, useChannels, useInvalidateAll, useRoutes } from '../composables'
 import { floating } from '../safe-area'
 
 const toast = useToast()
 const run = useAction()
 const invalidate = useInvalidateAll()
 const { data, isPending, error } = useChannels()
-const { data: integrations } = useQuery({ key: ['integrations'], query: () => api.integrations() })
-/** Whether acestream checks can run, and why not (unknown until the integrations load). */
-const checks = computed(() => integrations.value?.find((i) => i.kind === 'acestream')?.checks)
+const { data: routes } = useRoutes()
+/** Routes whose gateway may check channels (the gateway says whether its rule can). */
+const gatewayRoutes = computed(
+  () => new Set((routes.value ?? []).filter((r) => r.config.kind === 'gateway').map((r) => r.id))
+)
 
-function notSetUp(c: Channel) {
-  return `The ${INTEGRATION_NAMES[c.source.kind]} integration is not set up: this channel is left out of playlists and guides.`
+function routeOff(c: Channel) {
+  return `The ${c.route_name} route is disabled: this channel is left out of playlists and guides.`
 }
 
 const search = ref('')
@@ -42,7 +43,8 @@ const rows = computed(() => {
     return (
       c.name.toLowerCase().includes(q) ||
       (c.tvg_id ?? '').toLowerCase().includes(q) ||
-      c.source_key.includes(q)
+      c.identity.toLowerCase().includes(q) ||
+      c.source.toLowerCase().includes(q)
     )
   })
 })
@@ -97,29 +99,28 @@ async function toggle(c: Channel) {
   }
 }
 
-const probing = ref<number | 'all' | null>(null)
+const checking = ref<number | 'all' | null>(null)
 
-async function probe(c: Channel) {
-  probing.value = c.id
-  const r = await run(() => api.probe([c.id]))
-  probing.value = null
+async function check(c: Channel) {
+  checking.value = c.id
+  const r = await run(() => api.check([c.id]))
+  checking.value = null
   if (!r.ok) return
   await invalidate()
   const res = r.value.results[0]
   if (!res) return
-  const reason = (res.detail as { error?: string; reason?: string } | null)?.error ?? (res.detail as { reason?: string } | null)?.reason
+  const reason = res.reason ?? (res.detail as { error?: string } | null)?.error ?? undefined
   const color = res.outcome === 'ok' ? 'success' : res.outcome === 'dead' ? 'error' : 'warning'
   toast.add({ title: `${c.name}: ${res.outcome}`, description: reason, color })
 }
 
-async function probeAll() {
-  probing.value = 'all'
-  const r = await run(() => api.probe([]), 'Probing all acestream channels in the background')
-  probing.value = null
-  void r
+async function checkAll() {
+  checking.value = 'all'
+  await run(() => api.check([]), 'Checking all channels in the background')
+  checking.value = null
 }
 
-/** Badge for the last conclusive probe; a hint when the latest attempt was inconclusive. */
+/** Badge for the last conclusive check; a hint when the latest attempt was inconclusive. */
 function health(c: Channel) {
   const h = c.health
   if (!h) return null
@@ -140,8 +141,8 @@ async function confirmDelete() {
 }
 
 function actions(c: Channel): DropdownMenuItem[][] {
-  const url = c.stream_url
-  const links = url ? playerLinks(url) : null
+  const url = c.play_url
+  const links = playerLinks(url)
   return [
     [
       { label: 'Details', icon: 'i-lucide-info', onSelect: () => openDetail(c) },
@@ -153,23 +154,12 @@ function actions(c: Channel): DropdownMenuItem[][] {
       }
     ],
     [
-      ...(c.source.kind === 'acestream'
-        ? [
-            {
-              label: 'Check health',
-              icon: 'i-lucide-activity',
-              disabled: checks.value?.available === false,
-              onSelect: () => probe(c)
-            }
-          ]
+      ...(gatewayRoutes.value.has(c.route_id)
+        ? [{ label: 'Check health', icon: 'i-lucide-activity', onSelect: () => check(c) }]
         : []),
-      ...(url && links
-        ? [
-            { label: 'Copy stream URL', icon: 'i-lucide-clipboard', onSelect: () => copy(url, toast) },
-            { label: 'Open in VLC', icon: 'i-lucide-play', href: links.vlc },
-            { label: 'Open in Infuse', icon: 'i-lucide-play', href: links.infuse }
-          ]
-        : [])
+      { label: 'Copy play URL', icon: 'i-lucide-clipboard', onSelect: () => copy(url, toast) },
+      { label: 'Open in VLC', icon: 'i-lucide-play', href: links.vlc },
+      { label: 'Open in Infuse', icon: 'i-lucide-play', href: links.infuse }
     ],
     [{ label: 'Delete', icon: 'i-lucide-trash', color: 'error', onSelect: () => (deleting.value = c) }]
   ]
@@ -190,10 +180,10 @@ function actions(c: Channel): DropdownMenuItem[][] {
             variant="subtle"
             label="Check all"
             class="hidden sm:inline-flex"
-            :loading="probing === 'all'"
-            :disabled="checks?.available === false"
-            :title="checks?.reason ?? undefined"
-            @click="probeAll"
+            :loading="checking === 'all'"
+            :disabled="gatewayRoutes.size === 0"
+            :title="gatewayRoutes.size === 0 ? 'Only gateway routes have checks' : undefined"
+            @click="checkAll"
           />
           <UButton icon="i-lucide-plus" label="Add" @click="openAdd" />
         </template>
@@ -235,8 +225,8 @@ function actions(c: Channel): DropdownMenuItem[][] {
               <div v-if="row.original.tvg_id" class="text-xs text-muted truncate">{{ row.original.tvg_id }}</div>
             </div>
             <UBadge v-if="row.original.is_event" label="event" color="warning" variant="subtle" size="sm" />
-            <UTooltip v-if="!row.original.configured" :content="floating()" :text="notSetUp(row.original)">
-              <UBadge label="not set up" color="neutral" variant="outline" size="sm" icon="i-lucide-plug" />
+            <UTooltip v-if="!row.original.route_enabled" :content="floating()" :text="routeOff(row.original)">
+              <UBadge label="route off" color="neutral" variant="outline" size="sm" icon="i-lucide-plug" />
             </UTooltip>
             <UTooltip v-if="health(row.original)" :content="floating()" :text="health(row.original)!.hint">
               <UBadge
@@ -246,7 +236,7 @@ function actions(c: Channel): DropdownMenuItem[][] {
                 size="sm"
               />
             </UTooltip>
-            <UIcon v-if="probing === row.original.id" name="i-lucide-loader-circle" class="size-4 animate-spin text-muted" />
+            <UIcon v-if="checking === row.original.id" name="i-lucide-loader-circle" class="size-4 animate-spin text-muted" />
           </div>
         </template>
         <template #group_title-cell="{ row }">
@@ -254,7 +244,7 @@ function actions(c: Channel): DropdownMenuItem[][] {
         </template>
         <template #source-cell="{ row }">
           <UBadge
-            :label="sourceLabel(row.original.source)"
+            :label="sourceLabel(row.original)"
             color="neutral"
             variant="outline"
             class="font-mono max-w-48 truncate"

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/api-types", "crates/server", "crates/cli", "crates/lineup"]
+members = ["crates/api-types", "crates/gateway-contract", "crates/server", "crates/cli", "crates/lineup"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/alexey-lapin/lineup"
@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 api-types = { package = "lineup-api-types", path = "crates/api-types" }
+gateway-contract = { path = "crates/gateway-contract" }
 lineup-server = { path = "crates/server" }
 lineup-cli = { path = "crates/cli" }
 

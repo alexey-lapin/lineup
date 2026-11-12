@@ -7,7 +7,7 @@
       "name": "MIT",
       "identifier": "MIT"
     },
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "servers": [
     {
@@ -31,7 +31,7 @@
           {
             "name": "q",
             "in": "query",
-            "description": "Case-insensitive substring of name, tvg-id or source key.",
+            "description": "Case-insensitive substring of name, tvg-id, source or identity.",
             "required": false,
             "schema": {
               "type": "string"
@@ -47,20 +47,22 @@
             }
           },
           {
-            "name": "kind",
+            "name": "route_id",
             "in": "query",
+            "description": "Only channels of this route.",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/SourceKind"
+              "type": "integer",
+              "format": "int64"
             }
           },
           {
             "name": "health",
             "in": "query",
-            "description": "Only channels whose last conclusive probe result is this (`ok` or `dead`).",
+            "description": "Only channels whose last conclusive check result is this (`ok` or `dead`).",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/ProbeOutcome"
+              "$ref": "#/components/schemas/CheckOutcome"
             }
           }
         ],
@@ -80,6 +82,7 @@
         }
       },
       "post": {
+        "summary": "Create a channel. Its input is validated with the route (a gateway route asks its gateway);\n502 when the gateway fails.",
         "operationId": "create_channel",
         "requestBody": {
           "content": {
@@ -111,6 +114,15 @@
             }
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -184,6 +196,7 @@
         }
       },
       "patch": {
+        "summary": "Update a channel. `route_id` and/or `input` revalidate its source with the route.",
         "operationId": "patch_channel",
         "parameters": [
           {
@@ -233,13 +246,31 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
     },
     "/channels/{id}/info": {
       "get": {
-        "summary": "What the services report about a channel right now. For acestream channels: live numbers of the\nsession acexy has open (never starts one), and the engine's name with `name=true`.",
+        "summary": "Stored check results and what the route's gateway observes now (never starts a stream).",
         "operationId": "channel_info",
         "parameters": [
           {
@@ -249,15 +280,6 @@
             "schema": {
               "type": "integer",
               "format": "int64"
-            }
-          },
-          {
-            "name": "name",
-            "in": "query",
-            "description": "Also ask the engine for the content's name (an extra request; once per view is enough).",
-            "required": false,
-            "schema": {
-              "type": "boolean"
             }
           }
         ],
@@ -272,6 +294,69 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/checks": {
+      "post": {
+        "summary": "Check channels through their routes' gateways. With `ids`, waits and returns their results\n(409 if a channel's route has no checks); without, starts a run over all enabled channels of\nroutes with checks in the background (202).",
+        "operationId": "checks",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -787,186 +872,6 @@
         }
       }
     },
-    "/integrations": {
-      "get": {
-        "operationId": "list_integrations",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Integration"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/integrations/{kind}": {
-      "get": {
-        "operationId": "get_integration",
-        "parameters": [
-          {
-            "name": "kind",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/SourceKind"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Integration"
-                }
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "summary": "Change an integration's config. A change that alters playback URLs, or turns the integration on\nor off, announces `playlist.changed` for the playlists with its channels.",
-        "operationId": "patch_integration",
-        "parameters": [
-          {
-            "name": "kind",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/SourceKind"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/IntegrationPatch"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Integration"
-                }
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/integrations/{kind}/status": {
-      "get": {
-        "summary": "Test every configured component with its saved URL (versions, acexy's active stream count).",
-        "operationId": "integration_status",
-        "parameters": [
-          {
-            "name": "kind",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/SourceKind"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/IntegrationStatus"
-                }
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/integrations/{kind}/test": {
-      "post": {
-        "summary": "Check that a component answers (at its saved URL, or `url` to try an unsaved value). Runs from\nthe lineup server; a failed connection is `ok: false`, an invalid URL is 422.",
-        "operationId": "test_integration",
-        "parameters": [
-          {
-            "name": "kind",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/SourceKind"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConnectionTestRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConnectionTestResult"
-                }
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/playlists": {
       "get": {
         "operationId": "list_playlists",
@@ -1344,69 +1249,6 @@
         }
       }
     },
-    "/probe": {
-      "post": {
-        "summary": "Check acestream channels (a short engine session each, skipped while acexy reports the stream\nbeing watched). With `ids`, waits and returns their results; without, starts a run over all\nenabled acestream channels in the background (202). 409 when checks are unavailable (no engine\nor no acexy).",
-        "operationId": "probe",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ProbeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProbeResponse"
-                }
-              }
-            }
-          },
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProbeResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/refresh": {
       "post": {
         "operationId": "refresh",
@@ -1444,6 +1286,7 @@
     },
     "/resolve": {
       "post": {
+        "summary": "Validate an input with a route and suggest channel metadata; nothing is written.",
         "operationId": "resolve",
         "requestBody": {
           "content": {
@@ -1465,7 +1308,368 @@
               }
             }
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/routes": {
+      "get": {
+        "operationId": "list_routes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Route"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a route. Its kind and (for gateway routes) its rule can't change later.",
+        "operationId": "create_route",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Route"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/routes/test": {
+      "post": {
+        "summary": "Test a route config (saved or not), and optionally an input with it. Runs from the lineup\nserver; it cannot show whether players reach the same address.",
+        "operationId": "test_route",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteTestResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/routes/{id}": {
+      "get": {
+        "operationId": "get_route",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Route"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a route; 409 while channels use it.",
+        "operationId": "delete_route",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Rename, enable or disable a route, or change a gateway route's base URL. A base URL change\nrevalidates every channel against the new address first and is refused (409) if any fails.",
+        "operationId": "patch_route",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoutePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Route"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/routes/{id}/resync": {
+      "post": {
+        "summary": "Revalidate every channel of a gateway route with its gateway and publish the changes. Channels\nthat fail keep their values and are listed.",
+        "operationId": "resync_route",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResyncReport"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/routes/{id}/status": {
+      "get": {
+        "summary": "The saved route's gateway, live: whether it answers, its rule and channels pending a resync.",
+        "operationId": "route_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RouteStatus"
+                }
+              }
+            }
+          },
+          "404": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1545,111 +1749,6 @@
   },
   "components": {
     "schemas": {
-      "AcestreamInfo": {
-        "type": "object",
-        "description": "Acestream section of a channel's details.",
-        "required": [
-          "live"
-        ],
-        "properties": {
-          "engine_name": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The name the engine reports for this content id (only when asked for with `name=true`)."
-          },
-          "engine_name_error": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why the name could not be read."
-          },
-          "live": {
-            "$ref": "#/components/schemas/AcestreamLive"
-          }
-        }
-      },
-      "AcestreamLive": {
-        "type": "object",
-        "description": "Live numbers of an acestream channel, read from the session acexy already has open. Reading them\nnever starts or stops a session.",
-        "required": [
-          "state"
-        ],
-        "properties": {
-          "clients": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Players connected to acexy for this stream.",
-            "minimum": 0
-          },
-          "downloaded": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Bytes downloaded in this session.",
-            "minimum": 0
-          },
-          "peers": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why the state is unavailable, or why the numbers are missing."
-          },
-          "speed_down": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Download speed, KB/s.",
-            "minimum": 0
-          },
-          "speed_up": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Upload speed, KB/s.",
-            "minimum": 0
-          },
-          "state": {
-            "$ref": "#/components/schemas/LiveState"
-          },
-          "status": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Engine session status (`prebuf`, `dl`, ...)."
-          },
-          "uploaded": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Bytes uploaded in this session.",
-            "minimum": 0
-          }
-        }
-      },
       "Availability": {
         "type": "object",
         "description": "Whether a feature is available, and why not.",
@@ -1674,9 +1773,12 @@
         "required": [
           "id",
           "name",
+          "route_id",
+          "route_name",
+          "route_enabled",
           "source",
-          "source_key",
-          "configured",
+          "identity",
+          "play_url",
           "is_event",
           "enabled",
           "playlists",
@@ -1684,10 +1786,6 @@
           "updated_at"
         ],
         "properties": {
-          "configured": {
-            "type": "boolean",
-            "description": "Whether the channel's integration is configured. Channels of an unconfigured integration\nstay listed but are left out of playlists and guides."
-          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -1705,7 +1803,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/ChannelHealth",
-                "description": "Swarm health from probes (acestream channels only); null until probed."
+                "description": "Check results; null until checked."
               },
               {
                 "type": "null"
@@ -1715,6 +1813,10 @@
           "id": {
             "type": "integer",
             "format": "int64"
+          },
+          "identity": {
+            "type": "string",
+            "description": "De-duplication key (unique per route)."
           },
           "is_event": {
             "type": "boolean"
@@ -1729,6 +1831,10 @@
           "name": {
             "type": "string"
           },
+          "play_url": {
+            "type": "string",
+            "description": "The URL emitted in playlists."
+          },
           "playlists": {
             "type": "array",
             "items": {
@@ -1736,19 +1842,20 @@
             },
             "description": "Slugs of playlists containing this channel."
           },
+          "route_enabled": {
+            "type": "boolean",
+            "description": "Whether the channel's route is enabled. Channels of a disabled route stay listed but are\nleft out of playlists and guides."
+          },
+          "route_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "route_name": {
+            "type": "string"
+          },
           "source": {
-            "$ref": "#/components/schemas/Source"
-          },
-          "source_key": {
             "type": "string",
-            "description": "Canonical key used for de-duplication (unique per source kind)."
-          },
-          "stream_url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Stream URL as emitted in playlists; null while the channel's integration is not configured."
+            "description": "Canonical source, as the route validated it."
           },
           "tvg_id": {
             "type": [
@@ -1771,7 +1878,9 @@
       "ChannelCreate": {
         "type": "object",
         "required": [
-          "name"
+          "name",
+          "route_id",
+          "input"
         ],
         "properties": {
           "enabled": {
@@ -1784,10 +1893,8 @@
             ]
           },
           "input": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "string",
+            "description": "What to play, in a form the route accepts (a URL for Direct; the gateway rule's input)."
           },
           "is_event": {
             "type": "boolean"
@@ -1809,16 +1916,10 @@
             },
             "description": "Playlists (by slug) to append the new channel to."
           },
-          "source": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Source",
-                "description": "Either a structured source, or free-form `input` (ace id, acestream:// link, vk.com URL, any URL)."
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "route_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The route that plays the channel."
           },
           "tvg_id": {
             "type": [
@@ -1836,7 +1937,7 @@
       },
       "ChannelHealth": {
         "type": "object",
-        "description": "Probe results of a channel. Only `ok` and `dead` are conclusive.",
+        "description": "Check results of a channel. Only `ok` and `dead` are conclusive.",
         "required": [
           "last_attempt",
           "last_attempt_at",
@@ -1846,7 +1947,7 @@
           "conclusive": {
             "oneOf": [
               {
-                "$ref": "#/components/schemas/ProbeOutcome",
+                "$ref": "#/components/schemas/CheckOutcome",
                 "description": "Last conclusive result (`ok` or `dead`); drives the badge and events."
               },
               {
@@ -1861,16 +1962,34 @@
             ],
             "format": "date-time"
           },
+          "content_state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContentState",
+                "description": "Content state reported by the last attempt."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "detail": {
             "type": "object",
-            "description": "Engine statistics or the error of the last attempt."
+            "description": "Gateway details of the last attempt."
           },
           "last_attempt": {
-            "$ref": "#/components/schemas/ProbeOutcome"
+            "$ref": "#/components/schemas/CheckOutcome"
           },
           "last_attempt_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last attempt was `unknown` or `skipped` (e.g. `busy`)."
           }
         }
       },
@@ -1879,22 +1998,10 @@
         "description": "What lineup can tell about a channel right now, beyond its stored fields.",
         "required": [
           "channel_id",
-          "kind",
-          "configured",
+          "route_id",
           "checks"
         ],
         "properties": {
-          "acestream": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/AcestreamInfo",
-                "description": "For acestream channels."
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "channel_id": {
             "type": "integer",
             "format": "int64"
@@ -1902,10 +2009,6 @@
           "checks": {
             "$ref": "#/components/schemas/Availability",
             "description": "Whether \"Check now\" can run for this channel."
-          },
-          "configured": {
-            "type": "boolean",
-            "description": "Whether the channel's integration is configured."
           },
           "health": {
             "oneOf": [
@@ -1918,14 +2021,33 @@
               }
             ]
           },
-          "kind": {
-            "$ref": "#/components/schemas/SourceKind"
+          "observation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Observation",
+                "description": "Null when the route can't observe (Direct, or a rule without `observe`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observation_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why there is no observation although the route supports it (e.g. the gateway is unreachable)."
+          },
+          "route_id": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
       "ChannelPatch": {
         "type": "object",
-        "description": "Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.",
+        "description": "Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.\n`route_id` and/or `input` revalidate the source (with the current source when only the route\nchanges).",
         "properties": {
           "enabled": {
             "type": [
@@ -1964,15 +2086,12 @@
               "null"
             ]
           },
-          "source": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/Source"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "route_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           },
           "tvg_id": {
             "type": [
@@ -1988,88 +2107,101 @@
           }
         }
       },
-      "Component": {
+      "CheckOutcome": {
         "type": "string",
-        "description": "A part of an integration with its own address.",
         "enum": [
-          "engine",
-          "acexy",
-          "proxy"
+          "ok",
+          "dead",
+          "unknown",
+          "skipped"
         ]
       },
-      "ConnectionTestRequest": {
+      "CheckRequest": {
         "type": "object",
-        "required": [
-          "component"
-        ],
         "properties": {
-          "component": {
-            "$ref": "#/components/schemas/Component"
+          "force": {
+            "type": "boolean",
+            "description": "Check even if the channel seems to be in use."
           },
-          "url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "A base URL to test instead of the saved one (e.g. an unsaved edit)."
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Channels to check; all enabled channels of routes that support checks when empty (that run\ncontinues in the background)."
           }
         }
       },
-      "ConnectionTestResult": {
+      "CheckResponse": {
         "type": "object",
-        "description": "Outcome of a connection test, run from the lineup server (it cannot show whether your players\ncan reach the same address).",
         "required": [
-          "component",
-          "ok",
-          "url",
-          "detail",
-          "elapsed_ms"
+          "background",
+          "results"
         ],
         "properties": {
-          "active_streams": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Streams acexy is serving now (acexy only).",
-            "minimum": 0
+          "background": {
+            "type": "boolean",
+            "description": "True when a run over all channels was started in the background; results then arrive as\nchannel updates and events."
           },
-          "component": {
-            "$ref": "#/components/schemas/Component"
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckResult"
+            },
+            "description": "Results, when specific channels were checked."
+          }
+        }
+      },
+      "CheckResult": {
+        "type": "object",
+        "required": [
+          "channel_id",
+          "outcome",
+          "detail",
+          "recorded"
+        ],
+        "properties": {
+          "channel_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "content_state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContentState"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "detail": {
-            "type": "string",
-            "description": "What the answer shows, or why the test failed."
+            "type": "object"
           },
-          "elapsed_ms": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
+          "outcome": {
+            "$ref": "#/components/schemas/CheckOutcome"
           },
-          "http_status": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "ok": {
-            "type": "boolean"
-          },
-          "url": {
-            "type": "string",
-            "description": "The URL that was requested."
-          },
-          "version": {
+          "reason": {
             "type": [
               "string",
               "null"
-            ],
-            "description": "Service version, when it reports one (the engine does; acexy does not)."
+            ]
+          },
+          "recorded": {
+            "type": "boolean",
+            "description": "False when the result was not stored (the channel or its route changed meanwhile, or the\ncheck did not run)."
           }
         }
+      },
+      "ContentState": {
+        "type": "string",
+        "description": "What a page source currently is, when the gateway can tell.",
+        "enum": [
+          "live",
+          "ended_processing",
+          "recording"
+        ]
       },
       "DeliveryTrigger": {
         "type": "string",
@@ -2327,9 +2459,25 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Stable machine-readable code: not_found, conflict, invalid, internal."
+            "description": "Stable machine-readable code: not_found, conflict, invalid, internal, gateway_unreachable,\ngateway_error, contract_mismatch."
           },
           "message": {
+            "type": "string"
+          }
+        }
+      },
+      "Fact": {
+        "type": "object",
+        "description": "A labelled value reported by a gateway, for display.",
+        "required": [
+          "label",
+          "value"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "value": {
             "type": "string"
           }
         }
@@ -2350,6 +2498,66 @@
             "type": "string"
           },
           "incoming": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "GatewaySummary": {
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "contract",
+          "rules"
+        ],
+        "properties": {
+          "contract": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuleSummary"
+            }
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "Hints": {
+        "type": "object",
+        "description": "Suggestions a gateway gives for a source.",
+        "properties": {
+          "event": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Usually a one-off event."
+          },
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Two-letter lowercase region, e.g. `de`."
+          },
+          "title": {
             "type": [
               "string",
               "null"
@@ -2598,7 +2806,7 @@
           "index",
           "name",
           "source",
-          "source_key",
+          "identity",
           "action",
           "diff"
         ],
@@ -2626,6 +2834,9 @@
               "null"
             ]
           },
+          "identity": {
+            "type": "string"
+          },
           "index": {
             "type": "integer",
             "description": "1-based entry index in the file.",
@@ -2635,10 +2846,8 @@
             "type": "string"
           },
           "source": {
-            "$ref": "#/components/schemas/Source"
-          },
-          "source_key": {
-            "type": "string"
+            "type": "string",
+            "description": "Canonical source from the route."
           },
           "tvg_id": {
             "type": [
@@ -2691,7 +2900,8 @@
       "ImportRequest": {
         "type": "object",
         "required": [
-          "playlist_slug"
+          "playlist_slug",
+          "route_id"
         ],
         "properties": {
           "dry_run": {
@@ -2707,227 +2917,16 @@
           "playlist_slug": {
             "type": "string"
           },
+          "route_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The route every entry is validated with. Entries it does not accept are skipped and listed."
+          },
           "url": {
             "type": [
               "string",
               "null"
             ]
-          }
-        }
-      },
-      "Integration": {
-        "type": "object",
-        "description": "A service lineup plays channels through (one per source kind).",
-        "required": [
-          "kind",
-          "config",
-          "configured",
-          "checks",
-          "channel_count",
-          "revision",
-          "updated_at"
-        ],
-        "properties": {
-          "channel_count": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Channels of this integration."
-          },
-          "checks": {
-            "$ref": "#/components/schemas/Availability",
-            "description": "Health checks of its channels (Check now and the schedule)."
-          },
-          "config": {
-            "$ref": "#/components/schemas/IntegrationConfig"
-          },
-          "configured": {
-            "type": "boolean",
-            "description": "Its required URL is set (a stable property; see the status for reachability)."
-          },
-          "kind": {
-            "$ref": "#/components/schemas/SourceKind"
-          },
-          "revision": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Increases with every change; of two copies, the higher revision is newer. Read-only.",
-            "minimum": 0
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
-          }
-        }
-      },
-      "IntegrationConfig": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "The Acestream engine (required) and, optionally, acexy in front of it.",
-            "required": [
-              "engine_url",
-              "probe_interval_hours",
-              "kind"
-            ],
-            "properties": {
-              "acexy_url": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "acexy base URL. When set, playlists play through acexy (several viewers share one engine\nsession) and channel checks become available; when null, playlists use the engine directly."
-              },
-              "engine_url": {
-                "type": "string",
-                "description": "Engine base URL, e.g. `http://media-host:6878`; blank = not configured."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "acestream"
-                ]
-              },
-              "probe_interval_hours": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Hours between scheduled checks of all enabled acestream channels (the first runs 10\nminutes after start); 0 turns them off. Checks need acexy.",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "The VK proxy (a thin layer over streamlink).",
-            "required": [
-              "url",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "vk"
-                ]
-              },
-              "url": {
-                "type": "string",
-                "description": "Proxy base URL; blank = not configured."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Direct URLs, emitted as they are. Nothing to configure.",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "direct"
-                ]
-              }
-            }
-          }
-        ],
-        "description": "What an integration needs, by type. Tagged by `kind`, which matches the integration's kind.\nA blank required URL means the integration is not configured."
-      },
-      "IntegrationPatch": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "acexy_url": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "`null` or an empty string removes acexy."
-              },
-              "engine_url": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "acestream"
-                ]
-              },
-              "probe_interval_hours": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "int32",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "vk"
-                ]
-              },
-              "url": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "direct"
-                ]
-              }
-            }
-          }
-        ],
-        "description": "Partial update of an integration's config, tagged by `kind` (must match the integration).\nAbsent fields are left unchanged; an empty string turns a required URL off."
-      },
-      "IntegrationStatus": {
-        "type": "object",
-        "description": "Live state of an integration's services (from the saved config).",
-        "required": [
-          "kind",
-          "configured",
-          "components"
-        ],
-        "properties": {
-          "components": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ConnectionTestResult"
-            },
-            "description": "One result per configured component; empty when nothing is configured (or for Direct)."
-          },
-          "configured": {
-            "type": "boolean"
-          },
-          "kind": {
-            "$ref": "#/components/schemas/SourceKind"
           }
         }
       },
@@ -2967,15 +2966,6 @@
           }
         }
       },
-      "LiveState": {
-        "type": "string",
-        "description": "Whether acexy reports a stream as being watched.",
-        "enum": [
-          "active",
-          "inactive",
-          "unavailable"
-        ]
-      },
       "MoveRequest": {
         "type": "object",
         "required": [
@@ -2986,6 +2976,57 @@
             "type": "integer",
             "format": "int64",
             "description": "New 1-based position (clamped)."
+          }
+        }
+      },
+      "Observation": {
+        "type": "object",
+        "description": "What the route's gateway reports about a channel right now. Reading it never starts a stream.",
+        "required": [
+          "available",
+          "facts"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Whether anything could be observed."
+          },
+          "content_state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContentState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Fact"
+            }
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why not, or why some values are missing."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The source's current title, when it reports one."
+          },
+          "watching": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether someone is watching through the gateway's services, when known."
           }
         }
       },
@@ -3096,72 +3137,6 @@
           }
         }
       },
-      "ProbeOutcome": {
-        "type": "string",
-        "enum": [
-          "ok",
-          "dead",
-          "unknown",
-          "skipped"
-        ]
-      },
-      "ProbeRequest": {
-        "type": "object",
-        "properties": {
-          "force": {
-            "type": "boolean",
-            "description": "Probe even if the stream seems to be in use."
-          },
-          "ids": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "format": "int64"
-            },
-            "description": "Channels to check; all enabled acestream channels when empty (that run continues in the\nbackground). Checks need acexy."
-          }
-        }
-      },
-      "ProbeResponse": {
-        "type": "object",
-        "required": [
-          "background",
-          "results"
-        ],
-        "properties": {
-          "background": {
-            "type": "boolean",
-            "description": "True when a run over all channels was started in the background; results then arrive as\nchannel updates and events."
-          },
-          "results": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProbeResult"
-            },
-            "description": "Results, when specific channels were probed."
-          }
-        }
-      },
-      "ProbeResult": {
-        "type": "object",
-        "required": [
-          "channel_id",
-          "outcome",
-          "detail"
-        ],
-        "properties": {
-          "channel_id": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "detail": {
-            "type": "object"
-          },
-          "outcome": {
-            "$ref": "#/components/schemas/ProbeOutcome"
-          }
-        }
-      },
       "RefreshRequest": {
         "type": "object",
         "properties": {
@@ -3191,82 +3166,489 @@
       "ResolveRequest": {
         "type": "object",
         "required": [
+          "route_id",
           "input"
         ],
         "properties": {
           "input": {
             "type": "string"
+          },
+          "route_id": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
       "ResolveResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ValidatedSource"
+          },
+          {
+            "type": "object",
+            "required": [
+              "route_id",
+              "suggestion"
+            ],
+            "properties": {
+              "duplicate_of": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Existing channel on this route with the same identity, if any."
+              },
+              "duplicate_source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The duplicate's stored source, when it differs from this one (e.g. a newer access token);\nediting that channel with this input updates it."
+              },
+              "matches": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/EpgChannel"
+                },
+                "description": "Best guide channels for the suggested name, best first (up to 5)."
+              },
+              "route_id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "suggestion": {
+                "$ref": "#/components/schemas/Suggestion",
+                "description": "Suggested values for a new channel; shown as editable defaults."
+              }
+            }
+          }
+        ]
+      },
+      "ResyncItem": {
         "type": "object",
         "required": [
-          "source",
-          "source_key",
-          "configured",
-          "suggestion"
+          "channel_id",
+          "name",
+          "reason"
         ],
         "properties": {
-          "configured": {
-            "type": "boolean",
-            "description": "Whether the source's integration is configured."
+          "channel_id": {
+            "type": "integer",
+            "format": "int64"
           },
-          "duplicate_of": {
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "ResyncReport": {
+        "type": "object",
+        "description": "Outcome of revalidating every channel of a route.",
+        "required": [
+          "at",
+          "trigger",
+          "total",
+          "updated",
+          "unchanged",
+          "failed",
+          "skipped",
+          "complete"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "Every channel is now current (the route's synced revisions advanced)."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResyncItem"
+            },
+            "description": "Channels the gateway did not accept, or that would collide with another channel; they keep\ntheir previous values."
+          },
+          "match_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "play_revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResyncItem"
+            },
+            "description": "Channels changed by someone else during the resync; left as they are."
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/ResyncTrigger"
+          },
+          "unchanged": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "description": "Channels whose source, identity or play reference changed.",
+            "minimum": 0
+          }
+        }
+      },
+      "ResyncTrigger": {
+        "type": "string",
+        "enum": [
+          "manual",
+          "base_url_change",
+          "revision_change"
+        ]
+      },
+      "Route": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "config",
+          "channel_count",
+          "revision",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "channel_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "config": {
+            "$ref": "#/components/schemas/RouteConfig"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_resync": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ResyncReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Increases with every change; of two copies, the higher revision is newer. Read-only.",
+            "minimum": 0
+          },
+          "synced_match_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The rule's match revision at the last resync that updated every channel (gateway only)."
+          },
+          "synced_play_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The rule's play revision at the last resync that updated every channel (gateway only)."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RouteConfig": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Channels are stream URLs, emitted as they are.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "direct"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A gateway service turns channel sources into play URLs.",
+            "required": [
+              "base_url",
+              "rule",
+              "kind"
+            ],
+            "properties": {
+              "base_url": {
+                "type": "string",
+                "description": "Gateway base URL, as players reach it (e.g. `http://media-host:8099`)."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "gateway"
+                ]
+              },
+              "rule": {
+                "type": "string",
+                "description": "One of the gateway's rules (e.g. `acestream`, `vk`)."
+              }
+            }
+          }
+        ],
+        "description": "How a route plays its channels. Tagged by `kind`; the kind and a gateway's rule can't change\nafter the route is created."
+      },
+      "RouteCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/RouteConfig"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "RoutePatch": {
+        "type": "object",
+        "description": "Partial update. The kind and a gateway's rule can't change; create another route instead.",
+        "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New gateway base URL. Every channel of the route is revalidated against it first; if any\nfails, nothing changes."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "RouteStatus": {
+        "type": "object",
+        "description": "Live state of a route's gateway (from the saved config).",
+        "required": [
+          "route_id",
+          "ok",
+          "detail",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "gateway": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GatewaySummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "The gateway answered and has the route's rule."
+          },
+          "pending_channels": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Existing channel with the same source, if any."
+            "description": "Channels whose play reference is from another play revision than the gateway's current one\n(they need a resync). Null when the gateway did not answer."
           },
-          "engine_name": {
+          "route_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rule": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RuleSummary",
+                "description": "The route's rule as the gateway describes it now."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RouteTestRequest": {
+        "type": "object",
+        "description": "Test a route config before (or without) saving it.",
+        "required": [
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/RouteConfig"
+          },
+          "input": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Name the Acestream engine reports for this content id, as-is."
+            "description": "Also validate this input with the config."
+          }
+        }
+      },
+      "RouteTestResult": {
+        "type": "object",
+        "required": [
+          "ok",
+          "detail",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "What the test shows, or why it failed."
           },
-          "matches": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/EpgChannel"
-            },
-            "description": "Best guide channels for the suggested name, best first (up to 5)."
+          "elapsed_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           },
-          "source": {
-            "$ref": "#/components/schemas/Source"
+          "gateway": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GatewaySummary",
+                "description": "The gateway's self-description (gateway configs that answered)."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
-          "source_key": {
-            "type": "string"
+          "ok": {
+            "type": "boolean"
           },
-          "stream_url": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Null while the source's integration is not configured."
-          },
-          "suggestion": {
-            "$ref": "#/components/schemas/Suggestion",
-            "description": "Suggested values for a new channel; shown as editable defaults."
-          },
-          "warnings": {
+          "sample": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ValidatedSource",
+                "description": "How the input validated, when one was given and the route works."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RuleSummary": {
+        "type": "object",
+        "description": "A gateway rule, as the gateway describes it.",
+        "required": [
+          "name",
+          "title",
+          "capabilities",
+          "match_revision",
+          "play_revision"
+        ],
+        "properties": {
+          "capabilities": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Problems that did not stop the resolve, such as an unreachable engine."
+            "description": "`observe`, `check`."
+          },
+          "input_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "match_revision": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "play_revision": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
           }
         }
       },
       "Settings": {
         "type": "object",
-        "description": "App-wide settings. Service addresses live in the integrations.",
+        "description": "App-wide settings. Service addresses live in the routes.",
         "required": [
-          "epg_refresh_hours"
+          "epg_refresh_hours",
+          "check_interval_hours"
         ],
         "properties": {
+          "check_interval_hours": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Hours between scheduled checks of all enabled channels on routes that support checks (the\nfirst runs 10 minutes after start); 0 turns them off.",
+            "minimum": 0
+          },
           "epg_refresh_hours": {
             "type": "integer",
             "format": "int32",
@@ -3284,6 +3666,14 @@
       "SettingsPatch": {
         "type": "object",
         "properties": {
+          "check_interval_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
           "epg_refresh_hours": {
             "type": [
               "integer",
@@ -3293,89 +3683,6 @@
             "minimum": 0
           }
         }
-      },
-      "Source": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "Acestream content id (40 lowercase hex chars), played through acexy (or the engine).",
-            "required": [
-              "id",
-              "kind"
-            ],
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "acestream"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "VK video, played through the VK proxy.",
-            "required": [
-              "owner_id",
-              "video_id",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "vk"
-                ]
-              },
-              "list": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "owner_id": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "video_id": {
-                "type": "integer",
-                "format": "int64"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "Any other URL, emitted verbatim.",
-            "required": [
-              "url",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "direct"
-                ]
-              },
-              "url": {
-                "type": "string"
-              }
-            }
-          }
-        ],
-        "description": "A channel's stream source. Its kind is also the channel's integration, which builds the URL."
-      },
-      "SourceKind": {
-        "type": "string",
-        "description": "A source kind, which is also the integration that plays it (one integration per kind).",
-        "enum": [
-          "acestream",
-          "vk",
-          "direct"
-        ]
       },
       "Status": {
         "type": "object",
@@ -3402,8 +3709,7 @@
             ]
           },
           "is_event": {
-            "type": "boolean",
-            "description": "VK links are usually one-off live events."
+            "type": "boolean"
           },
           "name": {
             "type": "string"
@@ -3419,6 +3725,40 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ValidatedSource": {
+        "type": "object",
+        "description": "A source as a route validated it.",
+        "required": [
+          "source",
+          "identity",
+          "play_url",
+          "hints",
+          "warnings"
+        ],
+        "properties": {
+          "hints": {
+            "$ref": "#/components/schemas/Hints"
+          },
+          "identity": {
+            "type": "string",
+            "description": "De-duplication key within the route."
+          },
+          "play_url": {
+            "type": "string",
+            "description": "The URL players get."
+          },
+          "source": {
+            "type": "string",
+            "description": "Canonical source, stored with the channel."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }

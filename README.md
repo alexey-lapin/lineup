@@ -1,6 +1,6 @@
 # lineup
 
-lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. It serves each playlist as M3U and its guide as XMLTV over HTTP, for players and media servers that read them from a URL, such as Jellyfin and Emby Live TV, Kodi with IPTV Simple, or IPTV apps like TiviMate. Channels are Acestream streams (played through [acexy](https://github.com/Javinator9889/acexy) or the engine), live VK videos (played through a VK proxy), or direct stream URLs; each kind is an integration you set up once. One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, calls webhooks (for example Jellyfin's guide refresh) when something changes, can check Acestream swarm health, and shows live swarm numbers for a channel while it is watched. The same binary is also a CLI for people and agents.
+lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. It serves each playlist as M3U and its guide as XMLTV over HTTP, for players and media servers that read them from a URL, such as Jellyfin and Emby Live TV, Kodi with IPTV Simple, or IPTV apps like TiviMate. Each channel is played through a route you pick: **direct** (a stream URL, put in playlists as it is) or a **gateway** route, where a separate gateway service turns a reference such as an Acestream id or a video page into a playable URL. lineup itself knows no streaming protocol; gateways speak a small contract (crate `gateway-contract`). One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, calls webhooks (for example Jellyfin's guide refresh) when something changes, and checks channels and shows their live state through gateways that support it. The same binary is also a CLI for people and agents.
 
 - Spec and roadmap: [docs/spec.md](docs/spec.md)
 - Deploying: [docs/deploy.md](docs/deploy.md)
@@ -12,26 +12,28 @@ lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. I
 | `/` | Web UI |
 | `/p/<slug>.m3u` (or `.m3u8`) | M3U playlist for your player or media server. `tvg-chno` is the position in the playlist. |
 | `/p/<slug>/epg.xml` | XMLTV guide with just that playlist's channels. |
-| `/api/v1/events` | Server-sent events (`playlist.changed`, `epg.updated`, `channel.unhealthy`, `integration.changed`, ...) |
+| `/api/v1/events` | Server-sent events (`playlist.changed`, `epg.updated`, `channel.unhealthy`, `route.changed`, ...) |
 | `/api/v1/...` | REST API |
 | `/api/openapi.json` | OpenAPI document |
 
 ## CLI
 
 ```sh
-lineup add acestream://<id> -p tv --yes   # name, group, tvg-id and logo suggested from the engine and guide
-lineup add acestream://<id> --name "Arena 1" --group Sports --tvg-id Arena.1.de -p tv
-lineup add "https://vk.com/video-1_2?list=..." --name "VK Live - A vs B" --event --kickoff 2026-11-08T20:00:00Z -p tv
-lineup ls [query] [--group G] [--playlist P] [--kind acestream|vk|direct] [--health ok|dead]
-lineup show|edit|rm|enable|disable <channel>   # channel = id, exact name, or any source input
-lineup info <channel>                          # engine name, live acexy session numbers, latest check
+lineup route add Acestream --gateway http://media-host:8099 --rule acestream   # see: route test --gateway URL
+lineup route ls | show <route> | edit <route> [--name --base-url --enable|--disable] | rm <route> | resync <route>
+lineup add -r Acestream acestream://<id> -p tv --yes   # name, group, tvg-id and logo suggested from the gateway and guide
+lineup add -r Acestream <id> --name "Arena 1" --group Sports --tvg-id Arena.1.de -p tv
+lineup add -r VK "https://vk.com/video-1_2?list=..." --name "A vs B" --event --kickoff 2026-11-08T20:00:00Z -p tv
+lineup add -r Direct https://example.com/live.m3u8 -p tv
+lineup ls [query] [--group G] [--playlist P] [--route R] [--health ok|dead]
+lineup show|edit|rm|enable|disable <channel>   # channel = id, exact name, or its stored source/identity
+lineup info <channel>                          # latest check and what the gateway observes now
 lineup playlist ls|show|create|rename|rm|add|remove|move|set|url
-lineup import <file|url|-> -p <slug> [--dry-run]
+lineup import <file|url|-> -p <slug> -r <route> [--dry-run]
 lineup epg sources ls|add|edit|rm ; epg fetch [id...] ; epg search <query>
 lineup hook ls|add|edit|enable|disable|rm|test|deliveries
-lineup probe [channel...] [--force]
-lineup integration ls | show <kind> | set <kind> [--engine-url --acexy-url --probe-interval | --url] | test <kind> [part] [--url URL]
-lineup settings get | settings set epg_refresh_hours <n>
+lineup check [channel...] [--force]
+lineup settings get | settings set epg_refresh_hours|check_interval_hours <n>
 lineup refresh [slug...]
 lineup status
 lineup backup <file>                            # consistent SQLite snapshot of the server DB
@@ -51,6 +53,7 @@ Exit codes:
 | 3 | not found |
 | 4 | conflict, such as a duplicate source |
 | 5 | server unreachable |
+| 6 | a route's gateway failed or is unreachable |
 
 `add` takes several inputs. With `--json` it always prints an array with one entry per input: `{input, ok, channel | would_create, error: {code, message}}`. It exits 0 when every input succeeds. When every input fails with the same kind of error, it exits with that error's code. Otherwise (partial success or mixed errors) it exits 1.
 

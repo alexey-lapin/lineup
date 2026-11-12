@@ -3,7 +3,6 @@ import { mount } from '@vue/test-utils'
 import { nextTick, ref } from 'vue'
 import { deferred, flush } from './setup'
 import { usePolling } from '../composables'
-import StatusLine from '../components/settings/StatusLine.vue'
 
 function setHidden(hidden: boolean) {
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
@@ -76,14 +75,5 @@ describe('usePolling', () => {
     const { w, calls } = host()
     w.unmount()
     expect(calls[0]!.signal.aborted).toBe(true)
-  })
-})
-
-describe('StatusLine', () => {
-  it('shows a failed poll instead of an older answer', () => {
-    const result = { component: 'engine' as const, ok: true, url: '', detail: 'Acestream engine 3.2.11', elapsed_ms: 1 }
-    const w = mount(StatusLine, { props: { result, error: 'Cannot reach the lineup server' }, shallow: true })
-    expect(w.text()).toContain('Status unavailable: Cannot reach the lineup server')
-    expect(w.text()).not.toContain('3.2.11')
   })
 })

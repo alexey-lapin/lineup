@@ -53,6 +53,7 @@ pub fn exit_code(e: &CliError) -> i32 {
             "not_found" => 3,
             "conflict" => 4,
             "invalid" => 2,
+            "gateway_unreachable" | "gateway_error" | "contract_mismatch" => 6,
             _ => 1,
         },
         CliError::Unreachable(_) => 5,

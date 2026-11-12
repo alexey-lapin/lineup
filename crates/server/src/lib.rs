@@ -1,15 +1,15 @@
-pub mod connection;
+pub mod catalog;
+pub mod checker;
 pub mod epg;
 pub mod error;
+pub mod gateway;
 pub mod hooks;
-pub mod integrations;
-pub mod live;
 pub mod m3u;
-pub mod probe;
-pub mod resolve;
-pub mod source;
+pub mod routes;
 pub mod store;
 pub mod suggest;
+#[cfg(feature = "test-support")]
+pub mod testing;
 
 pub use error::{Error, Result};
 pub use store::{ChannelFilter, Event, Store};
@@ -35,7 +35,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     app.epg.recover().await?;
     app.epg.spawn_scheduler();
     app.hooks.spawn();
-    app.prober.spawn_scheduler();
+    app.checker.spawn_scheduler();
+    app.checker.spawn_revision_poller();
     spawn_event_log(app.store.subscribe());
     let handle = app.clone();
     let router = http::router_for(app);
@@ -50,14 +51,14 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Log every change event (the ones the UI and hooks see). Per-probe events are logged by the
-/// prober itself, so they only show at debug level here.
+/// Log every change event (the ones the UI and hooks see). Per-check events are logged by the
+/// checker itself, so they only show at debug level here.
 fn spawn_event_log(mut rx: tokio::sync::broadcast::Receiver<Event>) {
     use tokio::sync::broadcast::error::RecvError;
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(e @ Event::ChannelProbed { .. }) => tracing::debug!("event {} {}", e.kind(), e.payload()),
+                Ok(e @ Event::ChannelChecked { .. }) => tracing::debug!("event {} {}", e.kind(), e.payload()),
                 Ok(e) => tracing::info!("event {} {}", e.kind(), e.payload()),
                 Err(RecvError::Lagged(n)) => tracing::warn!("event log missed {n} events"),
                 Err(RecvError::Closed) => break,

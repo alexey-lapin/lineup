@@ -37,14 +37,15 @@ pub struct Cli {
 pub enum Command {
     /// Run the lineup server.
     Serve(ServeArgs),
-    /// Add channels from inputs (acestream://id, 40-hex id, vk.com URL, VK proxy URL, any URL).
+    /// Add channels: each input is validated with the given route (a URL for a direct route; what
+    /// the gateway rule accepts for a gateway route, e.g. an Acestream id or a VK video link).
     Add(AddArgs),
     /// List channels, optionally filtered by a search term.
     Ls(LsArgs),
     /// Show one channel.
     Show { channel: String },
-    /// Show what the services report about a channel now: for acestream, the engine's name for it
-    /// and, while someone watches through acexy, live peers and speeds (never starts a stream).
+    /// Show a channel's last check and what its route's gateway observes now (for example whether
+    /// it is watched, live or a recording). Never starts a stream.
     Info { channel: String },
     /// Edit a channel.
     Edit(EditArgs),
@@ -63,8 +64,14 @@ pub enum Command {
         #[arg(required = true)]
         channels: Vec<String>,
     },
-    /// Parse an input and show the source, stream URL, any duplicate and suggestions, without saving.
-    Resolve { input: String },
+    /// Validate an input with a route and show the source, play URL, any duplicate and
+    /// suggestions, without saving.
+    Resolve {
+        input: String,
+        /// Route id or name.
+        #[arg(long, short = 'r')]
+        route: String,
+    },
     /// Manage playlists.
     #[command(subcommand)]
     Playlist(PlaylistCmd),
@@ -73,11 +80,11 @@ pub enum Command {
     /// Manage guide (XMLTV) sources and search their channels.
     #[command(subcommand)]
     Epg(EpgCmd),
-    /// Check acestream channels' swarm health (all enabled ones when none are given; that run
-    /// continues on the server). Needs acexy, which tells whether a stream is being watched.
-    Probe {
+    /// Check channels through their routes' gateways (all enabled channels of routes with checks
+    /// when none are given; that run continues on the server).
+    Check {
         channels: Vec<String>,
-        /// Check even if acexy reports the stream in use.
+        /// Check even if the channel seems to be in use.
         #[arg(long)]
         force: bool,
     },
@@ -86,9 +93,9 @@ pub enum Command {
     Hook(HookCmd),
     /// Re-emit change notifications for playlists (all when none are given).
     Refresh { slugs: Vec<String> },
-    /// Show, configure and test integrations (the services channels play through).
+    /// Manage routes: how channels are played (direct URLs, or a gateway and one of its rules).
     #[command(subcommand)]
-    Integration(IntegrationCmd),
+    Route(RouteCmd),
     /// Show or change app-wide settings.
     #[command(subcommand)]
     Settings(SettingsCmd),
@@ -122,6 +129,9 @@ pub struct ServeArgs {
 pub struct AddArgs {
     #[arg(required = true)]
     pub inputs: Vec<String>,
+    /// Route id or name that plays the channels (see `lineup route ls`).
+    #[arg(long, short = 'r')]
+    pub route: String,
     /// Display name (only with a single input). Defaults to a name derived from the source.
     #[arg(long)]
     pub name: Option<String>,
@@ -134,7 +144,7 @@ pub struct AddArgs {
     /// Append to this playlist (repeatable).
     #[arg(long = "playlist", short = 'p')]
     pub playlists: Vec<String>,
-    /// Mark as a live event (VK match etc.).
+    /// Mark as a live event (a one-off match etc.).
     #[arg(long)]
     pub event: bool,
     /// Event kickoff time (RFC 3339, e.g. 2026-11-05T20:00:00Z).
@@ -153,15 +163,16 @@ pub struct AddArgs {
 
 #[derive(Debug, Args)]
 pub struct LsArgs {
-    /// Search name, tvg-id or source key.
+    /// Search name, tvg-id, source or identity.
     pub query: Option<String>,
     #[arg(long)]
     pub group: Option<String>,
     #[arg(long, short = 'p')]
     pub playlist: Option<String>,
-    #[arg(long, value_enum)]
-    pub kind: Option<KindArg>,
-    /// Only channels whose last conclusive probe was this.
+    /// Route id or name.
+    #[arg(long, short = 'r')]
+    pub route: Option<String>,
+    /// Only channels whose last conclusive check was this.
     #[arg(long, value_enum)]
     pub health: Option<HealthArg>,
 }
@@ -170,27 +181,6 @@ pub struct LsArgs {
 pub enum HealthArg {
     Ok,
     Dead,
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum KindArg {
-    Acestream,
-    Vk,
-    Direct,
-}
-
-impl KindArg {
-    pub fn as_str(self) -> &'static str {
-        self.kind().as_str()
-    }
-
-    pub fn kind(self) -> api_types::SourceKind {
-        match self {
-            KindArg::Acestream => api_types::SourceKind::Acestream,
-            KindArg::Vk => api_types::SourceKind::Vk,
-            KindArg::Direct => api_types::SourceKind::Direct,
-        }
-    }
 }
 
 #[derive(Debug, Args)]
@@ -210,9 +200,12 @@ pub struct EditArgs {
     pub logo: Option<String>,
     #[arg(long)]
     pub no_logo: bool,
-    /// New source (any input form accepted by `add`).
+    /// New source input, validated with the channel's route (or with --route).
     #[arg(long)]
     pub source: Option<String>,
+    /// Move to another route (id or name); the source is revalidated with it.
+    #[arg(long, short = 'r')]
+    pub route: Option<String>,
     #[arg(long, conflicts_with = "no_event")]
     pub event: bool,
     #[arg(long)]
@@ -278,6 +271,9 @@ pub struct ImportArgs {
     pub source: String,
     #[arg(long, short = 'p')]
     pub playlist: String,
+    /// Route id or name every entry is validated with; entries it does not accept are skipped.
+    #[arg(long, short = 'r')]
+    pub route: String,
     /// Preview only; nothing is written.
     #[arg(long)]
     pub dry_run: bool,
@@ -393,58 +389,63 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
         .ok_or_else(|| format!("expected Name=value, got {s:?}"))
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum ComponentArg {
-    Engine,
-    Acexy,
-    Proxy,
-}
-
 #[derive(Debug, Subcommand)]
-pub enum IntegrationCmd {
-    /// List integrations with their config and whether they are configured.
+pub enum RouteCmd {
+    /// List routes.
     Ls,
-    /// Show one integration and test its configured components.
-    Show {
-        #[arg(value_enum)]
-        kind: KindArg,
+    /// Show a route and its gateway's live status.
+    Show { route: String },
+    /// Add a route: --direct, or --gateway URL --rule RULE (see `route test --gateway URL` for the
+    /// gateway's rules). The kind and rule can't change later.
+    Add {
+        name: String,
+        #[arg(long, conflicts_with_all = ["gateway", "rule"])]
+        direct: bool,
+        /// Gateway base URL, as players reach it.
+        #[arg(long, requires = "rule")]
+        gateway: Option<String>,
+        #[arg(long, requires = "gateway")]
+        rule: Option<String>,
+        /// Create disabled.
+        #[arg(long)]
+        disabled: bool,
     },
-    /// Change an integration. An empty value turns a URL off ("" for --engine-url or --url turns the
-    /// integration off; --acexy-url "" removes acexy).
-    Set {
-        #[arg(value_enum)]
-        kind: KindArg,
-        /// Acestream: the engine's base URL (required for playback).
+    /// Change a route. A new --base-url revalidates every channel with it first; if any fails,
+    /// nothing changes.
+    Edit {
+        route: String,
         #[arg(long)]
-        engine_url: Option<String>,
-        /// Acestream: acexy's base URL (recommended; needed for checks and live numbers).
+        name: Option<String>,
         #[arg(long)]
-        acexy_url: Option<String>,
-        /// Acestream: hours between scheduled checks (0 = off).
+        base_url: Option<String>,
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
         #[arg(long)]
-        probe_interval: Option<u32>,
-        /// VK: the proxy's base URL.
-        #[arg(long)]
-        url: Option<String>,
+        disable: bool,
     },
-    /// Check that a component answers (from the lineup server). Exits 1 if not.
+    /// Delete a route (only when no channel uses it).
+    Rm { route: String },
+    /// Test a saved route, or a config given with --gateway [--rule], optionally with an input.
+    /// Exits 1 if it fails.
     Test {
-        #[arg(value_enum)]
-        kind: KindArg,
-        /// engine or acexy (Acestream), proxy (VK). Default: every configured component.
-        #[arg(value_enum)]
-        component: Option<ComponentArg>,
-        /// Try this base URL instead of the saved one (needs a component).
-        #[arg(long, requires = "component")]
-        url: Option<String>,
+        route: Option<String>,
+        #[arg(long, conflicts_with = "route")]
+        gateway: Option<String>,
+        #[arg(long, requires = "gateway")]
+        rule: Option<String>,
+        /// Also validate this input.
+        #[arg(long)]
+        input: Option<String>,
     },
+    /// Revalidate every channel of a gateway route with its gateway now.
+    Resync { route: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum SettingsCmd {
     /// Show all settings.
     Get,
-    /// Set one setting: epg_refresh_hours.
+    /// Set one setting: epg_refresh_hours, check_interval_hours.
     Set { key: String, value: String },
 }
 

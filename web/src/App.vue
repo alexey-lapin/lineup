@@ -13,7 +13,7 @@ const items: NavigationMenuItem[][] = [
     { label: 'Import', icon: 'i-lucide-file-down', to: '/import' }
   ],
   [
-    { label: 'Integrations', icon: 'i-lucide-plug', to: '/integrations' },
+    { label: 'Routes', icon: 'i-lucide-route', to: '/routes' },
     { label: 'Settings', icon: 'i-lucide-settings', to: '/settings' }
   ]
 ]

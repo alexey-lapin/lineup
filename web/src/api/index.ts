@@ -4,7 +4,6 @@ import type { components, paths } from './schema'
 export type Channel = components['schemas']['Channel']
 export type ChannelCreate = components['schemas']['ChannelCreate']
 export type ChannelPatch = components['schemas']['ChannelPatch']
-export type Source = components['schemas']['Source']
 export type Playlist = components['schemas']['Playlist']
 export type PlaylistDetail = components['schemas']['PlaylistDetail']
 export type Settings = components['schemas']['Settings']
@@ -12,15 +11,18 @@ export type SettingsPatch = components['schemas']['SettingsPatch']
 export type ImportReport = components['schemas']['ImportReport']
 export type ResolveResponse = components['schemas']['ResolveResponse']
 export type Status = components['schemas']['Status']
-export type SourceKind = components['schemas']['SourceKind']
-export type Integration = components['schemas']['Integration']
-export type IntegrationConfig = components['schemas']['IntegrationConfig']
-export type IntegrationPatch = components['schemas']['IntegrationPatch']
-export type IntegrationStatus = components['schemas']['IntegrationStatus']
-export type Component = components['schemas']['Component']
-export type ConnectionTestResult = components['schemas']['ConnectionTestResult']
+export type Route = components['schemas']['Route']
+export type RouteConfig = components['schemas']['RouteConfig']
+export type RouteCreate = components['schemas']['RouteCreate']
+export type RoutePatch = components['schemas']['RoutePatch']
+export type RouteStatus = components['schemas']['RouteStatus']
+export type RouteTestResult = components['schemas']['RouteTestResult']
+export type RuleSummary = components['schemas']['RuleSummary']
+export type ResyncReport = components['schemas']['ResyncReport']
 export type ChannelInfo = components['schemas']['ChannelInfo']
-export type AcestreamLive = components['schemas']['AcestreamLive']
+export type Observation = components['schemas']['Observation']
+export type ContentState = components['schemas']['ContentState']
+export type CheckOutcome = components['schemas']['CheckOutcome']
 export type Suggestion = components['schemas']['Suggestion']
 export type EpgSource = components['schemas']['EpgSource']
 export type EpgSourceCreate = components['schemas']['EpgSourceCreate']
@@ -74,14 +76,14 @@ export async function unwrap<T>(p: Promise<Result<T>>): Promise<T> {
 export const api = {
   status: () => unwrap(client.GET('/status')),
 
-  channels: (query?: { q?: string; group?: string; playlist?: string }) =>
+  channels: (query?: { q?: string; group?: string; playlist?: string; route_id?: number }) =>
     unwrap(client.GET('/channels', { params: { query } })),
   createChannel: (body: ChannelCreate) => unwrap(client.POST('/channels', { body })),
   patchChannel: (id: number, body: ChannelPatch) =>
     unwrap(client.PATCH('/channels/{id}', { params: { path: { id } }, body })),
   deleteChannel: (id: number) => unwrap(client.DELETE('/channels/{id}', { params: { path: { id } } })),
-  resolve: (input: string) => unwrap(client.POST('/resolve', { body: { input } })),
-  probe: (ids: number[], force = false) => unwrap(client.POST('/probe', { body: { ids, force } })),
+  resolve: (route_id: number, input: string) => unwrap(client.POST('/resolve', { body: { route_id, input } })),
+  check: (ids: number[], force = false) => unwrap(client.POST('/checks', { body: { ids, force } })),
 
   playlists: () => unwrap(client.GET('/playlists')),
   playlist: (slug: string) => unwrap(client.GET('/playlists/{slug}', { params: { path: { slug } } })),
@@ -104,20 +106,20 @@ export const api = {
 
   settings: () => unwrap(client.GET('/settings')),
   patchSettings: (body: SettingsPatch) => unwrap(client.PATCH('/settings', { body })),
-  channelInfo: (id: number, name = false, signal?: AbortSignal) =>
-    unwrap(client.GET('/channels/{id}/info', { params: { path: { id }, query: { name } }, signal })),
+  channelInfo: (id: number, signal?: AbortSignal) =>
+    unwrap(client.GET('/channels/{id}/info', { params: { path: { id } }, signal })),
 
-  integrations: () => unwrap(client.GET('/integrations')),
-  patchIntegration: (kind: SourceKind, body: IntegrationPatch) =>
-    unwrap(client.PATCH('/integrations/{kind}', { params: { path: { kind } }, body })),
-  testIntegration: (kind: SourceKind, component: Component, url?: string) =>
-    unwrap(
-      client.POST('/integrations/{kind}/test', { params: { path: { kind } }, body: { component, url: url ?? null } })
-    ),
-  integrationStatus: (kind: SourceKind, signal?: AbortSignal) =>
-    unwrap(client.GET('/integrations/{kind}/status', { params: { path: { kind } }, signal })),
-  importM3u: (m3u_text: string, playlist_slug: string, dry_run: boolean) =>
-    unwrap(client.POST('/import', { body: { m3u_text, playlist_slug, dry_run } })),
+  routes: () => unwrap(client.GET('/routes')),
+  createRoute: (body: RouteCreate) => unwrap(client.POST('/routes', { body })),
+  patchRoute: (id: number, body: RoutePatch) => unwrap(client.PATCH('/routes/{id}', { params: { path: { id } }, body })),
+  deleteRoute: (id: number) => unwrap(client.DELETE('/routes/{id}', { params: { path: { id } } })),
+  testRoute: (config: RouteConfig, input?: string) =>
+    unwrap(client.POST('/routes/test', { body: { config, input: input || null } })),
+  routeStatus: (id: number, signal?: AbortSignal) =>
+    unwrap(client.GET('/routes/{id}/status', { params: { path: { id } }, signal })),
+  resyncRoute: (id: number) => unwrap(client.POST('/routes/{id}/resync', { params: { path: { id } } })),
+  importM3u: (m3u_text: string, playlist_slug: string, route_id: number, dry_run: boolean) =>
+    unwrap(client.POST('/import', { body: { m3u_text, playlist_slug, route_id, dry_run } })),
   refresh: (slugs: string[] = []) => unwrap(client.POST('/refresh', { body: { slugs } })),
 
   epgSources: () => unwrap(client.GET('/epg/sources')),
@@ -148,24 +150,19 @@ export function guideUrl(slug: string): string {
   return `${window.location.origin}/p/${encodeURIComponent(slug)}/epg.xml`
 }
 
-export function sourceLabel(s: Source): string {
-  switch (s.kind) {
-    case 'acestream':
-      return `ace ${s.id.slice(0, 8)}`
-    case 'vk':
-      return `vk ${s.owner_id}_${s.video_id}`
-    case 'direct':
-      return s.url
-  }
+/** A short label for a channel's source: its route and identity. */
+export function sourceLabel(c: Pick<Channel, 'route_name' | 'identity'>): string {
+  return `${c.route_name}: ${c.identity}`
 }
 
-/** Display names of the integrations. */
-export const INTEGRATION_NAMES: Record<SourceKind, string> = {
-  acestream: 'Acestream',
-  vk: 'VK proxy',
-  direct: 'Direct URLs'
+/** Display text of a content state. */
+export const CONTENT_STATES: Record<ContentState, string> = {
+  live: 'Live',
+  ended_processing: 'Ended, recording not ready',
+  recording: 'Recording'
 }
 
-export function integrationName(kind: SourceKind): string {
-  return INTEGRATION_NAMES[kind]
+/** Short description of a route's config. */
+export function routeSummary(c: RouteConfig): string {
+  return c.kind === 'direct' ? 'Direct URLs' : `${c.rule} on ${c.base_url}`
 }

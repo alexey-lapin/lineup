@@ -21,5 +21,5 @@ clap_complete = "4.6.11"
 
 [dev-dependencies]
 axum = "0.8"
-lineup-server = { path = "../server" }
+lineup-server = { path = "../server", features = ["test-support"] }
 tempfile = "3"

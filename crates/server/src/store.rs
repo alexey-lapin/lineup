@@ -10,8 +10,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use api_types::{
-    Channel, ChannelCreate, ChannelPatch, FieldDiff, ImportAction, ImportEntry, ImportReport, Playlist, PlaylistCreate,
-    PlaylistDetail, PlaylistItem, PlaylistPatch, ResolveResponse, Settings, SettingsPatch, Source, SourceKind,
+    Channel, FieldDiff, ImportAction, ImportEntry, ImportReport, Playlist, PlaylistCreate, PlaylistDetail,
+    PlaylistItem, PlaylistPatch, Settings, SettingsPatch,
 };
 
 use chrono::{DateTime, Utc};
@@ -20,7 +20,8 @@ use sqlx::{Row, SqliteConnection, SqlitePool};
 use tokio::sync::broadcast;
 
 use crate::error::{Error, Result, conflict, invalid, is_unique_violation, not_found};
-use crate::{m3u, source};
+use crate::m3u;
+use crate::routes::{Validated, channel_play_url};
 
 /// Change notifications, consumed by SSE and hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +44,8 @@ pub enum Event {
         channel_id: i64,
         name: String,
     },
-    /// A probe finished without a health transition (live UI updates only).
-    ChannelProbed {
+    /// A check finished without a health transition (live UI updates only).
+    ChannelChecked {
         channel_id: i64,
     },
     /// Settings changed (live UI updates only; `keys` are the settings whose values changed).
@@ -52,10 +53,10 @@ pub enum Event {
         keys: Vec<String>,
         revision: u64,
     },
-    /// An integration's config changed (live UI updates only; playlist output changes are announced
-    /// by `playlist.changed`).
-    IntegrationChanged {
-        kind: SourceKind,
+    /// A route was created, changed, resynced or deleted (live UI updates only; playlist output
+    /// changes are announced by `playlist.changed`).
+    RouteChanged {
+        route_id: i64,
         revision: u64,
     },
 }
@@ -68,9 +69,9 @@ impl Event {
             Event::EpgUpdated { .. } => "epg.updated",
             Event::ChannelUnhealthy { .. } => "channel.unhealthy",
             Event::ChannelRecovered { .. } => "channel.recovered",
-            Event::ChannelProbed { .. } => "channel.probed",
+            Event::ChannelChecked { .. } => "channel.checked",
             Event::SettingsChanged { .. } => "settings.changed",
-            Event::IntegrationChanged { .. } => "integration.changed",
+            Event::RouteChanged { .. } => "route.changed",
         }
     }
 
@@ -86,10 +87,10 @@ impl Event {
             Event::ChannelRecovered { channel_id, name } => {
                 serde_json::json!({ "channel_id": channel_id, "name": name })
             }
-            Event::ChannelProbed { channel_id } => serde_json::json!({ "channel_id": channel_id }),
+            Event::ChannelChecked { channel_id } => serde_json::json!({ "channel_id": channel_id }),
             Event::SettingsChanged { keys, revision } => serde_json::json!({ "keys": keys, "revision": revision }),
-            Event::IntegrationChanged { kind, revision } => {
-                serde_json::json!({ "kind": kind, "revision": revision })
+            Event::RouteChanged { route_id, revision } => {
+                serde_json::json!({ "route_id": route_id, "revision": revision })
             }
         }
     }
@@ -98,11 +99,11 @@ impl Event {
 #[derive(Debug, Default, Clone)]
 pub struct ChannelFilter {
     /// Only channels whose conclusive health is this.
-    pub health: Option<api_types::ProbeOutcome>,
+    pub health: Option<api_types::CheckOutcome>,
     pub group: Option<String>,
     pub q: Option<String>,
     pub playlist: Option<String>,
-    pub kind: Option<SourceKind>,
+    pub route_id: Option<i64>,
 }
 
 pub struct Store {
@@ -118,6 +119,8 @@ pub struct Store {
 const DEFAULT_EPG_REFRESH_HOURS: u32 = 6;
 /// Upper bound for `epg_refresh_hours` (one week).
 const MAX_EPG_REFRESH_HOURS: u32 = 24 * 7;
+/// Upper bound for `check_interval_hours` (one week).
+pub const MAX_CHECK_INTERVAL_HOURS: u32 = 24 * 7;
 
 impl Store {
     /// Open (creating if needed) the database file and run migrations.
@@ -187,9 +190,20 @@ impl Store {
             }
             new.epg_refresh_hours = v;
         }
+        if let Some(v) = patch.check_interval_hours {
+            if v > MAX_CHECK_INTERVAL_HOURS {
+                return Err(invalid(format!(
+                    "check_interval_hours must be at most {MAX_CHECK_INTERVAL_HOURS}"
+                )));
+            }
+            new.check_interval_hours = v;
+        }
         let mut keys = Vec::new();
         if new.epg_refresh_hours != old.epg_refresh_hours {
             keys.push("epg_refresh_hours".to_string());
+        }
+        if new.check_interval_hours != old.check_interval_hours {
+            keys.push("check_interval_hours".to_string());
         }
         if keys.is_empty() {
             return Ok(old);
@@ -217,14 +231,15 @@ impl Store {
                 .as_ref()
                 .is_none_or(|g| c.group_title.as_deref() == Some(g.as_str()))
                 && filter.playlist.as_ref().is_none_or(|p| c.playlists.contains(p))
-                && filter.kind.is_none_or(|k| c.source.kind() == k)
+                && filter.route_id.is_none_or(|r| c.route_id == r)
                 && filter
                     .health
                     .is_none_or(|h| c.health.as_ref().and_then(|x| x.conclusive) == Some(h))
                 && q.as_ref().is_none_or(|q| {
                     c.name.to_lowercase().contains(q)
                         || c.tvg_id.as_deref().is_some_and(|t| t.to_lowercase().contains(q))
-                        || c.source_key.contains(q)
+                        || c.identity.to_lowercase().contains(q)
+                        || c.source.to_lowercase().contains(q)
                 })
         });
         Ok(channels)
@@ -235,38 +250,28 @@ impl Store {
         get_channel(&mut conn, id).await
     }
 
-    /// Parse free-form input and report the stream URL and any duplicate.
-    pub async fn resolve(&self, input: &str) -> Result<ResolveResponse> {
-        let src = source::parse_input(input)?;
-        let key = source::source_key(&src);
-        let mut conn = self.pool.begin().await?; // read snapshot
-        let configs = integrations::load_configs(&mut conn).await?;
-        let duplicate_of = find_by_source(&mut conn, src.kind(), &key).await?;
-        Ok(ResolveResponse {
-            stream_url: configs.stream_url(&src),
-            configured: configs.configured(src.kind()),
-            suggestion: api_types::Suggestion {
-                name: source::default_name(&src),
-                ..Default::default()
-            },
-            source: src,
-            source_key: key,
-            duplicate_of,
-            engine_name: None,
-            matches: vec![],
-            warnings: vec![],
-        })
+    /// A channel's source columns.
+    pub async fn channel_source(&self, id: i64) -> Result<StoredSource> {
+        let mut conn = self.pool.acquire().await?;
+        stored_source(&mut conn, id).await
     }
 
-    pub async fn create_channel(&self, req: ChannelCreate) -> Result<Channel> {
+    /// The channel on `route_id` with this identity, and its stored source.
+    pub async fn find_duplicate(&self, route_id: i64, identity: &str) -> Result<Option<(i64, String)>> {
+        let row = sqlx::query("SELECT id, source FROM channels WHERE route_id=? AND identity=?")
+            .bind(route_id)
+            .bind(identity)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| (r.get("id"), r.get("source"))))
+    }
+
+    /// Create a channel from a source validated against `route` (at `route.revision`).
+    pub async fn create_channel(&self, req: NewChannelRequest) -> Result<Channel> {
         let _guard = self.write_lock.lock().await;
-        let src = match (req.source, req.input.as_deref()) {
-            (Some(s), None) => source::normalize(s)?,
-            (None, Some(i)) => source::parse_input(i)?,
-            _ => return Err(invalid("exactly one of `source` or `input` is required")),
-        };
         let name = clean_name(&req.name)?;
         let mut tx = self.pool.begin().await?;
+        expect_route(&mut tx, req.route_id, req.route_revision).await?;
         let id = insert_channel(
             &mut tx,
             &NewChannel {
@@ -274,7 +279,8 @@ impl Store {
                 group_title: clean_opt(req.group_title),
                 tvg_id: clean_opt(req.tvg_id),
                 tvg_logo: clean_opt(req.tvg_logo),
-                source: src,
+                route_id: req.route_id,
+                validated: req.validated,
                 is_event: req.is_event,
                 kickoff_at: req.kickoff_at,
                 enabled: req.enabled,
@@ -295,10 +301,14 @@ impl Store {
         self.get_channel(id).await
     }
 
-    pub async fn patch_channel(&self, id: i64, patch: ChannelPatch) -> Result<Channel> {
+    /// Update a channel. A `source` change carries a source validated against its route at a known
+    /// route revision and the channel's `source_revision` it was based on; it is refused when either
+    /// changed meanwhile.
+    pub async fn patch_channel(&self, id: i64, patch: ChannelUpdate) -> Result<Channel> {
         let _guard = self.write_lock.lock().await;
         let mut tx = self.pool.begin().await?;
         let cur = get_channel(&mut tx, id).await?;
+        let cur_rev = source_revision(&mut tx, id).await?;
         let mut next = cur.clone();
         if let Some(n) = patch.name {
             next.name = clean_name(&n)?;
@@ -312,12 +322,6 @@ impl Store {
         if let Some(v) = patch.tvg_logo {
             next.tvg_logo = clean_opt(v);
         }
-        match (patch.source, patch.input.as_deref()) {
-            (Some(_), Some(_)) => return Err(invalid("pass at most one of `source` or `input`")),
-            (Some(s), None) => next.source = source::normalize(s)?,
-            (None, Some(i)) => next.source = source::parse_input(i)?,
-            (None, None) => {}
-        }
         if let Some(v) = patch.is_event {
             next.is_event = v;
         }
@@ -327,59 +331,54 @@ impl Store {
         if let Some(v) = patch.enabled {
             next.enabled = v;
         }
+        let mut source_changed = false;
+        if let Some(sc) = &patch.source {
+            if sc.based_on_source_revision != cur_rev {
+                return Err(conflict("the channel's source changed meanwhile; try again"));
+            }
+            expect_route(&mut tx, sc.route_id, sc.route_revision).await?;
+            let stored = stored_source(&mut tx, id).await?;
+            source_changed = stored.route_id != sc.route_id
+                || stored.source != sc.validated.source
+                || stored.identity != sc.validated.identity
+                || stored.play != sc.validated.play;
+        }
 
-        let changed = next.name != cur.name
+        let meta_changed = next.name != cur.name
             || next.group_title != cur.group_title
             || next.tvg_id != cur.tvg_id
             || next.tvg_logo != cur.tvg_logo
-            || next.source != cur.source
             || next.is_event != cur.is_event
             || next.kickoff_at != cur.kickoff_at
             || next.enabled != cur.enabled;
-        if !changed {
+        if !meta_changed && !source_changed {
             return Ok(cur);
         }
 
-        let key = source::source_key(&next.source);
-        let res = sqlx::query(
-            "UPDATE channels SET name=?, group_title=?, tvg_id=?, tvg_logo=?, source_kind=?, source=?,
-             source_key=?, is_event=?, kickoff_at=?, enabled=?, updated_at=? WHERE id=?",
+        sqlx::query(
+            "UPDATE channels SET name=?, group_title=?, tvg_id=?, tvg_logo=?, is_event=?, kickoff_at=?, enabled=?,
+             updated_at=? WHERE id=?",
         )
         .bind(&next.name)
         .bind(&next.group_title)
         .bind(&next.tvg_id)
         .bind(&next.tvg_logo)
-        .bind(next.source.kind().as_str())
-        .bind(serde_json::to_string(&next.source)?)
-        .bind(&key)
         .bind(next.is_event)
         .bind(next.kickoff_at.map(|t| t.to_rfc3339()))
         .bind(next.enabled)
         .bind(now())
         .bind(id)
         .execute(&mut *tx)
-        .await;
-        if let Err(e) = res {
-            if is_unique_violation(&e) {
-                let dup = find_by_source(&mut tx, next.source.kind(), &key).await?;
-                return Err(conflict(format!(
-                    "another channel already has this source (id {})",
-                    dup.map_or("?".into(), |d| d.to_string())
-                )));
-            }
-            return Err(e.into());
-        }
-        if next.source != cur.source {
-            // Health describes the old source.
-            sqlx::query("DELETE FROM channel_health WHERE channel_id=?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+        .await?;
+        if source_changed {
+            let sc = patch.source.as_ref().expect("source change");
+            set_source(&mut tx, id, sc.route_id, &sc.validated).await?;
         }
         let affected: BTreeSet<String> = cur.playlists.iter().cloned().collect();
         tx.commit().await?;
         // Guide-affecting fields: the tvg-id selects upstream data; event channels get placeholders
         // built from their name and kickoff.
+        let after = self.get_channel(id).await?;
         let guide_changed = next.tvg_id != cur.tvg_id
             || next.is_event != cur.is_event
             || next.kickoff_at != cur.kickoff_at
@@ -389,7 +388,7 @@ impl Store {
         if guide_changed && in_playlists {
             self.epg_changed_locked(vec![]);
         }
-        self.get_channel(id).await
+        Ok(after)
     }
 
     pub async fn delete_channel(&self, id: i64) -> Result<()> {
@@ -633,52 +632,26 @@ impl Store {
 
     // ---------------------------------------------------------------- import
 
-    pub async fn import(&self, text: &str, slug: &str, dry_run: bool) -> Result<ImportReport> {
-        let slug = validate_slug(slug)?;
-        let parsed = m3u::parse(text);
-        let mut skipped_lines = parsed.skipped;
-
-        // Parse every entry into a source first; unparseable URLs are reported, not fatal.
-        struct Incoming {
-            index: usize,
-            name: String,
-            group_title: Option<String>,
-            tvg_id: Option<String>,
-            tvg_logo: Option<String>,
-            source: Source,
-            key: String,
-        }
-        let mut incoming = Vec::new();
-        for (i, e) in parsed.entries.iter().enumerate() {
-            let source = match source::parse_input(&e.url) {
-                Ok(s) => s,
-                Err(err) => {
-                    skipped_lines.push(format!("entry {} ({}): {err}", i + 1, e.name));
-                    continue;
-                }
-            };
-            let name = if e.name.trim().is_empty() {
-                e.attr("tvg-name").unwrap_or(&e.url).to_string()
-            } else {
-                e.name.trim().to_string()
-            };
-            incoming.push(Incoming {
-                index: i + 1,
-                name,
-                group_title: e.attr("group-title").map(str::to_string),
-                tvg_id: e.attr("tvg-id").map(str::to_string),
-                tvg_logo: e.attr("tvg-logo").map(str::to_string),
-                key: source::source_key(&source),
-                source,
-            });
-        }
-
+    /// Import entries validated against `route_id` (at `route_revision`) into playlist `slug`
+    /// (created when missing): new identities become channels, existing ones are reused as they
+    /// are; all are appended in file order. A dry run writes nothing.
+    pub async fn import_validated(&self, req: ImportBatch) -> Result<ImportReport> {
+        let ImportBatch {
+            slug,
+            dry_run,
+            route_id,
+            route_revision,
+            entries: incoming,
+            skipped_lines,
+        } = req;
+        let slug = validate_slug(&slug)?;
         let _guard = if dry_run {
             None
         } else {
             Some(self.write_lock.lock().await)
         };
         let mut tx = self.pool.begin().await?;
+        expect_route(&mut tx, route_id, route_revision).await?;
         let pid = find_playlist_id(&mut tx, &slug).await?;
         let playlist_created = pid.is_none();
         let pid = match pid {
@@ -693,17 +666,17 @@ impl Store {
         let mut in_playlist: HashSet<i64> = order.iter().copied().collect();
         // Sources seen earlier in this file (key → channel id, or None in dry run for new ones).
         // Value: (channel id if known, the metadata later duplicates are diffed against).
-        let mut seen: HashMap<(SourceKind, String), (Option<i64>, Meta)> = HashMap::new();
+        let mut seen: HashMap<String, (Option<i64>, Meta)> = HashMap::new();
         let mut entries = Vec::new();
 
         for inc in incoming {
-            let k = (inc.source.kind(), inc.key.clone());
+            let k = inc.validated.identity.clone();
             let incoming_meta = Meta {
                 name: inc.name.clone(),
                 group_title: inc.group_title.clone(),
                 tvg_id: inc.tvg_id.clone(),
                 tvg_logo: inc.tvg_logo.clone(),
-                source: inc.source.clone(),
+                source: inc.validated.source.clone(),
             };
             let mut diff = vec![];
             let mut reference = incoming_meta.clone();
@@ -711,7 +684,7 @@ impl Store {
                 diff = diff_fields(prev_meta, &incoming_meta);
                 reference = prev_meta.clone();
                 (ImportAction::SkipInPlaylist, *prev)
-            } else if let Some(existing) = find_by_source(&mut tx, inc.source.kind(), &inc.key).await? {
+            } else if let Some(existing) = find_by_identity(&mut tx, route_id, &inc.validated.identity).await? {
                 reference = Meta::from(&get_channel(&mut tx, existing).await?);
                 diff = diff_fields(&reference, &incoming_meta);
                 if in_playlist.contains(&existing) {
@@ -733,7 +706,8 @@ impl Store {
                         group_title: inc.group_title.clone(),
                         tvg_id: inc.tvg_id.clone(),
                         tvg_logo: inc.tvg_logo.clone(),
-                        source: inc.source.clone(),
+                        route_id,
+                        validated: inc.validated.clone(),
                         is_event: false,
                         kickoff_at: None,
                         enabled: true,
@@ -751,8 +725,8 @@ impl Store {
                 group_title: inc.group_title,
                 tvg_id: inc.tvg_id,
                 tvg_logo: inc.tvg_logo,
-                source: inc.source,
-                source_key: inc.key,
+                source: inc.validated.source,
+                identity: inc.validated.identity,
                 action,
                 channel_id,
                 diff,
@@ -786,10 +760,79 @@ struct NewChannel {
     group_title: Option<String>,
     tvg_id: Option<String>,
     tvg_logo: Option<String>,
-    source: Source,
+    route_id: i64,
+    validated: Validated,
     is_event: bool,
     kickoff_at: Option<DateTime<Utc>>,
     enabled: bool,
+}
+
+/// A new channel whose source was validated against `route_id` at `route_revision`.
+pub struct NewChannelRequest {
+    pub name: String,
+    pub group_title: Option<String>,
+    pub tvg_id: Option<String>,
+    pub tvg_logo: Option<String>,
+    pub route_id: i64,
+    pub route_revision: u64,
+    pub validated: Validated,
+    pub is_event: bool,
+    pub kickoff_at: Option<DateTime<Utc>>,
+    pub enabled: bool,
+    pub playlists: Vec<String>,
+}
+
+/// A channel update; metadata fields as in `api_types::ChannelPatch`.
+#[derive(Default)]
+pub struct ChannelUpdate {
+    pub name: Option<String>,
+    pub group_title: Option<Option<String>>,
+    pub tvg_id: Option<Option<String>>,
+    pub tvg_logo: Option<Option<String>>,
+    pub is_event: Option<bool>,
+    pub kickoff_at: Option<Option<DateTime<Utc>>>,
+    pub enabled: Option<bool>,
+    pub source: Option<SourceChange>,
+}
+
+/// A new source for a channel, validated against `route_id` at `route_revision`, computed from the
+/// channel at `based_on_source_revision`.
+pub struct SourceChange {
+    pub route_id: i64,
+    pub route_revision: u64,
+    pub validated: Validated,
+    pub based_on_source_revision: i64,
+}
+
+/// An import entry with its validated source.
+pub struct ImportEntryIn {
+    pub index: usize,
+    pub name: String,
+    pub group_title: Option<String>,
+    pub tvg_id: Option<String>,
+    pub tvg_logo: Option<String>,
+    pub validated: Validated,
+}
+
+pub struct ImportBatch {
+    pub slug: String,
+    pub dry_run: bool,
+    pub route_id: i64,
+    pub route_revision: u64,
+    pub entries: Vec<ImportEntryIn>,
+    /// Lines and entries already rejected while parsing or validating.
+    pub skipped_lines: Vec<String>,
+}
+
+/// What a channel's source columns hold.
+pub struct StoredSource {
+    pub route_id: i64,
+    pub source: String,
+    pub identity: String,
+    pub play: Option<String>,
+    pub play_revision: Option<String>,
+    pub source_revision: i64,
+    pub created_at: DateTime<Utc>,
 }
 
 fn now() -> String {
@@ -843,9 +886,9 @@ fn clamp_index(position: Option<i64>, len: usize) -> usize {
     }
 }
 
-/// Whether a channel is in playlist and guide output: enabled, and its integration configured.
+/// Whether a channel is in playlist and guide output: it and its route are enabled.
 pub fn eligible(c: &Channel) -> bool {
-    c.enabled && c.configured && c.stream_url.is_some()
+    c.enabled && c.route_enabled
 }
 
 fn effective_tvg_id(c: &Channel) -> String {
@@ -859,7 +902,7 @@ struct Meta {
     group_title: Option<String>,
     tvg_id: Option<String>,
     tvg_logo: Option<String>,
-    source: Source,
+    source: String,
 }
 
 impl From<&Channel> for Meta {
@@ -893,9 +936,7 @@ fn diff_fields(existing: &Meta, incoming: &Meta) -> Vec<FieldDiff> {
     );
     cmp("tvg_id", existing.tvg_id.clone(), incoming.tvg_id.clone());
     cmp("tvg_logo", existing.tvg_logo.clone(), incoming.tvg_logo.clone());
-    if let (Source::Vk { list: a, .. }, Source::Vk { list: b, .. }) = (&existing.source, &incoming.source) {
-        cmp("vk_list", a.clone(), b.clone());
-    }
+    cmp("source", Some(existing.source.clone()), Some(incoming.source.clone()));
     d
 }
 
@@ -905,6 +946,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
         .await?;
     let mut s = Settings {
         epg_refresh_hours: DEFAULT_EPG_REFRESH_HOURS,
+        check_interval_hours: 0,
         revision: 0,
     };
     for r in rows {
@@ -912,6 +954,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
         let value: String = r.try_get("value")?;
         match key.as_str() {
             "epg_refresh_hours" => s.epg_refresh_hours = serde_json::from_str(&value)?,
+            "check_interval_hours" => s.check_interval_hours = serde_json::from_str(&value)?,
             "revision" => s.revision = serde_json::from_str(&value)?,
             _ => {}
         }
@@ -922,6 +965,7 @@ async fn load_settings(conn: &mut SqliteConnection) -> Result<Settings> {
 async fn save_settings(conn: &mut SqliteConnection, s: &Settings) -> Result<()> {
     let pairs = [
         ("epg_refresh_hours", serde_json::to_string(&s.epg_refresh_hours)?),
+        ("check_interval_hours", serde_json::to_string(&s.check_interval_hours)?),
         ("revision", serde_json::to_string(&s.revision)?),
     ];
     for (k, v) in pairs {
@@ -937,20 +981,22 @@ async fn save_settings(conn: &mut SqliteConnection, s: &Settings) -> Result<()> 
 }
 
 async fn insert_channel(conn: &mut SqliteConnection, c: &NewChannel) -> Result<i64> {
-    let key = source::source_key(&c.source);
     let ts = now();
+    let v = &c.validated;
     let res = sqlx::query(
-        "INSERT INTO channels(name, group_title, tvg_id, tvg_logo, source_kind, source, source_key,
+        "INSERT INTO channels(name, group_title, tvg_id, tvg_logo, route_id, source, identity, play, play_revision,
                               is_event, kickoff_at, enabled, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&c.name)
     .bind(&c.group_title)
     .bind(&c.tvg_id)
     .bind(&c.tvg_logo)
-    .bind(c.source.kind().as_str())
-    .bind(serde_json::to_string(&c.source)?)
-    .bind(&key)
+    .bind(c.route_id)
+    .bind(&v.source)
+    .bind(&v.identity)
+    .bind(&v.play)
+    .bind(&v.play_revision)
     .bind(c.is_event)
     .bind(c.kickoff_at.map(|t| t.to_rfc3339()))
     .bind(c.enabled)
@@ -960,24 +1006,98 @@ async fn insert_channel(conn: &mut SqliteConnection, c: &NewChannel) -> Result<i
     .await;
     match res {
         Ok(r) => Ok(r.last_insert_rowid()),
-        Err(e) if is_unique_violation(&e) => {
-            let dup = find_by_source(conn, c.source.kind(), &key).await?;
-            Err(conflict(format!(
-                "a channel with this source already exists (id {})",
-                dup.map_or("?".into(), |d| d.to_string())
-            )))
-        }
+        Err(e) if is_unique_violation(&e) => Err(duplicate(conn, c.route_id, &v.identity).await),
         Err(e) => Err(e.into()),
     }
 }
 
-async fn find_by_source(conn: &mut SqliteConnection, kind: SourceKind, key: &str) -> Result<Option<i64>> {
-    let row = sqlx::query("SELECT id FROM channels WHERE source_kind=? AND source_key=?")
-        .bind(kind.as_str())
-        .bind(key)
+/// The conflict error for an identity that already exists on a route.
+async fn duplicate(conn: &mut SqliteConnection, route_id: i64, identity: &str) -> Error {
+    match find_by_identity(conn, route_id, identity).await {
+        Ok(Some(id)) => conflict(format!("channel {id} already has this source on this route")),
+        Ok(None) => conflict("another channel already has this source on this route"),
+        Err(e) => e,
+    }
+}
+
+/// Point a channel at a new validated source (bumps `source_revision`; clears health, which
+/// described the old source).
+async fn set_source(conn: &mut SqliteConnection, id: i64, route_id: i64, v: &Validated) -> Result<()> {
+    let res = sqlx::query(
+        "UPDATE channels SET route_id=?, source=?, identity=?, play=?, play_revision=?,
+         source_revision=source_revision+1, updated_at=? WHERE id=?",
+    )
+    .bind(route_id)
+    .bind(&v.source)
+    .bind(&v.identity)
+    .bind(&v.play)
+    .bind(&v.play_revision)
+    .bind(now())
+    .bind(id)
+    .execute(&mut *conn)
+    .await;
+    if let Err(e) = res {
+        if is_unique_violation(&e) {
+            return Err(duplicate(conn, route_id, &v.identity).await);
+        }
+        return Err(e.into());
+    }
+    sqlx::query("DELETE FROM channel_health WHERE channel_id=?")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+async fn find_by_identity(conn: &mut SqliteConnection, route_id: i64, identity: &str) -> Result<Option<i64>> {
+    let row = sqlx::query("SELECT id FROM channels WHERE route_id=? AND identity=?")
+        .bind(route_id)
+        .bind(identity)
         .fetch_optional(&mut *conn)
         .await?;
     Ok(row.map(|r| r.get::<i64, _>("id")))
+}
+
+async fn source_revision(conn: &mut SqliteConnection, id: i64) -> Result<i64> {
+    sqlx::query_scalar("SELECT source_revision FROM channels WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| not_found(format!("channel {id} not found")))
+}
+
+pub(crate) async fn stored_source(conn: &mut SqliteConnection, id: i64) -> Result<StoredSource> {
+    let r = sqlx::query(
+        "SELECT route_id, source, identity, play, play_revision, source_revision, created_at FROM channels WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| not_found(format!("channel {id} not found")))?;
+    Ok(StoredSource {
+        route_id: r.try_get("route_id")?,
+        source: r.try_get("source")?,
+        identity: r.try_get("identity")?,
+        play: r.try_get("play")?,
+        play_revision: r.try_get("play_revision")?,
+        source_revision: r.try_get("source_revision")?,
+        created_at: parse_ts(&r.try_get::<String, _>("created_at")?)?,
+    })
+}
+
+/// Fail unless route `id` exists at `revision` (it may have changed since a source was validated).
+async fn expect_route(conn: &mut SqliteConnection, id: i64, revision: u64) -> Result<()> {
+    let rev: Option<i64> = sqlx::query_scalar("SELECT revision FROM routes WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    match rev {
+        None => Err(not_found(format!("route {id} not found"))),
+        Some(r) if r as u64 != revision => Err(conflict(format!(
+            "route {id} changed while the source was being validated; try again"
+        ))),
+        Some(_) => Ok(()),
+    }
 }
 
 async fn channel_exists(conn: &mut SqliteConnection, id: i64) -> Result<()> {
@@ -990,7 +1110,7 @@ async fn channel_exists(conn: &mut SqliteConnection, id: i64) -> Result<()> {
 }
 
 async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result<Vec<Channel>> {
-    let configs = integrations::load_configs(conn).await?;
+    let routes = routes::load_all(conn).await?;
     let rows = match only {
         Some(id) => {
             sqlx::query("SELECT * FROM channels WHERE id=?")
@@ -1017,7 +1137,12 @@ async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result
     rows.iter()
         .map(|r| {
             let id: i64 = r.try_get("id")?;
-            let source: Source = serde_json::from_str(&r.try_get::<String, _>("source")?)?;
+            let route_id: i64 = r.try_get("route_id")?;
+            let route = routes
+                .get(&route_id)
+                .ok_or_else(|| Error::Internal(format!("channel {id} has a missing route {route_id}")))?;
+            let source: String = r.try_get("source")?;
+            let play: Option<String> = r.try_get("play")?;
             let kickoff: Option<String> = r.try_get("kickoff_at")?;
             Ok(Channel {
                 id,
@@ -1025,10 +1150,12 @@ async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result
                 group_title: r.try_get("group_title")?,
                 tvg_id: r.try_get("tvg_id")?,
                 tvg_logo: r.try_get("tvg_logo")?,
-                stream_url: configs.stream_url(&source),
-                configured: configs.configured(source.kind()),
+                route_id,
+                route_name: route.name.clone(),
+                route_enabled: route.enabled,
+                play_url: channel_play_url(&route.config, &source, play.as_deref()),
                 source,
-                source_key: r.try_get("source_key")?,
+                identity: r.try_get("identity")?,
                 is_event: r.try_get("is_event")?,
                 kickoff_at: kickoff.as_deref().map(parse_ts).transpose()?,
                 enabled: r.try_get("enabled")?,
@@ -1134,14 +1261,14 @@ async fn write_order(conn: &mut SqliteConnection, pid: i64, order: &[i64]) -> Re
     Ok(())
 }
 
-async fn slugs_with_kind(conn: &mut SqliteConnection, kind: SourceKind) -> Result<Vec<String>> {
+async fn slugs_with_route(conn: &mut SqliteConnection, route_id: i64) -> Result<Vec<String>> {
     let rows = sqlx::query(
         "SELECT DISTINCT p.slug FROM playlists p
          JOIN playlist_items i ON i.playlist_id = p.id
          JOIN channels c ON c.id = i.channel_id
-         WHERE c.source_kind = ?",
+         WHERE c.route_id = ?",
     )
-    .bind(kind.as_str())
+    .bind(route_id)
     .fetch_all(&mut *conn)
     .await?;
     Ok(rows.iter().map(|r| r.get("slug")).collect())
@@ -1199,7 +1326,7 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str, url_tvg: Option<&st
         .items
         .iter()
         .zip(&ids)
-        .filter_map(|(i, id)| Some((i, id, i.channel.stream_url.as_deref().filter(|_| eligible(&i.channel))?)))
+        .filter_map(|(i, id)| eligible(&i.channel).then_some((i, id, i.channel.play_url.as_str())))
         .map(|(i, id, url)| m3u::RenderItem {
             tvg_id: id,
             chno: i.position,
@@ -1214,12 +1341,12 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str, url_tvg: Option<&st
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-const OLD_DATABASE: &str = "this database is from lineup 0.3 or older, which this version cannot open. \
-    Move the data directory aside (keep it as a backup; only lineup 0.3 can read it), start with an \
-    empty one and set lineup up again (see the 0.4.0 release notes)";
+const OLD_DATABASE: &str = "this database is from lineup 0.4 or older, which this version cannot open. \
+    Move the data directory aside (keep it as a backup; only the release that wrote it can read it), \
+    start with an empty one and set lineup up again (see the 0.5.0 release notes)";
 
 /// Refuse databases of another schema lineage before migrating. The lineage is identified by the
-/// checksum of migration 1: databases of lineup 0.3 and older applied a different 0001. Later
+/// checksum of migration 1: databases of lineup 0.4 and older applied a different 0001. Later
 /// migrations of this lineage, and newer-than-binary or dirty databases, are left to the migrator.
 async fn check_lineage(pool: &SqlitePool) -> Result<()> {
     let ledger: bool =
@@ -1250,7 +1377,7 @@ async fn check_lineage(pool: &SqlitePool) -> Result<()> {
         // Empty (new) database.
         None if tables == 0 => Ok(()),
         None => Err(Error::UnsupportedDatabase(
-            "the database has tables but no lineup schema history; it is not a lineup 0.4 database. \
+            "the database has tables but no lineup schema history; it is not a lineup 0.5 database. \
              Point lineup at an empty data directory"
                 .into(),
         )),
@@ -1260,10 +1387,11 @@ async fn check_lineage(pool: &SqlitePool) -> Result<()> {
 mod epg;
 mod health;
 mod hooks;
-pub(crate) mod integrations;
+pub(crate) mod routes;
 pub use epg::{FetchOutcome, IndexedChannel, PatchedSource};
-pub use health::ProbeIdentity;
+pub use health::{CheckIdentity, CheckRecord};
 pub use hooks::{DELIVERIES_KEPT, NewDelivery};
+pub use routes::{ChannelSource, ResyncPublish, ResyncRow, RouteRow, check_base_change, new_report};
 
 #[cfg(test)]
 mod tests;

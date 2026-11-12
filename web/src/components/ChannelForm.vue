@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { api, integrationName, sourceLabel, type Channel, type EpgChannel, type ResolveResponse } from '../api'
+import { api, routeSummary, sourceLabel, type Channel, type EpgChannel, type ResolveResponse } from '../api'
 import EpgSearch from './EpgSearch.vue'
-import { useAction, useChannels, useInvalidateAll, usePlaylists } from '../composables'
+import { lastRoute, rememberRoute, useAction, useChannels, useInvalidateAll, usePlaylists, useRoutes } from '../composables'
 import { floating } from '../safe-area'
 
 const props = defineProps<{ channel?: Channel | null }>()
@@ -12,10 +12,12 @@ const run = useAction()
 const invalidate = useInvalidateAll()
 const { data: channels } = useChannels()
 const { data: playlists } = usePlaylists()
+const { data: routes } = useRoutes()
 
 const editing = computed(() => !!props.channel)
 
 const state = ref({
+  route_id: undefined as number | undefined,
   input: '',
   name: '',
   group_title: '' as string | undefined,
@@ -26,7 +28,7 @@ const state = ref({
   enabled: true,
   playlists: [] as string[]
 })
-/** The resolution and the exact input it belongs to; only valid while the input is unchanged. */
+/** The resolution and the route and input it belongs to; only valid while both are unchanged. */
 const resolved = ref<ResolveResponse | null>(null)
 const resolvedFor = ref('')
 const resolveError = ref('')
@@ -69,6 +71,24 @@ const groups = computed(() =>
   [...new Set((channels.value ?? []).map((c) => c.group_title).filter((g): g is string => !!g))].sort()
 )
 const playlistItems = computed(() => (playlists.value ?? []).map((p) => ({ label: p.name, value: p.slug })))
+const routeItems = computed(() =>
+  (routes.value ?? []).map((r) => ({
+    label: r.enabled ? r.name : `${r.name} (disabled)`,
+    description: routeSummary(r.config),
+    value: r.id
+  }))
+)
+const route = computed(() => routes.value?.find((r) => r.id === state.value.route_id))
+/** What the selected route accepts, for the input's help text. */
+const inputHelp = computed(() => {
+  const r = route.value
+  if (!r) return 'Pick a route first'
+  return r.config.kind === 'direct'
+    ? 'An http(s) stream URL, played as it is'
+    : `Whatever the gateway's ${r.config.rule} rule accepts`
+})
+/** Key of what a resolution was made for: route and input. */
+const key = (routeId: number | undefined, input: string) => `${routeId ?? ''} ${input}`
 
 /** `datetime-local` value <-> RFC 3339 UTC. */
 function toLocalInput(iso?: string | null) {
@@ -99,6 +119,9 @@ watch(
     resetResolution()
     if (!o) return
     const c = props.channel
+    const remembered = lastRoute()
+    const fallback = routes.value?.find((r) => r.id === remembered) ?? routes.value?.[0]
+    state.value.route_id = c?.route_id ?? fallback?.id
     state.value.input = ''
     state.value.name = c?.name ?? ''
     state.value.group_title = c?.group_title ?? undefined
@@ -114,26 +137,40 @@ watch(
   { immediate: true }
 )
 
+// Routes may load after the form opened: pick one then.
+watch(routes, (list) => {
+  if (open.value && state.value.route_id == null && list?.length) {
+    state.value.route_id = (list.find((r) => r.id === lastRoute()) ?? list[0])!.id
+  }
+})
+
+const currentKey = computed(() => key(state.value.route_id, state.value.input.trim()))
+watch(currentKey, (k) => {
+  if (k !== resolvedFor.value && k !== pendingFor) resetResolution()
+})
+// Changing the route revalidates a typed input with the new route.
 watch(
-  () => state.value.input.trim(),
-  (input) => {
-    if (input !== resolvedFor.value && input !== pendingFor) resetResolution()
+  () => state.value.route_id,
+  () => {
+    if (state.value.input.trim()) resolveInput()
   }
 )
 
 async function resolveInput() {
   const input = state.value.input.trim()
-  if (input && input === resolvedFor.value) return
+  const routeId = state.value.route_id
+  const k = key(routeId, input)
+  if (input && k === resolvedFor.value) return
   resetResolution()
-  if (!input) return
-  pendingFor = input
+  if (!input || routeId == null) return
+  pendingFor = k
   const seq = resolveSeq
   try {
-    const r = await api.resolve(input)
-    if (seq !== resolveSeq || !open.value || state.value.input.trim() !== input) return
+    const r = await api.resolve(routeId, input)
+    if (seq !== resolveSeq || !open.value || currentKey.value !== k) return
     pendingFor = ''
     resolved.value = r
-    resolvedFor.value = input
+    resolvedFor.value = k
     if (!editing.value) {
       const s = r.suggestion
       fill('name', s.name)
@@ -147,17 +184,40 @@ async function resolveInput() {
   }
 }
 
-/** A resolution that matches the current input exactly, or null. */
+/** A resolution that matches the current route and input exactly, or null. */
 const currentResolution = computed(() =>
-  resolved.value && resolvedFor.value === state.value.input.trim() ? resolved.value : null
+  resolved.value && resolvedFor.value === currentKey.value ? resolved.value : null
 )
+/** The duplicate, unless it is the channel being edited (its own source again). */
+const duplicateOf = computed(() => {
+  const d = currentResolution.value?.duplicate_of ?? null
+  return editing.value && d === props.channel?.id ? null : d
+})
+const routeChanged = computed(() => editing.value && state.value.route_id !== props.channel?.route_id)
 
 const canSave = computed(
   () =>
     state.value.name.trim().length > 0 &&
-    (editing.value || (!!currentResolution.value && currentResolution.value.duplicate_of == null)) &&
+    state.value.route_id != null &&
+    (editing.value && !state.value.input.trim()
+      ? true
+      : !!currentResolution.value && duplicateOf.value == null) &&
     !saving.value
 )
+
+/** Point the existing duplicate at this input (e.g. a newer access token in the link). */
+async function updateDuplicate() {
+  const r = currentResolution.value
+  if (!r || r.duplicate_of == null) return
+  const result = await run(
+    () => api.patchChannel(r.duplicate_of!, { input: state.value.input.trim() }),
+    `Channel ${r.duplicate_of} updated`
+  )
+  if (result.ok) {
+    await invalidate()
+    open.value = false
+  }
+}
 
 async function save() {
   if (!canSave.value) return
@@ -172,12 +232,14 @@ async function save() {
     kickoff_at: state.value.is_event ? fromLocalInput(state.value.kickoff) : null,
     enabled: state.value.enabled
   }
+  const input = state.value.input.trim()
   const result = props.channel
     ? await run(
         () =>
           api.patchChannel(props.channel!.id, {
             ...common,
-            ...(state.value.input.trim() ? { input: state.value.input.trim() } : {})
+            ...(input ? { input } : {}),
+            ...(routeChanged.value ? { route_id: state.value.route_id! } : {})
           }),
         'Channel saved'
       )
@@ -185,12 +247,13 @@ async function save() {
         () =>
           api.createChannel({
             ...common,
-            source: resolution!.source,
-            input: null,
+            route_id: resolution!.route_id,
+            input,
             playlists: state.value.playlists
           }),
         'Channel added'
       )
+  if (result.ok && !props.channel) rememberRoute(resolution!.route_id)
   saving.value = false
   if (result.ok) {
     await invalidate()
@@ -204,14 +267,30 @@ async function save() {
     <template #body>
       <form class="flex flex-col gap-4" @submit.prevent="save">
         <UFormField
+          label="Route"
+          :help="routeChanged ? 'The current source is revalidated with the new route' : 'How the channel is played'"
+          required
+        >
+          <USelectMenu
+            v-model="state.route_id"
+            :content="floating()"
+            :items="routeItems"
+            value-key="value"
+            class="w-full"
+            placeholder="Pick a route"
+          />
+        </UFormField>
+
+        <UFormField
           :label="editing ? 'Replace source (optional)' : 'Source'"
-          :help="editing ? `Current: ${sourceLabel(channel!.source)}` : 'acestream://…, a 40-hex id, a vk.com video link, or any stream URL'"
+          :help="editing ? `Current: ${channel!.source}` : inputHelp"
           :error="resolveError || undefined"
         >
           <UInput
             v-model="state.input"
             class="w-full"
-            placeholder="acestream://…"
+            :disabled="state.route_id == null"
+            placeholder="Paste a link or id"
             autocomplete="off"
             autocapitalize="off"
             @blur="resolveInput"
@@ -221,19 +300,28 @@ async function save() {
 
         <UAlert
           v-if="currentResolution"
-          :color="currentResolution.duplicate_of != null ? 'warning' : 'neutral'"
+          :color="duplicateOf != null ? 'warning' : 'neutral'"
           variant="subtle"
-          :icon="currentResolution.duplicate_of != null ? 'i-lucide-copy' : 'i-lucide-link'"
-          :title="currentResolution.duplicate_of != null ? `Already exists as channel ${currentResolution.duplicate_of}` : sourceLabel(currentResolution.source)"
+          :icon="duplicateOf != null ? 'i-lucide-copy' : 'i-lucide-link'"
+          :title="
+            duplicateOf != null
+              ? `Already exists as channel ${duplicateOf}`
+              : sourceLabel({ route_name: route?.name ?? '', identity: currentResolution.identity })
+          "
           :ui="{ description: 'break-all' }"
         >
           <template #description>
-            <div v-if="currentResolution.stream_url" class="break-all">{{ currentResolution.stream_url }}</div>
-            <div v-else>
-              The {{ integrationName(currentResolution.source.kind) }} integration is not set up: the channel can be
-              saved, but stays out of playlists until it is.
+            <div class="break-all">{{ currentResolution.play_url }}</div>
+            <div v-if="currentResolution.source !== state.input.trim()" class="mt-1 text-muted">
+              Stored as {{ currentResolution.source }}
             </div>
-            <div v-if="currentResolution.engine_name" class="mt-1">Engine name: {{ currentResolution.engine_name }}</div>
+            <div v-if="route && !route.enabled" class="mt-1">
+              The route is disabled: the channel stays out of playlists until it is enabled.
+            </div>
+            <div v-if="duplicateOf != null && currentResolution.duplicate_source" class="mt-1">
+              That channel has {{ currentResolution.duplicate_source }}.
+              <UButton size="xs" variant="subtle" class="ml-1" label="Update it to this link" @click="updateDuplicate" />
+            </div>
             <div v-for="w in currentResolution.warnings ?? []" :key="w" class="mt-1 text-warning">{{ w }}</div>
           </template>
         </UAlert>
@@ -291,7 +379,7 @@ async function save() {
           />
         </div>
 
-        <USwitch v-model="state.is_event" label="Live event" description="A one-off match or stream (e.g. VK)" />
+        <USwitch v-model="state.is_event" label="Live event" description="A one-off match or stream" />
         <UFormField v-if="state.is_event" label="Kickoff" help="Optional, your local time">
           <UInput v-model="state.kickoff" type="datetime-local" class="w-full" />
         </UFormField>

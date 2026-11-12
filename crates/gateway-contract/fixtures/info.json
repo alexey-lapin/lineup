@@ -1,0 +1,23 @@
+{
+  "name": "lineup-gateway",
+  "version": "0.1.0",
+  "contract": 1,
+  "rules": [
+    {
+      "name": "acestream",
+      "title": "Acestream",
+      "input_hint": "40-hex content id or acestream:// link",
+      "capabilities": ["observe", "check"],
+      "match_revision": "1",
+      "play_revision": "1"
+    },
+    {
+      "name": "vk",
+      "title": "VK video",
+      "input_hint": "vk.com or vkvideo.ru video link",
+      "capabilities": ["observe", "check"],
+      "match_revision": "1",
+      "play_revision": "1"
+    }
+  ]
+}

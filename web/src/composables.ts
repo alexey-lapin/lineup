@@ -11,6 +11,30 @@ export function usePlaylists() {
   return useQuery({ key: ['playlists'], query: () => api.playlists() })
 }
 
+export function useRoutes() {
+  return useQuery({ key: ['routes'], query: () => api.routes() })
+}
+
+const LAST_ROUTE = 'lineup.lastRoute'
+
+/** The route last used to add a channel or import (per browser), if any. */
+export function lastRoute(): number | null {
+  try {
+    const v = Number(localStorage.getItem(LAST_ROUTE))
+    return Number.isInteger(v) && v > 0 ? v : null
+  } catch {
+    return null
+  }
+}
+
+export function rememberRoute(id: number) {
+  try {
+    localStorage.setItem(LAST_ROUTE, String(id))
+  } catch {
+    // Storage may be unavailable (private mode); the choice is just not remembered.
+  }
+}
+
 /** Most mutations change channels and playlist contents together; refresh all of them. */
 export function useInvalidateAll() {
   const cache = useQueryCache()
@@ -22,7 +46,7 @@ export function useInvalidateAll() {
       cache.invalidateQueries({ key: ['playlist'] }),
       cache.invalidateQueries({ key: ['status'] }),
       cache.invalidateQueries({ key: ['settings'] }),
-      cache.invalidateQueries({ key: ['integrations'] })
+      cache.invalidateQueries({ key: ['routes'] })
     ])
 }
 
@@ -75,7 +99,7 @@ export function useLiveUpdates() {
   const refetch = (...keys: string[]) =>
     Promise.allSettled(keys.map((k) => cache.invalidateQueries({ key: [k] })))
   const everything = () =>
-    refetch('channels', 'playlists', 'playlist', 'epg-sources', 'hooks', 'settings', 'status', 'integrations')
+    refetch('channels', 'playlists', 'playlist', 'epg-sources', 'hooks', 'settings', 'status', 'routes')
   let es: EventSource | undefined
   onMounted(() => {
     if (typeof EventSource === 'undefined') return
@@ -91,12 +115,12 @@ export function useLiveUpdates() {
     es.addEventListener('playlist.changed', () => refetch('channels', 'playlists', 'playlist'))
     es.addEventListener('epg.updated', () => refetch('epg-sources'))
     es.addEventListener('settings.changed', () => refetch('settings'))
-    // URL changes also come as playlist.changed; this covers the rest (schedule, acexy for checks).
-    es.addEventListener('integration.changed', () => {
+    // Output changes also come as playlist.changed; this covers the rest (names, resync reports).
+    es.addEventListener('route.changed', () => {
       liveEpoch.value++
-      return refetch('integrations', 'channels')
+      return refetch('routes', 'channels')
     })
-    for (const e of ['channel.unhealthy', 'channel.recovered', 'channel.probed']) {
+    for (const e of ['channel.unhealthy', 'channel.recovered', 'channel.checked']) {
       es.addEventListener(e, () => refetch('channels', 'playlist'))
     }
   })
@@ -104,7 +128,7 @@ export function useLiveUpdates() {
 }
 
 /**
- * Bumped when the event stream (re)connects, resyncs, or an integration changes: views that read
+ * Bumped when the event stream (re)connects, resyncs, or a route changes: views that read
  * live service data outside the query cache reload on it.
  */
 export const liveEpoch = ref(0)

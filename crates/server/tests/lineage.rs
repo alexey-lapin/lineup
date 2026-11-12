@@ -1,5 +1,5 @@
-//! lineup 0.4 opens only databases of its own schema lineage. Older databases (built here from the
-//! frozen 0.3 migrations) are refused without being touched.
+//! lineup 0.5 opens only databases of its own schema lineage. Older databases (built here from the
+//! frozen 0.3 and 0.4 migrations) are refused without being touched.
 
 use std::path::Path;
 
@@ -56,7 +56,7 @@ async fn ledger(db: &Path) -> Vec<i64> {
 
 fn assert_refused(r: Result<Store, Error>, what: &str) {
     match r {
-        Err(Error::UnsupportedDatabase(m)) => assert!(m.contains("0.3"), "{what}: {m}"),
+        Err(Error::UnsupportedDatabase(m)) => assert!(m.contains("0.4 or older"), "{what}: {m}"),
         Err(e) => panic!("{what}: wrong error: {e}"),
         Ok(_) => panic!("{what}: opened"),
     }
@@ -68,7 +68,7 @@ async fn fresh_and_reopened() {
     let db = dir.path().join("lineup.db");
     drop(Store::open(&db).await.unwrap());
     let s = Store::open(&db).await.unwrap();
-    assert_eq!(s.list_integrations().await.unwrap().len(), 3);
+    assert_eq!(s.list_routes().await.unwrap().len(), 1, "the seeded Direct route");
     assert_eq!(ledger(&db).await, [1]);
 }
 
@@ -89,6 +89,22 @@ async fn legacy_databases_are_refused_untouched() {
     }
 }
 
+/// lineup 0.4 databases (with integrations and typed sources) are refused untouched.
+#[tokio::test]
+async fn databases_of_0_4_are_refused_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lineup.db");
+    let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/migrations-0.4");
+    migrate(&db, dir.path(), &from, &["0001_init.sql"]).await;
+    let before = std::fs::read(&db).unwrap();
+    assert_refused(Store::open(&db).await, "0.4 schema");
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "the old database is left as it was"
+    );
+}
+
 #[tokio::test]
 async fn untracked_tables_are_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -100,14 +116,14 @@ async fn untracked_tables_are_refused() {
         .unwrap();
     p.close().await;
     match Store::open(&db).await {
-        Err(Error::UnsupportedDatabase(m)) => assert!(m.contains("not a lineup 0.4 database"), "{m}"),
+        Err(Error::UnsupportedDatabase(m)) => assert!(m.contains("not a lineup 0.5 database"), "{m}"),
         Err(e) => panic!("wrong error: {e}"),
         Ok(_) => panic!("opened"),
     }
 }
 
-/// A database from a later 0.4.x with an extra migration is of this lineage: it is not called a 0.3
-/// database, but the migrator reports that it is newer than this binary.
+/// A database from a later 0.5.x with an extra migration is of this lineage: it is not called an
+/// older database, but the migrator reports that it is newer than this binary.
 #[tokio::test]
 async fn newer_database_of_this_lineage() {
     let dir = tempfile::tempdir().unwrap();

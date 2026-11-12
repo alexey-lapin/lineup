@@ -13,7 +13,8 @@ const api = vi.hoisted(() => ({
   deleteChannel: vi.fn(),
   importM3u: vi.fn(),
   status: vi.fn(),
-  settings: vi.fn()
+  settings: vi.fn(),
+  routes: vi.fn()
 }))
 vi.mock('../api', async (orig) => ({ ...(await orig<typeof import('../api')>()), api }))
 
@@ -29,9 +30,12 @@ const ch = (id: number, name: string) => ({
   enabled: true,
   is_event: false,
   playlists: [],
-  source: { kind: 'acestream', id: ACE_A },
-  source_key: ACE_A,
-  stream_url: 'http://x',
+  route_id: 2,
+  route_name: 'Acestream',
+  route_enabled: true,
+  source: `acestream://${ACE_A}`,
+  identity: `ace:${ACE_A}`,
+  play_url: 'http://x',
   created_at: '',
   updated_at: ''
 })
@@ -45,10 +49,30 @@ const detail = (slug: string, ids: number[]) => ({
   items: ids.map((id, i) => ({ position: i + 1, channel: ch(id, `c${id}`) }))
 })
 
+const ROUTES = [
+  { id: 1, name: 'Direct', enabled: true, config: { kind: 'direct' }, channel_count: 0, revision: 0 },
+  { id: 2, name: 'Acestream', enabled: true, config: { kind: 'gateway', base_url: 'http://g', rule: 'acestream' }, channel_count: 0, revision: 0 }
+]
+
+/** What `resolve` answers for an input on a route. */
+const resolution = (route_id: number, input: string, suggestion: Record<string, unknown> = {}) => ({
+  route_id,
+  source: input,
+  identity: input,
+  play_url: input,
+  hints: {},
+  warnings: [],
+  duplicate_of: null,
+  duplicate_source: null,
+  matches: [],
+  suggestion: { name: input, group_title: null, tvg_id: null, tvg_logo: null, is_event: false, ...suggestion }
+})
+
 beforeEach(() => {
   for (const f of Object.values(api)) f.mockReset()
   api.channels.mockResolvedValue([])
   api.playlists.mockResolvedValue([])
+  api.routes.mockResolvedValue(ROUTES)
 })
 
 describe('useAction', () => {
@@ -68,11 +92,13 @@ describe('ChannelForm', () => {
     api.resolve.mockReturnValueOnce(pending.promise)
     const w = mount(ChannelForm, { props: { open: true }, shallow: true, global: { plugins: list } })
     const vm = w.vm as any
+    vm.state.route_id = 2
+    await flush()
     vm.state.input = `acestream://${ACE_A}`
     vm.resolveInput()
     await w.setProps({ open: false })
     await w.setProps({ open: true })
-    pending.resolve({ source: { kind: 'acestream', id: ACE_A }, source_key: ACE_A, stream_url: 'u', duplicate_of: null })
+    pending.resolve(resolution(2, `acestream://${ACE_A}`))
     await flush()
     expect(vm.currentResolution).toBeNull()
     expect(vm.canSave).toBe(false)
@@ -83,9 +109,11 @@ describe('ChannelForm', () => {
 
   it('invalidates a resolution when the input changes', async () => {
     const { list } = plugins()
-    api.resolve.mockResolvedValue({ source: { kind: 'acestream', id: ACE_A }, source_key: ACE_A, stream_url: 'u', duplicate_of: null })
+    api.resolve.mockImplementation(async (route: number, input: string) => resolution(route, input))
     const w = mount(ChannelForm, { props: { open: true }, shallow: true, global: { plugins: list } })
     const vm = w.vm as any
+    vm.state.route_id = 2
+    await flush()
     vm.state.input = ACE_A
     await vm.resolveInput()
     vm.state.name = 'X'
@@ -93,6 +121,25 @@ describe('ChannelForm', () => {
     vm.state.input = 'b'.repeat(40)
     await flush()
     expect(vm.canSave).toBe(false)
+  })
+
+  it('invalidates a resolution when the route changes, and revalidates with the new route', async () => {
+    const { list } = plugins()
+    api.resolve.mockImplementation(async (route: number, input: string) => resolution(route, input))
+    const w = mount(ChannelForm, { props: { open: true }, shallow: true, global: { plugins: list } })
+    const vm = w.vm as any
+    vm.state.route_id = 2
+    await flush()
+    vm.state.input = ACE_A
+    await vm.resolveInput()
+    expect(vm.currentResolution.route_id).toBe(2)
+    vm.state.route_id = 1
+    await flush()
+    expect(api.resolve).toHaveBeenLastCalledWith(1, ACE_A)
+    expect(vm.currentResolution.route_id).toBe(1)
+    vm.state.name = 'X'
+    await vm.save()
+    expect(api.createChannel).toHaveBeenCalledWith(expect.objectContaining({ route_id: 1, input: ACE_A }))
   })
 })
 
@@ -159,6 +206,8 @@ describe('ImportPage', () => {
     api.importM3u.mockReturnValueOnce(pending.promise)
     const w = mount(ImportPage, { shallow: true, global: { plugins: list } })
     const vm = w.vm as any
+    await flush()
+    expect(vm.routeId).toBe(1)
     vm.text = 'TEXT-A'
     vm.slug = 'a'
     await flush()
@@ -178,29 +227,20 @@ describe('ImportPage', () => {
     expect(vm.previewIsCurrent).toBe(true)
     api.importM3u.mockResolvedValueOnce({ dry_run: false, playlist_slug: 'b', playlist_created: true, entries: [{}], skipped_lines: [] })
     await vm.commit()
-    expect(api.importM3u).toHaveBeenLastCalledWith('TEXT-B', 'b', false)
+    expect(api.importM3u).toHaveBeenLastCalledWith('TEXT-B', 'b', 1, false)
   })
 })
 
 describe('ChannelForm suggestions', () => {
-  const resolution = (input: string, suggestion: Record<string, unknown>) => ({
-    source: { kind: 'direct', url: input },
-    source_key: input,
-    stream_url: input,
-    configured: true,
-    duplicate_of: null,
-    matches: [],
-    warnings: [],
-    suggestion: { group_title: null, tvg_id: null, tvg_logo: null, is_event: false, ...suggestion }
-  })
-
   it('replaces values it filled in, clears them when the next source suggests nothing, keeps edits', async () => {
     const { list } = plugins()
     const w = mount(ChannelForm, { props: { open: true }, shallow: true, global: { plugins: list } })
     const vm = w.vm as any
+    vm.state.route_id = 1
+    await flush()
 
     api.resolve.mockResolvedValueOnce(
-      resolution('http://a', { name: 'VK 1_2', group_title: 'VK', tvg_id: 'A.uk', tvg_logo: 'http://l', is_event: true })
+      resolution(1, 'http://a', { name: 'VK 1_2', group_title: 'VK', tvg_id: 'A.uk', tvg_logo: 'http://l', is_event: true })
     )
     vm.state.input = 'http://a'
     await vm.resolveInput()
@@ -208,7 +248,7 @@ describe('ChannelForm suggestions', () => {
 
     // The user edits the logo; the next source suggests nothing beyond a name.
     vm.state.tvg_logo = 'http://mine'
-    api.resolve.mockResolvedValueOnce(resolution('http://b', { name: 'b' }))
+    api.resolve.mockResolvedValueOnce(resolution(1, 'http://b', { name: 'b' }))
     vm.state.input = 'http://b'
     await flush()
     await vm.resolveInput()
@@ -220,7 +260,7 @@ describe('ChannelForm suggestions', () => {
 
     // An event flag the user set by hand stays.
     vm.state.is_event = true
-    api.resolve.mockResolvedValueOnce(resolution('http://c', { name: 'c' }))
+    api.resolve.mockResolvedValueOnce(resolution(1, 'http://c', { name: 'c' }))
     vm.state.input = 'http://c'
     await flush()
     await vm.resolveInput()
