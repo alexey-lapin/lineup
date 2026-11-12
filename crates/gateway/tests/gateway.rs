@@ -28,6 +28,9 @@ struct Engine {
     /// Clients acexy reports for the stream.
     clients: u64,
     peers: u64,
+    /// Probe sessions open now, and the most ever open at once.
+    open: u64,
+    max_open: u64,
 }
 
 type Shared = Arc<Mutex<Engine>>;
@@ -52,6 +55,11 @@ async fn engine(shared: Shared) -> String {
             "/ace/getstream",
             get(|State(s): State<Shared>, Query(q): Q| async move {
                 log(&s, "/ace/getstream", &q).await;
+                {
+                    let mut e = s.lock().unwrap();
+                    e.open += 1;
+                    e.max_open = e.max_open.max(e.open);
+                }
                 axum::Json(json!({"response": {
                     "stat_url": "http://127.0.0.1:6878/ace/stat/abc/s1",
                     "command_url": "http://127.0.0.1:6878/ace/cmd/abc/s1"
@@ -71,6 +79,10 @@ async fn engine(shared: Shared) -> String {
             "/ace/cmd/abc/s1",
             get(|State(s): State<Shared>, Query(q): Q| async move {
                 log(&s, "/ace/cmd/abc/s1", &q).await;
+                {
+                    let mut e = s.lock().unwrap();
+                    e.open = e.open.saturating_sub(1);
+                }
                 axum::Json(json!({"response": "ok", "error": null}))
             }),
         )
@@ -97,6 +109,10 @@ struct Cdn {
     expired: bool,
     ranges: Vec<String>,
     user_agents: Vec<String>,
+    /// URL generation the CDN signs now; older generations answer 400 (a rejected signature).
+    generation: u32,
+    /// Bandwidth announced for the variant (changing it makes the new master incompatible).
+    bandwidth: u32,
 }
 
 type CdnState = Arc<Mutex<Cdn>>;
@@ -112,24 +128,34 @@ async fn cdn(state: CdnState) -> String {
                 if c.expired {
                     return (StatusCode::FORBIDDEN, "").into_response();
                 }
-                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n720/index.m3u8?sig=1\n".into_response()
+                format!(
+                    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH={}\n720/index.m3u8?gen={}\n",
+                    c.bandwidth.max(1000),
+                    c.generation
+                )
+                .into_response()
             }),
         )
         .route(
             "/v/720/index.m3u8",
-            get(|State(s): State<CdnState>| async move {
-                let c = s.lock().unwrap();
-                if c.expired {
-                    return (StatusCode::FORBIDDEN, "").into_response();
-                }
-                let mut body = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n\
+            get(
+                |State(s): State<CdnState>, Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                    let c = s.lock().unwrap();
+                    if c.expired {
+                        return (StatusCode::FORBIDDEN, "").into_response();
+                    }
+                    if q.get("gen").and_then(|g| g.parse::<u32>().ok()) != Some(c.generation) {
+                        return (StatusCode::BAD_REQUEST, "bad signature").into_response();
+                    }
+                    let mut body = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n\
                     #EXT-X-KEY:METHOD=AES-128,URI=\"/keys/k1\"\n#EXTINF:6.0,\nseg0.ts\n#EXTINF:6.0,\nseg1.ts\n"
-                    .to_string();
-                if c.ended {
-                    body.push_str("#EXT-X-ENDLIST\n");
-                }
-                body.into_response()
-            }),
+                        .to_string();
+                    if c.ended {
+                        body.push_str("#EXT-X-ENDLIST\n");
+                    }
+                    body.into_response()
+                },
+            ),
         )
         .route(
             "/v/720/seg0.ts",
@@ -184,6 +210,10 @@ struct Fixture {
 }
 
 async fn fixture(live: bool) -> Fixture {
+    fixture_with(live, true).await
+}
+
+async fn fixture_with(live: bool, acexy: bool) -> Fixture {
     let shared = Shared::default();
     let engine_url = engine(shared.clone()).await;
     let cdn_state = CdnState::default();
@@ -194,7 +224,7 @@ async fn fixture(live: bool) -> Fixture {
         r#"
         [acestream]
         engine_control = "{engine_url}"
-        acexy_control = "{engine_url}"
+        {}
         acexy_public = "http://192.168.1.50:8080"
         [vk]
         [tools]
@@ -202,6 +232,11 @@ async fn fixture(live: bool) -> Fixture {
         [egress]
         allow = ["127.0.0.1"]
         "#,
+        if acexy {
+            format!("acexy_control = \"{engine_url}\"")
+        } else {
+            String::new()
+        },
         yt.display()
     ))
     .unwrap();
@@ -454,4 +489,115 @@ async fn public_fetches_refuse_private_addresses() {
         .await
         .unwrap();
     assert_eq!(r.status(), 400);
+}
+
+#[tokio::test]
+async fn a_cancelled_check_still_owns_the_engine_until_its_session_stops() {
+    let f = fixture(true).await;
+    let url = format!("{}/v1/check", f.url);
+    let req = json!({"rule": "acestream", "ref": format!("acestream://{ACE}")});
+    // The first caller goes away while its probe runs; a second check comes right after.
+    let first = tokio::spawn({
+        let (url, req) = (url.clone(), req.clone());
+        async move { post(&url, req).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    first.abort();
+    let (_, r) = post(&url, req).await;
+    assert_eq!(r["outcome"], "dead", "{r}");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let e = f.engine.lock().unwrap();
+    assert_eq!(e.max_open, 1, "probes never overlap");
+    assert_eq!(e.open, 0, "every probe session was stopped");
+}
+
+#[tokio::test]
+async fn without_acexy_there_are_no_checks_but_names_still_show() {
+    let f = fixture_with(true, false).await;
+    let info: Value = reqwest::get(format!("{}/v1/info", f.url))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["rules"][0]["capabilities"], json!(["observe"]));
+    for force in [false, true] {
+        let (_, r) = post(
+            &format!("{}/v1/check", f.url),
+            json!({"rule": "acestream", "ref": format!("acestream://{ACE}"), "force": force}),
+        )
+        .await;
+        assert_eq!(
+            (r["outcome"].as_str(), r["reason"].as_str()),
+            (Some("skipped"), Some("guard_unavailable"))
+        );
+    }
+    assert!(
+        !f.engine
+            .lock()
+            .unwrap()
+            .seen
+            .iter()
+            .any(|s| s.starts_with("/ace/getstream"))
+    );
+    let (_, r) = post(
+        &format!("{}/v1/observe", f.url),
+        json!({"rule": "acestream", "refs": [format!("acestream://{ACE}")]}),
+    )
+    .await;
+    assert_eq!(
+        r["results"][0]["title"], "Arena 1 Bar HD [DE]",
+        "the engine's own name: {r}"
+    );
+}
+
+#[tokio::test]
+async fn expired_playlists_refresh_once_onto_the_same_variant() {
+    let f = fixture(false).await;
+    f.cdn.lock().unwrap().generation = 1;
+    let master_url = format!("{}/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-1_2", f.url);
+    let master = reqwest::get(&master_url).await.unwrap().text().await.unwrap();
+    let child = url::Url::parse(&master_url)
+        .unwrap()
+        .join(master.lines().find(|l| l.starts_with("s/")).unwrap())
+        .unwrap();
+    assert_eq!(reqwest::get(child.clone()).await.unwrap().status(), 200);
+
+    // The CDN rejects the old signature with 400: one refresh onto the same variant.
+    f.cdn.lock().unwrap().generation = 2;
+    let r = reqwest::get(child.clone()).await.unwrap();
+    assert_eq!(r.status(), 200, "refreshed");
+    assert!(r.text().await.unwrap().contains(".ts"));
+    // Only once per session.
+    f.cdn.lock().unwrap().generation = 3;
+    assert_eq!(reqwest::get(child.clone()).await.unwrap().status(), 410);
+
+    // A new session whose variant changed meanwhile is not moved onto another one.
+    let master = reqwest::get(&master_url).await.unwrap().text().await.unwrap();
+    let child = url::Url::parse(&master_url)
+        .unwrap()
+        .join(master.lines().find(|l| l.starts_with("s/")).unwrap())
+        .unwrap();
+    {
+        let mut c = f.cdn.lock().unwrap();
+        c.generation = 4;
+        c.bandwidth = 2000;
+    }
+    assert_eq!(reqwest::get(child).await.unwrap().status(), 410);
+}
+
+#[tokio::test]
+async fn an_ended_playlist_from_a_live_lookup_is_not_a_recording() {
+    let f = fixture(true).await;
+    f.cdn.lock().unwrap().ended = true;
+    let (_, r) = post(
+        &format!("{}/v1/check", f.url),
+        json!({"rule": "vk", "ref": "https://vk.com/video-1_2"}),
+    )
+    .await;
+    assert_eq!(
+        (r["outcome"].as_str(), r["content_state"].as_str(), r["reason"].as_str()),
+        (Some("unknown"), Some("ended_processing"), Some("recording_not_ready")),
+        "{r}"
+    );
 }

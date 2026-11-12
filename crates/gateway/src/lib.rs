@@ -49,13 +49,14 @@ impl Gateway {
                 let proxy = EgressProxy::start(allow.clone()).await?;
                 tracing::info!("egress proxy for the extractors on {}", proxy.url());
                 for (name, bin) in [("yt_dlp", &cfg.tools.yt_dlp), ("streamlink", &cfg.tools.streamlink)] {
-                    if let Some(b) = bin
-                        && !b.exists()
-                    {
-                        anyhow::bail!("tools.{name}: {} does not exist", b.display());
+                    if let Some(b) = bin {
+                        let version = tool_version(b)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("tools.{name}: {e}"))?;
+                        tracing::info!("tools.{name}: {} {version}", b.display());
                     }
                 }
-                let extractor = Arc::new(Extractor::new(
+                let extractor = Extractor::new(
                     Tools {
                         yt_dlp: cfg.tools.yt_dlp.clone(),
                         streamlink: cfg.tools.streamlink.clone(),
@@ -63,7 +64,7 @@ impl Gateway {
                         timeout: cfg.limits.extraction_timeout(),
                     },
                     cfg.limits.extractions,
-                ));
+                );
                 let client = net::public_client(&allow, cfg.limits.upstream_timeout());
                 (
                     Some(Relay::new(client, allow.clone(), extractor, &cfg.limits)),
@@ -230,17 +231,13 @@ async fn observe_page(relay: &Relay, reference: &str) -> Observation {
     match relay.probe(&r.canonical(), Priority::Background).await {
         Ok((d, summary)) => {
             o.available = true;
-            o.content_state = Some(if summary.ended {
-                ContentState::Recording
-            } else {
-                ContentState::Live
-            });
+            o.content_state = Some(page_state(&d, &summary));
             o.title = d.title.clone();
             o.facts.push(Fact {
                 label: "Found by".into(),
                 value: d.tool.into(),
             });
-            if let Some(secs) = d.duration.filter(|_| summary.ended) {
+            if let Some(secs) = d.duration.filter(|_| o.content_state == Some(ContentState::Recording)) {
                 o.facts.push(Fact {
                     label: "Duration".into(),
                     value: hms(secs),
@@ -255,6 +252,38 @@ async fn observe_page(relay: &Relay, reference: &str) -> Observation {
         Err(e) => o.reason = Some(e.to_string()),
     }
     o
+}
+
+/// What a page is now, from its lookup and its first media playlist. ENDLIST alone is not a
+/// recording: a lookup that still says live, or a playlist without segments, means the broadcast
+/// ended and its recording is not playable yet.
+fn page_state(d: &extract::Descriptor, s: &hls::Summary) -> ContentState {
+    if !s.ended {
+        ContentState::Live
+    } else if d.is_live == Some(true) || s.segments == 0 {
+        ContentState::EndedProcessing
+    } else {
+        ContentState::Recording
+    }
+}
+
+/// `tool --version`, which also proves the tool runs.
+async fn tool_version(bin: &std::path::Path) -> anyhow::Result<String> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new(bin)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("{} --version did not finish", bin.display()))?
+    .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", bin.display()))?;
+    if !out.status.success() {
+        anyhow::bail!("{} --version failed", bin.display());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn hms(secs: f64) -> String {
@@ -296,12 +325,14 @@ async fn check_page(relay: &Relay, reference: &str) -> CheckResponse {
     };
     match relay.probe(&r.canonical(), Priority::Background).await {
         Ok((d, summary)) => {
-            resp.outcome = CheckOutcome::Ok;
-            resp.content_state = Some(if summary.ended {
-                ContentState::Recording
+            let state = page_state(&d, &summary);
+            resp.content_state = Some(state);
+            if state == ContentState::EndedProcessing {
+                // Ended, recording not ready: inconclusive, never a failure.
+                resp.reason = Some("recording_not_ready".into());
             } else {
-                ContentState::Live
-            });
+                resp.outcome = CheckOutcome::Ok;
+            }
             resp.detail = Some(serde_json::json!({ "tool": d.tool, "segments": summary.segments }));
         }
         Err(ExtractError::NotFound(m)) => {
@@ -372,9 +403,40 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         names.join(", ")
     );
     axum::serve(listener, router(g))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown())
         .await?;
     Ok(())
+}
+
+/// SIGINT or SIGTERM (what `docker stop` sends).
+async fn shutdown() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! { _ = ctrl_c => {}, _ = term => {} }
+    tracing::info!("shutting down");
+}
+
+/// For a container healthcheck: whether `/healthz` answers on the configured port.
+pub async fn healthcheck(cfg: &Config) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get(format!("http://127.0.0.1:{}/healthz", cfg.listen.port()))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
 }

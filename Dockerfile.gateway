@@ -25,6 +25,6 @@ COPY deploy/gateway.example.toml /etc/lineup-gateway.toml
 USER gateway
 ENV LINEUP_GATEWAY_CONFIG=/etc/lineup-gateway.toml
 EXPOSE 8099
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
-    CMD wget -qO- http://127.0.0.1:8099/healthz >/dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
+    CMD ["lineup-gateway", "--healthcheck"]
 ENTRYPOINT ["lineup-gateway"]

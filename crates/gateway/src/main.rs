@@ -12,6 +12,10 @@ struct Args {
         default_value = "/etc/lineup-gateway.toml"
     )]
     config: std::path::PathBuf,
+    /// Check that the gateway configured by --config answers, and exit 0 or 1 (for container
+    /// healthchecks, whatever port it listens on).
+    #[arg(long)]
+    healthcheck: bool,
 }
 
 #[tokio::main]
@@ -26,5 +30,8 @@ async fn main() -> anyhow::Result<()> {
     let text =
         std::fs::read_to_string(&args.config).map_err(|e| anyhow::anyhow!("reading {}: {e}", args.config.display()))?;
     let cfg = lineup_gateway::config::Config::parse(&text)?;
+    if args.healthcheck {
+        std::process::exit(if lineup_gateway::healthcheck(&cfg).await { 0 } else { 1 });
+    }
     lineup_gateway::serve(cfg).await
 }

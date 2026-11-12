@@ -67,75 +67,79 @@ struct Entry {
     failures: u32,
 }
 
-pub struct Extractor {
+struct Inner {
     tools: Tools,
     all: Arc<Semaphore>,
     background: Arc<Semaphore>,
     cache: Mutex<HashMap<String, Entry>>,
-    /// Per-page locks for coalescing.
+    /// Per-page locks for coalescing; removed by the lookup that created them.
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Lookups admitted (running or waiting for a slot).
+    admitted: std::sync::atomic::AtomicUsize,
 }
+
+#[derive(Clone)]
+pub struct Extractor(Arc<Inner>);
 
 const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 const RECORDING_TTL: Duration = Duration::from_secs(3 * 3600);
-const LIVE_TTL: Duration = Duration::from_secs(60);
+/// Live, or not known to be a finished recording yet: look again soon.
+const SHORT_TTL: Duration = Duration::from_secs(60);
 /// Backoff after failures: 1, 2, 5, 10 minutes.
 const BACKOFF: [u64; 4] = [60, 120, 300, 600];
+const MAX_CACHED: usize = 1000;
+/// Lookups admitted at once (running plus waiting); more are refused.
+const MAX_ADMITTED: usize = 16;
+/// How long an admitted lookup may wait for a slot.
+const QUEUE_DEADLINE: Duration = Duration::from_secs(60);
 
 impl Extractor {
     pub fn new(tools: Tools, concurrency: usize) -> Self {
-        Extractor {
+        Extractor(Arc::new(Inner {
             tools,
             all: Arc::new(Semaphore::new(concurrency.max(1))),
             background: Arc::new(Semaphore::new(1)),
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
-        }
+            admitted: std::sync::atomic::AtomicUsize::new(0),
+        }))
     }
 
-    /// The descriptor of `page`, from the cache or a new extraction.
+    /// The descriptor of `page`, from the cache or a new extraction. The extraction runs in a task
+    /// of its own: a caller that goes away does not stop work other callers wait for, and the
+    /// tool's process group is still killed on its deadline.
     pub async fn descriptor(&self, page: &str, priority: Priority) -> Result<Descriptor, ExtractError> {
-        if let Some(r) = self.cached(page) {
+        if let Some(r) = self.0.cached(page) {
             return r;
         }
-        let lock = {
-            let mut m = self.inflight.lock().unwrap();
-            m.entry(page.to_string()).or_default().clone()
-        };
-        let _g = lock.lock().await;
-        if let Some(r) = self.cached(page) {
-            return r;
-        }
-        let result = self.extract(page, priority).await;
-        let now = Instant::now();
-        let mut cache = self.cache.lock().unwrap();
-        let failures = match &result {
-            Ok(_) => 0,
-            Err(_) => cache.get(page).map_or(0, |e| e.failures) + 1,
-        };
-        let ttl = match &result {
-            Ok(d) => ttl_for(d),
-            Err(ExtractError::Failed(_)) => Duration::from_secs(15),
-            Err(_) => Duration::from_secs(BACKOFF[(failures as usize - 1).min(BACKOFF.len() - 1)]),
-        };
-        cache.insert(
-            page.to_string(),
-            Entry {
-                result: result.clone(),
-                until: now + ttl,
-                failures,
-            },
-        );
-        drop(cache);
-        self.inflight.lock().unwrap().remove(page);
-        result
+        let me = self.0.clone();
+        let page = page.to_string();
+        tokio::spawn(async move { me.lookup(&page, priority).await })
+            .await
+            .unwrap_or_else(|e| Err(ExtractError::Failed(format!("lookup task failed: {e}"))))
     }
 
     /// Forget a page's descriptor (its URLs stopped working).
     pub fn invalidate(&self, page: &str) {
-        self.cache.lock().unwrap().remove(page);
+        self.0.cache.lock().unwrap().remove(page);
     }
 
+    /// A media playlist of `page`'s descriptor has ENDLIST: unless the lookup said live, the item
+    /// is a finished recording and its descriptor may be kept longer.
+    pub fn observed_ended(&self, page: &str, d: &Descriptor) {
+        if d.is_live == Some(true) {
+            return;
+        }
+        let mut cache = self.0.cache.lock().unwrap();
+        if let Some(e) = cache.get_mut(page)
+            && matches!(&e.result, Ok(x) if x == d)
+        {
+            e.until = Instant::now() + expiry_cap(d, RECORDING_TTL);
+        }
+    }
+}
+
+impl Inner {
     fn cached(&self, page: &str) -> Option<Result<Descriptor, ExtractError>> {
         let cache = self.cache.lock().unwrap();
         cache
@@ -144,17 +148,94 @@ impl Extractor {
             .map(|e| e.result.clone())
     }
 
-    async fn extract(&self, page: &str, priority: Priority) -> Result<Descriptor, ExtractError> {
+    async fn lookup(self: Arc<Self>, page: &str, priority: Priority) -> Result<Descriptor, ExtractError> {
+        use std::sync::atomic::Ordering;
+        if self.admitted.fetch_add(1, Ordering::SeqCst) >= MAX_ADMITTED {
+            self.admitted.fetch_sub(1, Ordering::SeqCst);
+            return Err(ExtractError::Failed("too many lookups are waiting; try again".into()));
+        }
+        struct Admitted<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Admitted<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _admitted = Admitted(&self.admitted);
+        // Background work takes its slot before the page lock, so it never holds a page that a
+        // playback request waits for while it is itself still queued.
         let _bg = match priority {
-            Priority::Background => Some(self.background.clone().acquire_owned().await.expect("semaphore")),
+            Priority::Background => Some(
+                tokio::time::timeout(QUEUE_DEADLINE, self.background.clone().acquire_owned())
+                    .await
+                    .map_err(|_| ExtractError::Failed("the lookup queue is full; try again".into()))?
+                    .expect("semaphore"),
+            ),
             Priority::Playback => None,
         };
-        let _slot = self.all.clone().acquire_owned().await.expect("semaphore");
+        let lock = self
+            .inflight
+            .lock()
+            .unwrap()
+            .entry(page.to_string())
+            .or_default()
+            .clone();
+        let _page = lock.lock().await;
+        // Whatever happens next, this page's entry leaves the in-flight table.
+        struct Done<'a>(&'a Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, &'a str);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().remove(self.1);
+            }
+        }
+        let _done = Done(&self.inflight, page);
+        if let Some(r) = self.cached(page) {
+            return r;
+        }
+        let _slot = tokio::time::timeout(QUEUE_DEADLINE, self.all.clone().acquire_owned())
+            .await
+            .map_err(|_| ExtractError::Failed("the lookup queue is full; try again".into()))?
+            .expect("semaphore");
+        let result = self.extract(page).await;
+        self.store(page, &result);
+        result
+    }
+
+    fn store(&self, page: &str, result: &Result<Descriptor, ExtractError>) {
+        let now = Instant::now();
+        let mut cache = self.cache.lock().unwrap();
+        let failures = match result {
+            Ok(_) => 0,
+            Err(_) => cache.get(page).map_or(0, |e| e.failures) + 1,
+        };
+        let ttl = match result {
+            // Not known to be a finished recording yet: look again soon (a relay that sees ENDLIST
+            // extends it, see `observed_ended`).
+            Ok(d) => expiry_cap(d, SHORT_TTL),
+            Err(ExtractError::Failed(_)) => Duration::from_secs(15),
+            Err(_) => Duration::from_secs(BACKOFF[(failures as usize - 1).min(BACKOFF.len() - 1)]),
+        };
+        cache.retain(|_, e| e.until > now);
+        while cache.len() >= MAX_CACHED {
+            let Some(k) = cache.iter().min_by_key(|(_, e)| e.until).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            cache.remove(&k);
+        }
+        cache.insert(
+            page.to_string(),
+            Entry {
+                result: result.clone(),
+                until: now + ttl,
+                failures,
+            },
+        );
+    }
+
+    async fn extract(&self, page: &str) -> Result<Descriptor, ExtractError> {
         let mut errors = Vec::new();
         if let Some(y) = &self.tools.yt_dlp {
             match self.yt_dlp(y, page).await {
                 Ok(d) => return Ok(d),
-                Err(ExtractError::NotFound(m)) => return Err(ExtractError::NotFound(m)),
                 Err(e) => errors.push(e),
             }
         }
@@ -164,12 +245,11 @@ impl Extractor {
                 Err(e) => errors.push(e),
             }
         }
-        // Report the most telling failure: no stream, then a tool failure.
-        Err(errors
-            .iter()
-            .find(|e| matches!(e, ExtractError::NoStream(_)))
-            .or(errors.first())
-            .cloned()
+        // The most telling failure: a page without a video, then no stream yet, then a tool failure.
+        let pick = |f: fn(&ExtractError) -> bool| errors.iter().find(|e| f(e)).cloned();
+        Err(pick(|e| matches!(e, ExtractError::NotFound(_)))
+            .or_else(|| pick(|e| matches!(e, ExtractError::NoStream(_))))
+            .or_else(|| errors.first().cloned())
             .unwrap_or_else(|| ExtractError::Failed("no extractor is configured".into())))
     }
 
@@ -209,18 +289,29 @@ impl Extractor {
     }
 }
 
-fn ttl_for(d: &Descriptor) -> Duration {
-    let base = if d.is_live == Some(true) {
-        LIVE_TTL
-    } else {
-        RECORDING_TTL
-    };
+/// `ttl`, but never past the signed URL's expiry (minus ten minutes).
+fn expiry_cap(d: &Descriptor, ttl: Duration) -> Duration {
     match d.expires {
         Some(exp) => {
             let left = exp - chrono::Utc::now().timestamp() - 600;
-            base.min(Duration::from_secs(left.max(0) as u64))
+            ttl.min(Duration::from_secs(left.max(0) as u64))
         }
-        None => base,
+        None => ttl,
+    }
+}
+
+/// Kills a tool's whole process group when dropped, unless the tool finished: a timeout, an error
+/// or a cancelled task all end its helpers too.
+struct GroupGuard {
+    pid: Option<u32>,
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            kill_group(pid);
+        }
     }
 }
 
@@ -241,7 +332,7 @@ async fn run(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<u8>,
     let mut child = cmd
         .spawn()
         .map_err(|e| ExtractError::Failed(format!("starting {name}: {e}")))?;
-    let pid = child.id();
+    let mut guard = GroupGuard { pid: child.id() };
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let work = async {
@@ -280,27 +371,15 @@ async fn run(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<u8>,
         let status = child.wait().await?;
         Ok::<_, std::io::Error>((status, out?, err.unwrap_or_default()))
     };
-    let result = tokio::time::timeout(timeout, work).await;
-    let kill_group = || {
-        #[cfg(unix)]
-        if let Some(pid) = pid {
-            // The whole group: helpers the tool started die too.
-            unsafe_kill_group(pid);
-        }
-    };
-    match result {
-        Err(_) => {
-            kill_group();
-            Err(ExtractError::Failed(format!(
-                "{name} took longer than {}s",
-                timeout.as_secs()
-            )))
-        }
-        Ok(Err(e)) => {
-            kill_group();
-            Err(ExtractError::Failed(format!("{name}: {e}")))
-        }
+    match tokio::time::timeout(timeout, work).await {
+        Err(_) => Err(ExtractError::Failed(format!(
+            "{name} took longer than {}s",
+            timeout.as_secs()
+        ))),
+        Ok(Err(e)) => Err(ExtractError::Failed(format!("{name}: {e}"))),
         Ok(Ok((status, out, err))) => {
+            // Helpers a finished tool left behind are killed too.
+            drop(std::mem::replace(&mut guard, GroupGuard { pid: None }));
             if status.success() {
                 return Ok(out);
             }
@@ -319,8 +398,8 @@ async fn run(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<u8>,
 }
 
 #[cfg(unix)]
-fn unsafe_kill_group(pid: u32) {
-    // `kill -KILL -<pgid>` without libc bindings.
+fn kill_group(pid: u32) {
+    // `kill -KILL -<pgid>` without libc bindings; the child process reaps itself via tokio.
     let _ = std::process::Command::new("kill")
         .args(["-KILL", &format!("-{pid}")])
         .stdin(Stdio::null())
@@ -329,28 +408,28 @@ fn unsafe_kill_group(pid: u32) {
         .status();
 }
 
-/// What a tool's error line says about the page.
+/// What a tool's error line says about the page. Only explicit statements that the video is gone
+/// count as "not found"; parser, schema and network errors stay inconclusive.
 fn classify(tool: &str, line: &str) -> ExtractError {
     let l = line.to_ascii_lowercase();
     let msg = format!("{tool}: {line}");
-    if [
-        "not found",
-        "removed",
-        "private",
-        "does not exist",
-        "has been deleted",
-        "access restricted",
+    let gone = [
+        "video not found",
+        "this video has been removed",
+        "video has been deleted",
+        "this video is private",
+        "this video is not available",
+        "access to this video is restricted",
+        "video does not exist",
         "http error 404",
-    ]
-    .iter()
-    .any(|k| l.contains(k))
-    {
+    ];
+    let schema = l.contains("unable to validate") || l.contains("key '") || l.contains("unable to extract");
+    if !schema && gone.iter().any(|k| l.contains(k)) {
         ExtractError::NotFound(msg)
     } else if [
         "no video formats",
         "no playable streams",
         "no streams found",
-        "processing",
         "is not available yet",
         "requested format is not available",
     ]
@@ -541,7 +620,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let x = Arc::new(Extractor::new(
+        let x = Extractor::new(
             Tools {
                 yt_dlp: Some(script),
                 streamlink: None,
@@ -549,7 +628,7 @@ mod tests {
                 timeout: Duration::from_secs(5),
             },
             2,
-        ));
+        );
         let (a, b) = tokio::join!(
             x.descriptor("https://vk.com/video1_2", Priority::Playback),
             x.descriptor("https://vk.com/video1_2", Priority::Background)
@@ -563,6 +642,80 @@ mod tests {
                 && calls.contains("--proxy http://127.0.0.1:9 -- https://vk.com/video1_2"),
             "{calls}"
         );
+    }
+
+    #[test]
+    fn unknown_liveness_is_looked_up_again_soon() {
+        let d = Descriptor {
+            tool: "streamlink",
+            manifest_url: "https://cdn/m.m3u8".into(),
+            headers: vec![],
+            is_live: None,
+            title: None,
+            duration: None,
+            expires: None,
+        };
+        let x = Extractor::new(
+            Tools {
+                yt_dlp: None,
+                streamlink: None,
+                proxy: String::new(),
+                timeout: Duration::from_secs(1),
+            },
+            1,
+        );
+        x.0.store("p", &Ok(d.clone()));
+        let until = x.0.cache.lock().unwrap()["p"].until;
+        assert!(until <= Instant::now() + SHORT_TTL);
+        // An observed ENDLIST promotes it to a recording.
+        x.observed_ended("p", &d);
+        let until = x.0.cache.lock().unwrap()["p"].until;
+        assert!(until > Instant::now() + Duration::from_secs(3600));
+        // A live lookup is never promoted.
+        let live = Descriptor {
+            is_live: Some(true),
+            ..d
+        };
+        x.0.store("q", &Ok(live.clone()));
+        x.observed_ended("q", &live);
+        assert!(x.0.cache.lock().unwrap()["q"].until <= Instant::now() + SHORT_TTL);
+    }
+
+    #[tokio::test]
+    async fn helpers_die_with_their_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("helper.pid");
+        let script = dir.path().join("yt-dlp");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh
+sleep 30 &
+echo $! > {}
+sleep 30
+",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let x = Extractor::new(
+            Tools {
+                yt_dlp: Some(script),
+                streamlink: None,
+                proxy: "http://127.0.0.1:9".into(),
+                timeout: Duration::from_millis(500),
+            },
+            1,
+        );
+        let _ = x.descriptor("https://vk.com/video1_2", Priority::Playback).await;
+        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the helper {pid} outlived its tool");
     }
 
     #[tokio::test]
