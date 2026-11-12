@@ -43,6 +43,9 @@ pub struct Summary {
     pub target_duration: Option<String>,
     /// Each segment's `#EXTINF` duration, in order: identifies the encode's timeline.
     pub durations: Vec<String>,
+    /// Each segment's effective discontinuity number (`#EXT-X-DISCONTINUITY-SEQUENCE` plus the
+    /// `#EXT-X-DISCONTINUITY` tags before it), in order.
+    pub discontinuities: Vec<u64>,
     /// Init sections: their URL path (no query, which carries signatures) and byte range.
     pub maps: Vec<String>,
 }
@@ -66,6 +69,7 @@ pub fn rewrite(
     let mut summary = Summary::default();
     let mut variant_tag: Option<String> = None;
     let mut pending_duration: Option<String> = None;
+    let mut discontinuity: u64 = 0;
     for raw in lines {
         let line = raw.trim_end_matches('\r');
         let t = line.trim();
@@ -101,6 +105,13 @@ pub fn rewrite(
                     }
                 }
                 "EXT-X-ENDLIST" => summary.ended = true,
+                "EXT-X-DISCONTINUITY-SEQUENCE" => {
+                    discontinuity = tag
+                        .split_once(':')
+                        .and_then(|(_, v)| v.trim().parse().ok())
+                        .unwrap_or(0)
+                }
+                "EXT-X-DISCONTINUITY" => discontinuity += 1,
                 "EXTINF" => {
                     pending_duration = tag
                         .split_once(':')
@@ -157,6 +168,7 @@ pub fn rewrite(
             None => {
                 summary.segments += 1;
                 summary.durations.push(pending_duration.take().unwrap_or_default());
+                summary.discontinuities.push(discontinuity);
                 (Kind::Resource, String::new())
             }
         };

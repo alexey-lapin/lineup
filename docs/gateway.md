@@ -47,7 +47,7 @@ CDN, with the user agent the lookup used, so the URLs are not revoked by other c
   and only onto the new master's playlist with exactly the same definition (variant attributes or
   rendition tag) whose timeline provably continues: same live/recorded state, target duration and
   init sections, a media sequence inside the window already served with every overlapping segment
-  of exactly the same duration, and never a growing playlist continued as a finished one.
+  of exactly the same duration and discontinuity number, and never a growing playlist continued as a finished one.
   Otherwise, and for segments, the player gets 410 and its next open starts afresh (on the
   recording, once the broadcast has ended).
 - Status: ENDLIST with segments and a lookup that is not live is a recording; ENDLIST from a lookup

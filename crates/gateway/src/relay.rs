@@ -437,7 +437,7 @@ impl Relay {
 /// Whether `next` (the refreshed media playlist) continues `prev` (what the session served). It
 /// must be provably the same encode: same target duration and init sections, its media sequence
 /// inside the window already served (so they overlap), every overlapping segment with exactly the
-/// same duration, and no switch from a growing playlist to a finished one (a live broadcast is
+/// same duration and discontinuity number, and no switch from a growing playlist to a finished one (a live broadcast is
 /// never continued as a finished playlist, which might be its recording; the player reopens).
 fn continues(prev: &Summary, next: &Summary) -> bool {
     let (a, b) = (prev.media_sequence.unwrap_or(0), next.media_sequence.unwrap_or(0));
@@ -451,7 +451,9 @@ fn continues(prev: &Summary, next: &Summary) -> bool {
     }
     let offset = (b - a) as usize;
     let overlap = prev.durations.len().saturating_sub(offset).min(next.durations.len());
-    overlap > 0 && prev.durations[offset..offset + overlap] == next.durations[..overlap]
+    overlap > 0
+        && prev.durations[offset..offset + overlap] == next.durations[..overlap]
+        && prev.discontinuities.get(offset..offset + overlap) == next.discontinuities.get(..overlap)
 }
 
 /// Statuses a CDN answers for an expired or rejected signed URL (VK: 400).
@@ -552,6 +554,7 @@ mod tests {
             media_sequence: Some(seq),
             target_duration: Some("6".into()),
             durations: durs.iter().map(|d| d.to_string()).collect(),
+            discontinuities: vec![0; durs.len()],
             maps: vec!["/v/init.mp4 ".into()],
         };
         let rec = ["6.000", "6.000", "4.200"];
@@ -585,9 +588,33 @@ mod tests {
             !continues(&s(100, &["6.0"; 10], false), &s(110, &["6.0"; 10], false)),
             "no overlap to compare"
         );
+        let mut renumbered = s(0, &rec, true);
+        renumbered.discontinuities = vec![7; 3];
+        assert!(
+            !continues(&s(0, &rec, true), &renumbered),
+            "another discontinuity sequence"
+        );
         let mut td = s(0, &rec, true);
         td.target_duration = Some("4".into());
         assert!(!continues(&s(0, &rec, true), &td), "another target duration");
+    }
+
+    #[test]
+    fn continuity_across_discontinuities_from_parsed_playlists() {
+        let base = Url::parse("https://cdn.example/v/index.m3u8").unwrap();
+        let parse = |body: &str| hls::rewrite(body, &base, |_, _, _| Ok(String::new())).unwrap().1;
+        let before = parse(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:6.0,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:6.0,\nb.ts\n#EXTINF:6.0,\nc.ts\n",
+        );
+        // The window moved past the tag: the sequence carries it.
+        let after = parse(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:11\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n#EXTINF:6.0,\nb.ts\n#EXTINF:6.0,\nc.ts\n#EXTINF:6.0,\nd.ts\n",
+        );
+        assert!(continues(&before, &after));
+        let renumbered = parse(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:11\n#EXT-X-DISCONTINUITY-SEQUENCE:7\n#EXTINF:6.0,\nb.ts\n#EXTINF:6.0,\nc.ts\n",
+        );
+        assert!(!continues(&before, &renumbered));
     }
 
     #[test]
