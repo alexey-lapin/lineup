@@ -295,7 +295,10 @@ impl Store {
             rows,
             mut report,
             all_or_nothing,
+            name,
+            enabled,
         } = publish;
+        let name = name.map(|n| normalize_route_name(&n)).transpose()?;
         let _guard = self.write_lock.lock().await;
         let mut tx = self.pool.begin().await?;
         let old = load(&mut tx, route_id).await?;
@@ -303,6 +306,27 @@ impl Store {
             return Err(conflict(format!(
                 "route {route_id} changed while its channels were being revalidated; try again"
             )));
+        }
+        // Channels that joined the route after the snapshot were never validated with this config.
+        let validated: std::collections::HashSet<i64> = rows
+            .iter()
+            .map(|r| r.channel_id)
+            .chain(report.failed.iter().map(|f| f.channel_id))
+            .collect();
+        let members = sqlx::query("SELECT id, name FROM channels WHERE route_id=?")
+            .bind(route_id)
+            .fetch_all(&mut *tx)
+            .await?;
+        for m in &members {
+            let id: i64 = m.try_get("id")?;
+            if !validated.contains(&id) {
+                report.skipped.push(ResyncItem {
+                    channel_id: id,
+                    name: m.try_get("name")?,
+                    reason: "it joined the route during the resync; resync again".into(),
+                });
+                report.total += 1;
+            }
         }
         let mut changed_channels = 0usize;
         let mut writes = Vec::new();
@@ -376,6 +400,21 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
         }
+        let enabled_changed = enabled.is_some_and(|e| e != old.enabled);
+        if name.is_some() || enabled.is_some() {
+            let res = sqlx::query("UPDATE routes SET name=?, enabled=? WHERE id=?")
+                .bind(name.as_ref().unwrap_or(&old.name))
+                .bind(enabled.unwrap_or(old.enabled))
+                .bind(route_id)
+                .execute(&mut *tx)
+                .await;
+            if let Err(e) = res {
+                if is_unique_violation(&e) {
+                    return Err(conflict(format!("a route named {:?} exists", name.unwrap_or_default())));
+                }
+                return Err(e.into());
+            }
+        }
         if report.complete {
             sqlx::query("UPDATE routes SET synced_match_revision=?, synced_play_revision=? WHERE id=?")
                 .bind(&report.match_revision)
@@ -390,7 +429,7 @@ impl Store {
             .bind(route_id)
             .execute(&mut *tx)
             .await?;
-        let affected: BTreeSet<String> = if base_changed || changed_channels > 0 {
+        let affected: BTreeSet<String> = if base_changed || changed_channels > 0 || enabled_changed {
             slugs_with_route(&mut tx, route_id).await?.into_iter().collect()
         } else {
             BTreeSet::new()
@@ -415,6 +454,9 @@ pub struct ResyncPublish {
     /// Pre-filled with the validation failures and the revisions validated against.
     pub report: ResyncReport,
     pub all_or_nothing: bool,
+    /// Metadata changes of the same request, applied in the same transaction.
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
 }
 
 fn resync_refusal(report: &ResyncReport) -> String {

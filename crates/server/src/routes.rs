@@ -37,11 +37,24 @@ impl Validated {
     }
 }
 
-/// Per input: validated, or why the route did not accept it.
+/// Per input: validated, not accepted by the route, or failed in the gateway.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     Ok(Validated),
+    /// The route does not accept this input (invalid input).
     Rejected(String),
+    /// The gateway accepts the input's form but failed to process it (a gateway error).
+    Failed(String),
+}
+
+impl Outcome {
+    /// Why the input was not validated, for reports that list skipped entries.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Outcome::Ok(_) => None,
+            Outcome::Rejected(r) | Outcome::Failed(r) => Some(r),
+        }
+    }
 }
 
 /// Results of validating a batch with one route.
@@ -85,7 +98,7 @@ pub async fn validate(gw: &Gateway, config: &RouteConfig, inputs: &[String]) -> 
                         Some(r) => format!("the route does not accept this input: {r}"),
                         None => "the route does not accept this input".into(),
                     }),
-                    MatchResult::Error { error, .. } => Outcome::Rejected(format!(
+                    MatchResult::Error { error, .. } => Outcome::Failed(format!(
                         "the gateway could not process this input: {} ({})",
                         error.message, error.code
                     )),
@@ -105,6 +118,7 @@ pub async fn validate_one(gw: &Gateway, config: &RouteConfig, input: &str) -> Re
     match batch.items.pop() {
         Some(Outcome::Ok(v)) => Ok((v, batch.rule)),
         Some(Outcome::Rejected(why)) => Err(invalid(why)),
+        Some(Outcome::Failed(why)) => Err(Error::GatewayError(why)),
         None => Err(Error::Internal("validation returned no result".into())),
     }
 }

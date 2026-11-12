@@ -85,12 +85,22 @@ impl Gateway {
                     chunk.len()
                 )));
             }
-            for r in &res.results {
+            let mut results = res.results;
+            for (r, sent) in results.iter_mut().zip(chunk) {
+                let input = match r {
+                    MatchResult::Matched(m) => &m.input,
+                    MatchResult::NoMatch { input, .. } | MatchResult::Error { input, .. } => input,
+                };
+                if input != sent {
+                    return Err(Error::GatewayError(format!(
+                        "the gateway at {base} answered match results in another order than the inputs"
+                    )));
+                }
                 if let MatchResult::Matched(m) = r {
                     check_matched(base, m)?;
                 }
             }
-            out.extend(res.results);
+            out.extend(results);
         }
         Ok(out)
     }
@@ -104,10 +114,9 @@ impl Gateway {
                 refs: chunk.to_vec(),
             };
             let res: ObserveResponse = self.call(base, "observe", Some(&req), self.timing.observe).await?;
-            if res.results.len() != chunk.len() {
+            if res.results.len() != chunk.len() || res.results.iter().zip(chunk).any(|(o, r)| &o.reference != r) {
                 return Err(Error::GatewayError(format!(
-                    "the gateway at {base} answered {} observations for {} refs",
-                    res.results.len(),
+                    "the gateway at {base} answered observations that do not match the {} refs asked for",
                     chunk.len()
                 )));
             }
@@ -123,7 +132,13 @@ impl Gateway {
             reference: reference.to_string(),
             force,
         };
-        self.call(base, "check", Some(&req), self.timing.check).await
+        let res: CheckResponse = self.call(base, "check", Some(&req), self.timing.check).await?;
+        if res.reference != reference {
+            return Err(Error::GatewayError(format!(
+                "the gateway at {base} answered a check for another ref"
+            )));
+        }
+        Ok(res)
     }
 
     async fn call<B: Serialize, T: DeserializeOwned>(
@@ -178,8 +193,9 @@ fn unreachable(base: &str, e: reqwest::Error) -> Error {
     Error::GatewayUnreachable(format!("the gateway at {base} is unreachable: {}", e.without_url()))
 }
 
-/// A matched result must carry a usable identity, ref and play reference.
-fn check_matched(base: &str, m: &gateway_contract::Matched) -> Result<()> {
+/// A matched result must carry a usable identity, ref and play reference. An absolute play URL is
+/// normalised here, once, so rendering never has to interpret it again.
+fn check_matched(base: &str, m: &mut gateway_contract::Matched) -> Result<()> {
     let bad = |what: &str| {
         Err(Error::GatewayError(format!(
             "the gateway at {base} matched {:?} with {what}",
@@ -192,29 +208,32 @@ fn check_matched(base: &str, m: &gateway_contract::Matched) -> Result<()> {
     if m.reference.trim().is_empty() {
         return bad("an empty ref");
     }
-    if !valid_play(&m.play) {
-        return bad("a play reference that is neither a relative path nor an http(s) URL");
-    }
-    Ok(())
-}
-
-/// A play reference is an absolute http(s) URL or a relative path without a scheme.
-fn valid_play(play: &str) -> bool {
-    let p = play.trim();
-    if p.is_empty() || p.chars().any(char::is_whitespace) {
-        return false;
-    }
-    match url::Url::parse(p) {
-        Ok(u) => matches!(u.scheme(), "http" | "https") && u.host_str().is_some(),
-        Err(url::ParseError::RelativeUrlWithoutBase) => !p.starts_with("//"),
-        Err(_) => false,
+    match normalize_play(&m.play) {
+        Some(p) => {
+            m.play = p;
+            Ok(())
+        }
+        None => bad("a play reference that is neither a relative path nor an http(s) URL"),
     }
 }
 
-/// The URL players get for a play reference: an absolute URL as it is, a relative one appended
-/// below the gateway base path (so a reverse-proxy prefix such as `/gateway` is kept).
+/// A play reference as stored: an absolute http(s) URL in normal form, or a relative path without
+/// a scheme. None for anything else (including surrounding or inner whitespace).
+fn normalize_play(play: &str) -> Option<String> {
+    if play.is_empty() || play.chars().any(char::is_whitespace) {
+        return None;
+    }
+    match url::Url::parse(play) {
+        Ok(u) => (matches!(u.scheme(), "http" | "https") && u.host_str().is_some()).then(|| u.to_string()),
+        Err(url::ParseError::RelativeUrlWithoutBase) => (!play.starts_with("//")).then(|| play.to_string()),
+        Err(_) => None,
+    }
+}
+
+/// The URL players get for a stored play reference: an absolute URL as it is, a relative one
+/// appended below the gateway base path (so a reverse-proxy prefix such as `/gateway` is kept).
 pub fn play_url(base: &str, play: &str) -> String {
-    if play.starts_with("http://") || play.starts_with("https://") {
+    if url::Url::parse(play).is_ok() {
         return play.to_string();
     }
     format!("{}/{}", base.trim_end_matches('/'), play.trim_start_matches('/'))
@@ -247,12 +266,28 @@ mod tests {
 
     #[test]
     fn play_references() {
-        assert!(valid_play("play/vk.m3u8?ref=a%20b"));
-        assert!(valid_play("http://acexy:8080/ace/getstream?id=1"));
-        assert!(!valid_play(""));
-        assert!(!valid_play("javascript:alert(1)"));
-        assert!(!valid_play("//evil/x"));
-        assert!(!valid_play("ftp://x/y"));
-        assert!(!valid_play("play/a b"));
+        assert_eq!(
+            normalize_play("play/vk.m3u8?ref=a%20b").as_deref(),
+            Some("play/vk.m3u8?ref=a%20b")
+        );
+        assert_eq!(
+            normalize_play("http://acexy:8080/ace/getstream?id=1").as_deref(),
+            Some("http://acexy:8080/ace/getstream?id=1")
+        );
+        // Accepted absolute URLs are stored normalised and render as themselves.
+        let mixed = normalize_play("HTTPS://Acexy.Example/ace/getstream?id=1").unwrap();
+        assert_eq!(mixed, "https://acexy.example/ace/getstream?id=1");
+        assert_eq!(play_url("http://gw/prefix", &mixed), mixed);
+        for bad in [
+            "",
+            " play/x",
+            "play/x ",
+            "javascript:alert(1)",
+            "//evil/x",
+            "ftp://x/y",
+            "play/a b",
+        ] {
+            assert_eq!(normalize_play(bad), None, "{bad:?}");
+        }
     }
 }

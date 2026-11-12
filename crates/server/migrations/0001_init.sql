@@ -31,7 +31,7 @@ INSERT INTO routes (name, kind, created_at, updated_at) VALUES
     ('Direct', 'direct', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'));
 
 CREATE TABLE channels (
-    id              INTEGER PRIMARY KEY,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused: delayed writes can't hit a newer channel
     name            TEXT    NOT NULL,
     group_title     TEXT,
     tvg_id          TEXT,

@@ -148,7 +148,11 @@ impl Catalog {
                     tvg_logo: e.attr("tvg-logo").map(str::to_string),
                     validated,
                 }),
-                Outcome::Rejected(why) => skipped_lines.push(format!("entry {} ({name}): {why}", i + 1)),
+                other => skipped_lines.push(format!(
+                    "entry {} ({name}): {}",
+                    i + 1,
+                    other.reason().unwrap_or_default()
+                )),
             }
         }
         self.store
@@ -182,8 +186,12 @@ impl Catalog {
                     base_url: base.clone(),
                     rule: rule.clone(),
                 };
-                self.resync_with(&row, config, Some(base), ResyncTrigger::BaseUrlChange)
-                    .await?;
+                // Name and enabled go into the same transaction: all or nothing.
+                let meta = (patch.name.clone(), patch.enabled);
+                return Ok(self
+                    .resync_with(&row, config, Some(base), ResyncTrigger::BaseUrlChange, meta)
+                    .await?
+                    .0);
             }
         }
         if patch.name.is_some() || patch.enabled.is_some() {
@@ -199,7 +207,7 @@ impl Catalog {
             return Err(invalid("a direct route has nothing to resync"));
         }
         let config = row.config.clone();
-        self.resync_with(&row, config, None, trigger).await
+        self.resync_with(&row, config, None, trigger, (None, None)).await
     }
 
     async fn resync_with(
@@ -208,6 +216,7 @@ impl Catalog {
         config: RouteConfig,
         new_base: Option<String>,
         trigger: ResyncTrigger,
+        (name, enabled): (Option<String>, Option<bool>),
     ) -> Result<(Route, ResyncReport)> {
         let channels = self.store.route_channel_sources(row.id).await?;
         let inputs: Vec<String> = channels.iter().map(|c| c.source.clone()).collect();
@@ -228,10 +237,10 @@ impl Catalog {
                     based_on: c.source_revision,
                     validated,
                 }),
-                Outcome::Rejected(why) => report.failed.push(ResyncItem {
+                other => report.failed.push(ResyncItem {
                     channel_id: c.channel_id,
                     name: c.name,
-                    reason: why,
+                    reason: other.reason().unwrap_or_default().to_string(),
                 }),
             }
         }
@@ -244,6 +253,8 @@ impl Catalog {
                 rows,
                 report,
                 all_or_nothing,
+                name,
+                enabled,
             })
             .await
     }

@@ -135,6 +135,17 @@ async fn a_failing_gateway_stops_its_route_and_records_unknown() {
 }
 
 #[tokio::test]
+async fn a_check_answer_for_another_ref_is_refused() {
+    let f = fixture().await;
+    let a = f.channel("A", f.route, ACE1).await;
+    f.gw.fail(Failure::WrongCheckRef);
+    let r = f.app.checker.check(&[a], false).await.unwrap();
+    assert_eq!(r[0].outcome, CheckOutcome::Unknown);
+    let h = f.store.get_channel(a).await.unwrap().health.unwrap();
+    assert_eq!((h.conclusive, h.reason.as_deref()), (None, Some("gateway_error")));
+}
+
+#[tokio::test]
 async fn check_all_covers_enabled_channels_of_checkable_routes() {
     let f = fixture().await;
     let vk = f
