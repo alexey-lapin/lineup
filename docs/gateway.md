@@ -45,9 +45,9 @@ CDN, with the user agent the lookup used, so the URLs are not revoked by other c
 - An upstream 400/401/403/404/410 means the signed URLs expired (VK answers 400). The lookup is
   dropped. A media playlist is refreshed once per session (concurrent requests share one refresh),
   and only onto the new master's playlist with exactly the same definition (variant attributes or
-  rendition tag) whose timeline provably continues: same live/recorded state, same target
-  duration, media sequence within or right after the window already served, and never a growing
-  playlist continued as a finished one. Otherwise, and for segments, the player gets 410 and its
+  rendition tag) whose timeline provably continues: same live/recorded state, target duration and
+  init sections, a media sequence inside the window already served with every overlapping segment
+  of exactly the same duration, and never a growing playlist continued as a finished one. Otherwise, and for segments, the player gets 410 and its
   next open starts afresh (on the recording, once the broadcast has ended).
 - Status: ENDLIST with segments and a lookup that is not live is a recording; ENDLIST from a lookup
   that still says live, or without segments, is "ended, recording not ready" (inconclusive in
