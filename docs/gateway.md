@@ -37,13 +37,28 @@ CDN, with the user agent the lookup used, so the URLs are not revoked by other c
 - While the broadcast is live the playlists are live; after it ends, opening the same URL again
   plays the recording, which is seekable. A session started on the live broadcast stays live until
   the player reopens the channel.
-- Lookups are cached: 60 s for live broadcasts, up to 3 h for recordings (never past the signed
-  URL's expiry); failures back off (1, 2, 5, 10 min). An upstream 401/403/404/410 drops the lookup
-  and answers 410, so the player's next open starts afresh.
+- Lookups are cached for 60 s; once a media playlist with `#EXT-X-ENDLIST` is seen for a lookup
+  that did not say live, up to 3 h (never past the signed URL's expiry). Failures back off (1, 2,
+  5, 10 min). Lookups are coalesced per page, at most 16 are admitted at once, and background
+  work (observe, check) uses one slot so playback always has one.
+- An upstream 400/401/403/404/410 means the signed URLs expired (VK answers 400). The lookup is
+  dropped. A media playlist is refreshed once per session, and only onto the new master's playlist
+  with exactly the same definition (variant attributes or rendition tag); otherwise, and for
+  segments, the player gets 410 and its next open starts afresh.
+- Status: ENDLIST with segments and a lookup that is not live is a recording; ENDLIST from a lookup
+  that still says live, or without segments, is "ended, recording not ready" (inconclusive in
+  checks). Only explicit "video not found/removed/private" messages from the extractors count as a
+  dead video; parser and network errors are inconclusive.
 - Range requests are passed through to segments (one range only); nothing else from the player is
   forwarded.
-- Refused: LL-HLS parts and hints, content steering, session data URIs, keys other than plain
-  AES-128. No transcoding: DASH-only or MP4-only pages fail clearly.
+- Refused: LL-HLS parts and hints, content steering, variable substitution, session data URIs,
+  any other tag carrying a URI (for example image playlists), and keys other than plain AES-128. No
+  transcoding: DASH-only or MP4-only pages fail clearly.
+- Sessions: at most `limits.sessions`; idle ones are evicted, but a session used within the last
+  minute never is, so a new viewer gets 503 instead of stopping an active one. HEAD opens no session.
+- Upstream requests carry only the lookup's User-Agent, Accept, Accept-Language, Referer and
+  Origin, for every host of the stream. Cookies and authorization are never sent: sites whose
+  media needs them are not supported.
 
 ## Network boundary
 
@@ -52,9 +67,23 @@ CDN, with the user agent the lookup used, so the URLs are not revoked by other c
   extractors are forced through an in-process proxy that applies this rule.
 - The Acestream rule talks only to its configured `engine_control` and `acexy_control` origins and
   never follows redirects; URLs the engine reports are validated and rebased onto the engine.
-- Defence in depth on the host: drop the container's outbound traffic to private ranges except DNS
-  and the engine/acexy host:port pairs, for example with `DOCKER-USER` iptables rules.
+- Ambient `HTTP(S)_PROXY` settings are ignored, so no proxy can resolve names past this rule.
+- Not shipped, recommended on the host: drop the container's outbound traffic to private ranges
+  except DNS and the engine/acexy host:port pairs, for example with `DOCKER-USER` iptables rules.
 - No authentication: run it on a trusted LAN only.
+
+## Acestream checks
+
+Checks need `acestream.acexy_control`: only acexy can tell whether someone is watching. Without it
+the rule offers no checks (also not forced ones). One probe runs per engine at a time; a probe that
+was started always stops its own engine session, even when lineup stops waiting. Observing a
+channel shows the engine's own name and, while acexy serves the stream, its live numbers.
+
+## Health and shutdown
+
+`lineup-gateway --healthcheck` asks the configured port's `/healthz` (the image's HEALTHCHECK uses
+it). SIGTERM and SIGINT stop the server gracefully. At startup each configured tool must answer
+`--version`, or the gateway does not start.
 
 ## Updating the extractors
 

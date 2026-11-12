@@ -7,12 +7,15 @@
 //! init sections are streamed, with `Range` passed through. Only the gateway talks to the CDN, with
 //! the headers the lookup found; client headers other than `Range`/`If-Range` are never forwarded.
 //!
-//! An upstream 401/403/404/410 means the signed URLs expired or were revoked: the lookup is
-//! dropped from the cache and the client gets 410, so reopening the play URL starts afresh. A
-//! session never switches to another lookup (no splicing of a recording into a live timeline).
+//! An upstream 400/401/403/404/410 means the signed URLs expired or were revoked (VK answers 400
+//! for a rejected signature). The lookup is dropped from the cache. A child playlist is then
+//! refreshed once: the page is looked up again and the session continues only if the new master
+//! has a playlist with exactly the same definition (variant attributes or rendition tag); otherwise,
+//! and for segments, the client gets 410 and reopening the play URL starts afresh. A session never
+//! splices another rendition or a recording into its timeline.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use axum::body::Body;
@@ -26,16 +29,22 @@ use crate::net::{Allow, check_url, read_capped};
 
 struct Session {
     page: String,
-    headers: Vec<(String, String)>,
-    entries: Vec<(Url, Kind)>,
+    descriptor: Descriptor,
+    /// Upstream URL, kind and identifying context (see `hls::rewrite`) of each mapped resource.
+    entries: Vec<(Url, Kind, String)>,
     index: HashMap<String, usize>,
     last_used: Instant,
+    /// The one compatible refresh after expired URLs was used.
+    refreshed: bool,
 }
+
+/// A session used this recently is treated as being watched and is never evicted.
+const ACTIVE: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub struct Relay {
     pub client: reqwest::Client,
     pub allow: Allow,
-    pub extractor: Arc<Extractor>,
+    pub extractor: Extractor,
     sessions: Mutex<HashMap<String, Session>>,
     max_sessions: usize,
     max_resources: usize,
@@ -46,12 +55,7 @@ pub struct Relay {
 const HLS_TYPE: &str = "application/vnd.apple.mpegurl";
 
 impl Relay {
-    pub fn new(
-        client: reqwest::Client,
-        allow: Allow,
-        extractor: Arc<Extractor>,
-        limits: &crate::config::Limits,
-    ) -> Self {
+    pub fn new(client: reqwest::Client, allow: Allow, extractor: Extractor, limits: &crate::config::Limits) -> Self {
         Relay {
             client,
             allow,
@@ -64,18 +68,28 @@ impl Relay {
         }
     }
 
-    /// Open a session for `page` and answer with its rewritten master playlist.
+    /// Open a session for `page` and answer with its rewritten master playlist. HEAD answers the
+    /// headers only, without a lookup or a session.
     pub async fn play(&self, page: &str, head: bool) -> Response {
+        if head {
+            return playlist_response(String::new(), true);
+        }
         let d = match self.extractor.descriptor(page, Priority::Playback).await {
             Ok(d) => d,
             Err(e) => return extract_error(&e),
         };
-        let sid = self.open_session(page, &d);
-        let (body, _) = match self.fetch_playlist(&sid, &d.manifest_url, &d.headers, true).await {
-            Ok(r) => r,
-            Err(r) => return r,
+        let Some(sid) = self.open_session(page, &d) else {
+            return text(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many streams are being watched; try again later",
+            );
         };
-        playlist_response(body, head)
+        let (body, _) = match self.fetch_playlist(&sid, &d.manifest_url, true).await {
+            Ok(r) => r,
+            Err(Refetch::Response(r)) => return r,
+            Err(Refetch::Expired) => return self.expired(&sid),
+        };
+        playlist_response(body, false)
     }
 
     /// Serve `/play/s/<sid>/<file>`.
@@ -95,18 +109,67 @@ impl Relay {
             s.entries
                 .get(n)
                 .cloned()
-                .map(|(u, k)| (u, k, s.headers.clone(), s.page.clone()))
+                .map(|(u, k, _)| (u, k, s.descriptor.headers.clone(), s.page.clone()))
         };
         let Some((url, kind, headers, page)) = entry else {
             return text(StatusCode::NOT_FOUND, "no such resource");
         };
         match kind {
-            Kind::Playlist => match self.fetch_playlist(sid, url.as_str(), &headers, false).await {
+            Kind::Playlist => match self.fetch_playlist(sid, url.as_str(), false).await {
                 Ok((body, _)) => playlist_response(body, head),
-                Err(r) => r,
+                Err(Refetch::Expired) => match self.refresh(sid, n).await {
+                    Some(new_url) => match self.fetch_playlist(sid, new_url.as_str(), false).await {
+                        Ok((body, _)) => playlist_response(body, head),
+                        Err(_) => self.expired(sid),
+                    },
+                    None => self.expired(sid),
+                },
+                Err(Refetch::Response(r)) => r,
             },
             Kind::Resource => self.stream(&url, &headers, &page, req, head).await,
         }
+    }
+
+    /// End a session whose URLs expired; the client reopens the play URL.
+    fn expired(&self, sid: &str) -> Response {
+        self.forget(sid);
+        text(StatusCode::GONE, "the stream's URLs expired; open the channel again")
+    }
+
+    /// After expired URLs: look the page up again and, once per session, move entry `n` onto the
+    /// new master's playlist with the same definition. None when that is not possible.
+    async fn refresh(&self, sid: &str, n: usize) -> Option<Url> {
+        let (page, context) = {
+            let sessions = self.sessions.lock().unwrap();
+            let s = sessions.get(sid)?;
+            if s.refreshed {
+                return None;
+            }
+            (s.page.clone(), s.entries.get(n)?.2.clone())
+        };
+        if context.is_empty() {
+            return None;
+        }
+        self.extractor.invalidate(&page);
+        let d = self.extractor.descriptor(&page, Priority::Playback).await.ok()?;
+        let (body, final_url) = self.get_text(&d.manifest_url, &d.headers).await.ok()?;
+        let mut found = None;
+        hls::rewrite(&body, &final_url, |u, k, c| {
+            if k == Kind::Playlist && c == context && found.is_none() {
+                found = Some(u);
+            }
+            Ok(String::new())
+        })
+        .ok()?;
+        let new_url = found?;
+        let mut sessions = self.sessions.lock().unwrap();
+        let s = sessions.get_mut(sid)?;
+        s.refreshed = true;
+        s.descriptor = d;
+        s.index.insert(new_url.to_string(), n);
+        s.entries[n].0 = new_url.clone();
+        tracing::info!("session {sid}: refreshed expired URLs for a compatible playlist");
+        Some(new_url)
     }
 
     /// The content state of `page`: its lookup's live flag and its first media playlist's ENDLIST.
@@ -114,12 +177,17 @@ impl Relay {
         let d = self.extractor.descriptor(page, priority).await?;
         let mut url = d.manifest_url.clone();
         for _ in 0..2 {
-            let (body, final_url) = self
-                .get_text(&url, &d.headers)
-                .await
-                .map_err(|e| ExtractError::Failed(format!("fetching the playlist: {e}")))?;
+            let (body, final_url) = match self.get_text(&url, &d.headers).await {
+                Ok(r) => r,
+                Err(Upstream::Gone) => {
+                    // The lookup's URLs no longer work: the next lookup must be a new one.
+                    self.extractor.invalidate(page);
+                    return Err(ExtractError::Failed("the stream's URLs expired".into()));
+                }
+                Err(e) => return Err(ExtractError::Failed(format!("fetching the playlist: {e}"))),
+            };
             let mut first_variant = None;
-            let (_, summary) = hls::rewrite(&body, &final_url, |u, k| {
+            let (_, summary) = hls::rewrite(&body, &final_url, |u, k, _| {
                 if k == Kind::Playlist && first_variant.is_none() {
                     first_variant = Some(u.to_string());
                 }
@@ -128,66 +196,76 @@ impl Relay {
             .map_err(|e| ExtractError::Failed(format!("the playlist: {e}")))?;
             match (summary.master, first_variant) {
                 (true, Some(v)) => url = v,
-                _ => return Ok((d, summary)),
+                _ => {
+                    if summary.ended {
+                        self.extractor.observed_ended(page, &d);
+                    }
+                    return Ok((d, summary));
+                }
             }
         }
         Err(ExtractError::Failed("nested master playlists".into()))
     }
 
-    fn open_session(&self, page: &str, d: &Descriptor) -> String {
+    /// A new session, or None when every slot is held by a session watched right now (active
+    /// viewers are never evicted; idle ones are, least recently used first).
+    fn open_session(&self, page: &str, d: &Descriptor) -> Option<String> {
         let sid = new_id();
         let mut sessions = self.sessions.lock().unwrap();
         let now = Instant::now();
         sessions.retain(|_, s| now.duration_since(s.last_used) < self.idle);
         while sessions.len() >= self.max_sessions {
-            // Drop the least recently used.
-            let Some(oldest) = sessions.iter().min_by_key(|(_, s)| s.last_used).map(|(k, _)| k.clone()) else {
-                break;
-            };
+            let oldest = sessions
+                .iter()
+                .filter(|(_, s)| now.duration_since(s.last_used) >= ACTIVE)
+                .min_by_key(|(_, s)| s.last_used)
+                .map(|(k, _)| k.clone())?;
             sessions.remove(&oldest);
         }
         sessions.insert(
             sid.clone(),
             Session {
                 page: page.to_string(),
-                headers: d.headers.clone(),
+                descriptor: d.clone(),
                 entries: Vec::new(),
                 index: HashMap::new(),
                 last_used: now,
+                refreshed: false,
             },
         );
-        sid
+        Some(sid)
     }
 
     /// Fetch and rewrite a playlist of session `sid`. `top`: the master, served at
     /// `/play/<rule>.m3u8`, whose URIs need the `s/<sid>/` prefix.
-    async fn fetch_playlist(
-        &self,
-        sid: &str,
-        url: &str,
-        headers: &[(String, String)],
-        top: bool,
-    ) -> Result<(String, Summary), Response> {
-        let (body, final_url) = match self.get_text(url, headers).await {
-            Ok(r) => r,
-            Err(Upstream::Gone) => {
-                self.forget(sid);
-                return Err(text(
-                    StatusCode::GONE,
-                    "the stream's URLs expired; open the channel again",
-                ));
+    async fn fetch_playlist(&self, sid: &str, url: &str, top: bool) -> Result<(String, Summary), Refetch> {
+        let headers = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(sid) {
+                Some(s) => s.descriptor.headers.clone(),
+                None => {
+                    return Err(Refetch::Response(text(
+                        StatusCode::GONE,
+                        "this playback session expired; open the channel again",
+                    )));
+                }
             }
-            Err(e) => return Err(text(StatusCode::BAD_GATEWAY, &e.to_string())),
+        };
+        let (body, final_url) = match self.get_text(url, &headers).await {
+            Ok(r) => r,
+            Err(Upstream::Gone) if top => return Err(Refetch::Response(self.expired(sid))),
+            Err(Upstream::Gone) => return Err(Refetch::Expired),
+            Err(e) => return Err(Refetch::Response(text(StatusCode::BAD_GATEWAY, &e.to_string()))),
         };
         let mut sessions = self.sessions.lock().unwrap();
         let Some(s) = sessions.get_mut(sid) else {
-            return Err(text(
+            return Err(Refetch::Response(text(
                 StatusCode::GONE,
                 "this playback session expired; open the channel again",
-            ));
+            )));
         };
         let max = self.max_resources;
-        let rewritten = hls::rewrite(&body, &final_url, |u, k| {
+        let rewritten = hls::rewrite(&body, &final_url, |u, k, context| {
             let key = u.to_string();
             let n = match s.index.get(&key) {
                 Some(n) => *n,
@@ -195,7 +273,7 @@ impl Relay {
                     if s.entries.len() >= max {
                         return Err("this playback session has too many resources".into());
                     }
-                    s.entries.push((u.clone(), k));
+                    s.entries.push((u.clone(), k, context.to_string()));
                     s.index.insert(key, s.entries.len() - 1);
                     s.entries.len() - 1
                 }
@@ -211,8 +289,17 @@ impl Relay {
             })
         });
         match rewritten {
-            Ok(r) => Ok(r),
-            Err(e) => Err(text(StatusCode::BAD_GATEWAY, &format!("cannot relay this stream: {e}"))),
+            Ok((body, summary)) => {
+                if summary.ended && !summary.master {
+                    // A finished media playlist: unless the lookup said live, keep it longer.
+                    self.extractor.observed_ended(&s.page, &s.descriptor);
+                }
+                Ok((body, summary))
+            }
+            Err(e) => Err(Refetch::Response(text(
+                StatusCode::BAD_GATEWAY,
+                &format!("cannot relay this stream: {e}"),
+            ))),
         }
     }
 
@@ -235,7 +322,7 @@ impl Relay {
             .await
             .map_err(|e| Upstream::Failed(e.without_url().to_string()))?;
         let status = res.status().as_u16();
-        if matches!(status, 401 | 403 | 404 | 410) {
+        if expired_status(status) {
             return Err(Upstream::Gone);
         }
         if !res.status().is_success() {
@@ -281,7 +368,7 @@ impl Relay {
             Err(e) => return text(StatusCode::BAD_GATEWAY, &format!("upstream: {}", e.without_url())),
         };
         let status = res.status().as_u16();
-        if matches!(status, 401 | 403 | 404 | 410) {
+        if expired_status(status) {
             self.extractor.invalidate(page);
             return text(StatusCode::GONE, "the stream's URLs expired; open the channel again");
         }
@@ -310,6 +397,17 @@ impl Relay {
         out.body(body)
             .unwrap_or_else(|_| text(StatusCode::BAD_GATEWAY, "bad upstream response"))
     }
+}
+
+/// Statuses a CDN answers for an expired or rejected signed URL (VK: 400).
+fn expired_status(status: u16) -> bool {
+    matches!(status, 400 | 401 | 403 | 404 | 410)
+}
+
+enum Refetch {
+    /// The playlist's URL expired; a compatible refresh may help.
+    Expired,
+    Response(Response),
 }
 
 #[derive(Debug, thiserror::Error)]

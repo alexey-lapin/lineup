@@ -39,12 +39,14 @@ pub struct Summary {
     pub segments: usize,
 }
 
-/// Rewrite `body` (fetched from `base`). `map` gets each absolute URI and its kind and returns the
-/// text to write instead.
+/// Rewrite `body` (fetched from `base`). `map` gets each absolute URI, its kind and its context,
+/// and returns the text to write instead. The context identifies a playlist independently of its
+/// (signed) URL: the variant's `EXT-X-STREAM-INF` line, or the rendition tag without its URI;
+/// it is empty for resources.
 pub fn rewrite(
     body: &str,
     base: &Url,
-    mut map: impl FnMut(Url, Kind) -> Result<String, String>,
+    mut map: impl FnMut(Url, Kind, &str) -> Result<String, String>,
 ) -> Result<(String, Summary), HlsError> {
     let body = body.strip_prefix('\u{feff}').unwrap_or(body);
     let mut lines = body.lines();
@@ -54,7 +56,7 @@ pub fn rewrite(
     let mut out = String::with_capacity(body.len() + 256);
     out.push_str("#EXTM3U\n");
     let mut summary = Summary::default();
-    let mut next_is_variant = false;
+    let mut variant_tag: Option<String> = None;
     for raw in lines {
         let line = raw.trim_end_matches('\r');
         let t = line.trim();
@@ -70,7 +72,11 @@ pub fn rewrite(
             }
             let name = tag.split(':').next().unwrap_or(tag);
             match name {
-                "EXT-X-PART" | "EXT-X-PRELOAD-HINT" | "EXT-X-RENDITION-REPORT" | "EXT-X-CONTENT-STEERING" => {
+                "EXT-X-PART"
+                | "EXT-X-PRELOAD-HINT"
+                | "EXT-X-RENDITION-REPORT"
+                | "EXT-X-CONTENT-STEERING"
+                | "EXT-X-DEFINE" => {
                     return Err(HlsError::Unsupported(name.into()));
                 }
                 "EXT-X-SESSION-DATA" if attr(tag, "URI").is_some() => {
@@ -88,7 +94,7 @@ pub fn rewrite(
                 "EXT-X-ENDLIST" => summary.ended = true,
                 "EXT-X-STREAM-INF" => {
                     summary.master = true;
-                    next_is_variant = true;
+                    variant_tag = Some(t.to_string());
                 }
                 _ => {}
             }
@@ -97,10 +103,18 @@ pub fn rewrite(
                 "EXT-X-KEY" | "EXT-X-SESSION-KEY" | "EXT-X-MAP" => Some(Kind::Resource),
                 _ => None,
             };
+            // Any other tag carrying a URI would leak it to the player: refuse it.
+            if kind.is_none() && attr(tag, "URI").is_some() && name != "EXT-X-SESSION-DATA" {
+                return Err(HlsError::Unsupported(format!("{name} with URI")));
+            }
             match kind.zip(attr(tag, "URI")) {
                 Some((k, uri)) => {
                     let abs = resolve(base, &uri)?;
-                    let mapped = map(abs, k).map_err(HlsError::Map)?;
+                    let context = match k {
+                        Kind::Playlist => format!("#{}", replace_attr(tag, "URI", "")),
+                        Kind::Resource => String::new(),
+                    };
+                    let mapped = map(abs, k, &context).map_err(HlsError::Map)?;
                     out.push('#');
                     out.push_str(&replace_attr(tag, "URI", &mapped));
                 }
@@ -110,14 +124,15 @@ pub fn rewrite(
             continue;
         }
         // A URI line: a variant playlist after EXT-X-STREAM-INF, otherwise a segment.
-        let kind = if std::mem::take(&mut next_is_variant) {
-            Kind::Playlist
-        } else {
-            summary.segments += 1;
-            Kind::Resource
+        let (kind, context) = match variant_tag.take() {
+            Some(tag) => (Kind::Playlist, tag),
+            None => {
+                summary.segments += 1;
+                (Kind::Resource, String::new())
+            }
         };
         let abs = resolve(base, t)?;
-        out.push_str(&map(abs, kind).map_err(HlsError::Map)?);
+        out.push_str(&map(abs, kind, &context).map_err(HlsError::Map)?);
         out.push('\n');
     }
     Ok((out, summary))
@@ -205,7 +220,7 @@ mod tests {
 
     fn run(body: &str, base: &str) -> Result<Rewritten, HlsError> {
         let mut seen = Vec::new();
-        let (out, s) = rewrite(body, &Url::parse(base).unwrap(), |u, k| {
+        let (out, s) = rewrite(body, &Url::parse(base).unwrap(), |u, k, _| {
             seen.push((u.to_string(), k));
             Ok(format!("R{}", seen.len()))
         })?;
@@ -268,6 +283,25 @@ mod tests {
     }
 
     #[test]
+    fn contexts_identify_playlists_without_their_urls() {
+        let body = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",URI=\"a.m3u8?sig=1\"\n\
+            #EXT-X-STREAM-INF:BANDWIDTH=1000\nv.m3u8?sig=1\n";
+        let mut ctx = Vec::new();
+        rewrite(body, &Url::parse("https://c/m.m3u8").unwrap(), |_, _, c| {
+            ctx.push(c.to_string());
+            Ok(String::new())
+        })
+        .unwrap();
+        assert_eq!(
+            ctx,
+            [
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",URI=\"\"",
+                "#EXT-X-STREAM-INF:BANDWIDTH=1000"
+            ]
+        );
+    }
+
+    #[test]
     fn refuses_what_it_cannot_relay() {
         for body in [
             "#EXTM3U\n#EXT-X-PART:DURATION=1,URI=\"p.mp4\"\n",
@@ -276,6 +310,8 @@ mod tests {
             "#EXTM3U\n#EXT-X-SESSION-DATA:DATA-ID=\"x\",URI=\"d.json\"\n",
             "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n",
             "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n",
+            "#EXTM3U\n#EXT-X-IMAGE-STREAM-INF:BANDWIDTH=1,URI=\"https://cdn.example/thumbs.m3u8\"\n",
+            "#EXTM3U\n#EXT-X-DEFINE:NAME=\"x\",VALUE=\"y\"\n",
         ] {
             assert!(
                 matches!(run(body, "https://c/x.m3u8"), Err(HlsError::Unsupported(_))),

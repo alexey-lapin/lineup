@@ -52,17 +52,20 @@ jobs:
           pnpm test
 
   # Each architecture builds on its own native runner; emulating arm64 under
-  # QEMU makes the Rust build take well over an hour.
+  # QEMU makes the Rust build take well over an hour. Two images: lineup and lineup-gateway.
   image:
     needs: verify
     strategy:
       matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-24.04
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+        component:
+          - { name: lineup, file: Dockerfile }
+          - { name: lineup-gateway, file: Dockerfile.gateway }
+        arch:
+          - { platform: linux/amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.arch.runner }}
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.component.name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,28 +84,34 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.component.file }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ matrix.platform }}
+          platforms: ${{ matrix.arch.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.component.name }}-${{ matrix.arch.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component.name }}-${{ matrix.arch.platform }}
       - run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
       - uses: actions/upload-artifact@v4
         with:
-          name: digest-${{ matrix.runner }}
+          name: digest-${{ matrix.component.name }}-${{ matrix.arch.runner }}
           path: /tmp/digests/*
           retention-days: 1
 
   manifest:
     needs: image
+    strategy:
+      matrix:
+        name: [lineup, lineup-gateway]
     runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: digest-*
+          pattern: digest-${{ matrix.name }}-ubuntu-*
           path: /tmp/digests
           merge-multiple: true
       - uses: docker/setup-buildx-action@v3

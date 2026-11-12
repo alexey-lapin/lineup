@@ -145,6 +145,8 @@ impl reqwest::dns::Resolve for PublicResolver {
 pub fn public_client(allow: &Allow, timeout: Duration) -> reqwest::Client {
     let redirect_allow = allow.clone();
     reqwest::Client::builder()
+        // Ambient HTTP(S)_PROXY settings would let a proxy resolve names past the public-only rule.
+        .no_proxy()
         .dns_resolver(Arc::new(PublicResolver(allow.clone())))
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 5 {

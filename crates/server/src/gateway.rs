@@ -51,6 +51,7 @@ impl Default for Gateway {
 impl Gateway {
     pub fn new(timing: Timing) -> Self {
         let client = reqwest::Client::builder()
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("building an HTTP client");

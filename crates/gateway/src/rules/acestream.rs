@@ -44,15 +44,23 @@ pub struct Acestream {
     cfg: AcestreamConfig,
     client: reqwest::Client,
     timing: ProbeTiming,
-    /// One probe per engine at a time.
-    probe_lock: tokio::sync::Mutex<()>,
+    /// One probe per engine at a time. Held by the task that owns the probe, so a caller that goes
+    /// away does not release it while the probe still runs.
+    probe_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// Engine names already looked up (raw), for observe.
+    names: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>,
 }
+
+/// Total time a match batch spends on optional engine name lookups.
+const NAME_BUDGET: Duration = Duration::from_secs(20);
+const NAME_CACHE: Duration = Duration::from_secs(600);
 
 pub const MATCH_REVISION: &str = "1";
 
 impl Acestream {
     pub fn new(cfg: AcestreamConfig, timing: ProbeTiming) -> Self {
         let client = reqwest::Client::builder()
+            .no_proxy() // only the configured origins, directly
             .redirect(reqwest::redirect::Policy::none())
             .timeout(TIMEOUT)
             .build()
@@ -61,7 +69,8 @@ impl Acestream {
             cfg,
             client,
             timing,
-            probe_lock: tokio::sync::Mutex::new(()),
+            probe_lock: Default::default(),
+            names: Default::default(),
         }
     }
 
@@ -70,21 +79,45 @@ impl Acestream {
         format!("1:{}", short_hash(&self.cfg.acexy_public))
     }
 
+    /// Checks need acexy: only it can tell whether a stream is being watched.
     pub fn can_check(&self) -> bool {
-        true
+        self.cfg.acexy_control.is_some()
     }
 
     // ---------------------------------------------------------------- match
 
     pub async fn match_inputs(&self, inputs: &[String]) -> Vec<MatchResult> {
+        let deadline = tokio::time::Instant::now() + NAME_BUDGET;
         futures_util::stream::iter(inputs.iter().cloned())
-            .map(|input| async move { self.match_one(input).await })
+            .map(|input| async move { self.match_one(input, deadline).await })
             .buffered(8)
             .collect()
             .await
     }
 
-    async fn match_one(&self, input: String) -> MatchResult {
+    /// The engine's raw name for `id`, cached; bounded by `deadline`.
+    async fn name_until(&self, id: &str, deadline: tokio::time::Instant) -> Result<Option<String>, String> {
+        if let Some((at, n)) = self.names.lock().unwrap().get(id)
+            && at.elapsed() < NAME_CACHE
+        {
+            return Ok(n.clone());
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err("skipped: the batch's time for name lookups is used up".into());
+        }
+        let n = tokio::time::timeout(left, self.engine_name(id))
+            .await
+            .map_err(|_| "skipped: the batch's time for name lookups is used up".to_string())??;
+        let mut names = self.names.lock().unwrap();
+        names.retain(|_, (at, _)| at.elapsed() < NAME_CACHE);
+        if names.len() < 10_000 {
+            names.insert(id.to_string(), (std::time::Instant::now(), n.clone()));
+        }
+        Ok(n)
+    }
+
+    async fn match_one(&self, input: String, deadline: tokio::time::Instant) -> MatchResult {
         let Some(id) = parse_id(&input) else {
             return MatchResult::NoMatch {
                 input,
@@ -93,7 +126,7 @@ impl Acestream {
         };
         let mut warnings = vec![];
         let mut hints = Hints::default();
-        match self.engine_name(&id).await {
+        match self.name_until(&id, deadline).await {
             Ok(Some(raw)) => {
                 let (name, region) = clean_name(&raw);
                 if looks_like_sports(&name) {
@@ -153,7 +186,13 @@ impl Acestream {
             o.reason = Some("not an Acestream reference".into());
             return o;
         };
+        // The engine's own name, independently of acexy (the channel may have been renamed).
+        match self.name_until(&id, tokio::time::Instant::now() + TIMEOUT).await {
+            Ok(n) => o.title = n,
+            Err(e) => o.facts.push(fact("Engine name", format!("unavailable ({e})"))),
+        }
         let Some(acexy) = &self.cfg.acexy_control else {
+            o.available = o.title.is_some();
             o.reason = Some("live numbers come from acexy, which is not configured".into());
             return o;
         };
@@ -251,17 +290,7 @@ impl Acestream {
     }
 
     async fn get(&self, url: &str) -> Result<(u16, Vec<u8>), String> {
-        let res = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| e.without_url().to_string())?;
-        let status = res.status().as_u16();
-        let body = crate::net::read_capped(res, 64 * 1024)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok((status, body))
+        get(&self.client, url).await
     }
 
     // ---------------------------------------------------------------- check
@@ -282,42 +311,73 @@ impl Acestream {
                 json!({"error": "not an Acestream reference"}),
             );
         };
-        // One probe per engine at a time; the guard runs right before the probe, under the lock.
-        let _lock = self.probe_lock.lock().await;
-        if !force {
-            match self.guard(&id).await {
-                Guard::Go => {}
-                Guard::Busy(why) => return done(CheckOutcome::Skipped, Some("busy"), json!({ "reason": why })),
-                Guard::Unavailable(why) => {
-                    return done(
-                        CheckOutcome::Skipped,
-                        Some("guard_unavailable"),
-                        json!({ "reason": why }),
-                    );
+        // Without acexy there is no guard, so there are no checks, forced or not.
+        if self.cfg.acexy_control.is_none() {
+            return done(
+                CheckOutcome::Skipped,
+                Some("guard_unavailable"),
+                json!({ "reason": "checks need acexy, which tells whether a stream is watched" }),
+            );
+        }
+        // The lock, the guard and the probe all live in one task of its own: once started, a check
+        // finishes (stopping its session) and keeps the lock even if the caller goes away, so two
+        // probes never overlap.
+        let lock = self.probe_lock.clone();
+        let me = Checker {
+            client: self.client.clone(),
+            acexy: self.cfg.acexy_control.clone(),
+            run: ProbeRun {
+                client: self.client.clone(),
+                engine: self.cfg.engine_control.clone(),
+                timing: self.timing,
+            },
+        };
+        let owned = tokio::spawn(async move {
+            let _lock = lock.lock_owned().await;
+            if !force {
+                match me.guard(&id).await {
+                    Guard::Go => {}
+                    Guard::Busy(why) => return (CheckOutcome::Skipped, Some("busy"), json!({ "reason": why })),
+                    Guard::Unavailable(why) => {
+                        return (
+                            CheckOutcome::Skipped,
+                            Some("guard_unavailable"),
+                            json!({ "reason": why }),
+                        );
+                    }
                 }
             }
+            let (outcome, detail) = me.run.probe(&id).await;
+            let reason = (outcome == CheckOutcome::Unknown).then_some("engine_error");
+            (outcome, reason, detail)
+        });
+        match owned.await {
+            Ok((outcome, reason, detail)) => done(outcome, reason, detail),
+            Err(e) => done(
+                CheckOutcome::Unknown,
+                Some("engine_error"),
+                json!({ "error": e.to_string() }),
+            ),
         }
-        // Run in a task of its own: the session is stopped even if the caller goes away.
-        let me = ProbeRun {
-            client: self.client.clone(),
-            engine: self.cfg.engine_control.clone(),
-            timing: self.timing,
-        };
-        let (outcome, detail) = match tokio::spawn(async move { me.probe(&id).await }).await {
-            Ok(r) => r,
-            Err(e) => (CheckOutcome::Unknown, json!({ "error": e.to_string() })),
-        };
-        let reason = match outcome {
-            CheckOutcome::Unknown => Some("engine_error"),
-            _ => None,
-        };
-        done(outcome, reason, detail)
+    }
+}
+
+/// What a check needs, owned by its task.
+struct Checker {
+    client: reqwest::Client,
+    acexy: Option<String>,
+    run: ProbeRun,
+}
+
+impl Checker {
+    async fn get(&self, url: &str) -> Result<(u16, Vec<u8>), String> {
+        get(&self.client, url).await
     }
 
     /// Ask acexy whether `id` is being watched. A per-id status decides for that id; without it,
     /// any active stream makes this check wait; anything unreadable skips it (fail closed).
     async fn guard(&self, id: &str) -> Guard {
-        let Some(acexy) = &self.cfg.acexy_control else {
+        let Some(acexy) = &self.acexy else {
             return Guard::Unavailable("checks need acexy, which tells whether a stream is watched".into());
         };
         match self.get(&format!("{acexy}/ace/status?id={id}")).await {
@@ -471,6 +531,16 @@ impl ProbeRun {
             tracing::warn!("stopping probe session: {}", e.without_url());
         }
     }
+}
+
+/// GET with a capped body; the client never follows redirects.
+async fn get(client: &reqwest::Client, url: &str) -> Result<(u16, Vec<u8>), String> {
+    let res = client.get(url).send().await.map_err(|e| e.without_url().to_string())?;
+    let status = res.status().as_u16();
+    let body = crate::net::read_capped(res, 64 * 1024)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok((status, body))
 }
 
 fn unknown(msg: String) -> (CheckOutcome, Value) {
