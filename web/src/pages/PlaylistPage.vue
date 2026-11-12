@@ -195,7 +195,7 @@ async function deletePlaylist() {
               <span v-if="!item.channel.enabled" class="text-xs text-muted">(disabled)</span>
             </div>
             <div class="text-xs text-muted truncate">
-              {{ item.channel.group_title ?? '—' }} · {{ sourceLabel(item.channel.source) }}
+              {{ item.channel.group_title ?? "—" }} · {{ sourceLabel(item.channel) }}
             </div>
           </div>
           <UButton

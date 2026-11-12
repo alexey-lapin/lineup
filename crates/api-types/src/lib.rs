@@ -4,116 +4,276 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+// -------------------------------------------------------------------- health
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum ProbeOutcome {
-    /// The swarm has peers or is downloading.
+pub enum CheckOutcome {
+    /// Playable.
     Ok,
-    /// The session started but stayed in prebuffering with no peers.
+    /// Not playable.
     Dead,
-    /// The engine or network failed; says nothing about the stream.
+    /// Could not tell (the gateway, its services or the network failed); says nothing about the
+    /// channel.
     Unknown,
-    /// Not probed because the stream was being watched (or the guard could not tell).
+    /// Not checked, for example because the channel was being watched.
     Skipped,
 }
 
-/// Probe results of a channel. Only `ok` and `dead` are conclusive.
+impl CheckOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckOutcome::Ok => "ok",
+            CheckOutcome::Dead => "dead",
+            CheckOutcome::Unknown => "unknown",
+            CheckOutcome::Skipped => "skipped",
+        }
+    }
+}
+
+/// What a page source currently is, when the gateway can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentState {
+    Live,
+    /// The live broadcast ended and the recording is not playable yet.
+    EndedProcessing,
+    Recording,
+}
+
+/// Check results of a channel. Only `ok` and `dead` are conclusive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ChannelHealth {
     /// Last conclusive result (`ok` or `dead`); drives the badge and events.
-    pub conclusive: Option<ProbeOutcome>,
+    pub conclusive: Option<CheckOutcome>,
     pub conclusive_at: Option<DateTime<Utc>>,
-    pub last_attempt: ProbeOutcome,
+    pub last_attempt: CheckOutcome,
     pub last_attempt_at: DateTime<Utc>,
-    /// Engine statistics or the error of the last attempt.
+    /// Content state reported by the last attempt.
+    pub content_state: Option<ContentState>,
+    /// Why the last attempt was `unknown` or `skipped` (e.g. `busy`).
+    pub reason: Option<String>,
+    /// Gateway details of the last attempt.
     #[schema(value_type = Object)]
     pub detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct ProbeRequest {
-    /// Channels to check; all enabled acestream channels when empty (that run continues in the
-    /// background). Checks need acexy.
+pub struct CheckRequest {
+    /// Channels to check; all enabled channels of routes that support checks when empty (that run
+    /// continues in the background).
     #[serde(default)]
     pub ids: Vec<i64>,
-    /// Probe even if the stream seems to be in use.
+    /// Check even if the channel seems to be in use.
     #[serde(default)]
     pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ProbeResult {
+pub struct CheckResult {
     pub channel_id: i64,
-    pub outcome: ProbeOutcome,
+    pub outcome: CheckOutcome,
+    pub reason: Option<String>,
+    pub content_state: Option<ContentState>,
     #[schema(value_type = Object)]
     pub detail: Option<serde_json::Value>,
+    /// False when the result was not stored (the channel or its route changed meanwhile, or the
+    /// check did not run).
+    pub recorded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ProbeResponse {
+pub struct CheckResponse {
     /// True when a run over all channels was started in the background; results then arrive as
     /// channel updates and events.
     pub background: bool,
-    /// Results, when specific channels were probed.
-    pub results: Vec<ProbeResult>,
+    /// Results, when specific channels were checked.
+    pub results: Vec<CheckResult>,
 }
 
-/// A channel's stream source. Its kind is also the channel's integration, which builds the URL.
+// -------------------------------------------------------------------- routes
+
+/// How a route plays its channels. Tagged by `kind`; the kind and a gateway's rule can't change
+/// after the route is created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-pub enum Source {
-    /// Acestream content id (40 lowercase hex chars), played through acexy (or the engine).
-    Acestream { id: String },
-    /// VK video, played through the VK proxy.
-    Vk {
-        owner_id: i64,
-        video_id: i64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        list: Option<String>,
+pub enum RouteConfig {
+    /// Channels are stream URLs, emitted as they are.
+    Direct {},
+    /// A gateway service turns channel sources into play URLs.
+    Gateway {
+        /// Gateway base URL, as players reach it (e.g. `http://media-host:8099`).
+        base_url: String,
+        /// One of the gateway's rules (e.g. `acestream`, `vk`).
+        rule: String,
     },
-    /// Any other URL, emitted verbatim.
-    Direct { url: String },
 }
 
-impl Source {
-    pub fn kind(&self) -> SourceKind {
+impl RouteConfig {
+    pub fn kind(&self) -> &'static str {
         match self {
-            Source::Acestream { .. } => SourceKind::Acestream,
-            Source::Vk { .. } => SourceKind::Vk,
-            Source::Direct { .. } => SourceKind::Direct,
+            RouteConfig::Direct {} => "direct",
+            RouteConfig::Gateway { .. } => "gateway",
         }
     }
 }
 
-/// A source kind, which is also the integration that plays it (one integration per kind).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceKind {
-    Acestream,
-    Vk,
-    Direct,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Route {
+    pub id: i64,
+    pub name: String,
+    pub enabled: bool,
+    pub config: RouteConfig,
+    pub channel_count: i64,
+    /// Increases with every change; of two copies, the higher revision is newer. Read-only.
+    pub revision: u64,
+    /// The rule's match revision at the last resync that updated every channel (gateway only).
+    pub synced_match_revision: Option<String>,
+    /// The rule's play revision at the last resync that updated every channel (gateway only).
+    pub synced_play_revision: Option<String>,
+    pub last_resync: Option<ResyncReport>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-impl SourceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SourceKind::Acestream => "acestream",
-            SourceKind::Vk => "vk",
-            SourceKind::Direct => "direct",
-        }
-    }
-
-    pub const ALL: [SourceKind; 3] = [SourceKind::Acestream, SourceKind::Vk, SourceKind::Direct];
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "acestream" => Some(SourceKind::Acestream),
-            "vk" => Some(SourceKind::Vk),
-            "direct" => Some(SourceKind::Direct),
-            _ => None,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RouteCreate {
+    pub name: String,
+    pub config: RouteConfig,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
+
+/// Partial update. The kind and a gateway's rule can't change; create another route instead.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct RoutePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// New gateway base URL. Every channel of the route is revalidated against it first; if any
+    /// fails, nothing changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// A gateway rule, as the gateway describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RuleSummary {
+    pub name: String,
+    pub title: String,
+    pub input_hint: Option<String>,
+    /// `observe`, `check`.
+    pub capabilities: Vec<String>,
+    pub match_revision: String,
+    pub play_revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GatewaySummary {
+    pub name: String,
+    pub version: String,
+    pub contract: u32,
+    pub rules: Vec<RuleSummary>,
+}
+
+/// Test a route config before (or without) saving it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RouteTestRequest {
+    pub config: RouteConfig,
+    /// Also validate this input with the config.
+    #[serde(default)]
+    pub input: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RouteTestResult {
+    pub ok: bool,
+    /// What the test shows, or why it failed.
+    pub detail: String,
+    /// The gateway's self-description (gateway configs that answered).
+    pub gateway: Option<GatewaySummary>,
+    /// How the input validated, when one was given and the route works.
+    pub sample: Option<ValidatedSource>,
+    pub elapsed_ms: u64,
+}
+
+/// A source as a route validated it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ValidatedSource {
+    /// Canonical source, stored with the channel.
+    pub source: String,
+    /// De-duplication key within the route.
+    pub identity: String,
+    /// The URL players get.
+    pub play_url: String,
+    pub hints: Hints,
+    pub warnings: Vec<String>,
+}
+
+/// Live state of a route's gateway (from the saved config).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RouteStatus {
+    pub route_id: i64,
+    /// The gateway answered and has the route's rule.
+    pub ok: bool,
+    pub detail: String,
+    pub gateway: Option<GatewaySummary>,
+    /// The route's rule as the gateway describes it now.
+    pub rule: Option<RuleSummary>,
+    /// Channels whose play reference is from another play revision than the gateway's current one
+    /// (they need a resync). Null when the gateway did not answer.
+    pub pending_channels: Option<i64>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResyncTrigger {
+    Manual,
+    BaseUrlChange,
+    RevisionChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ResyncItem {
+    pub channel_id: i64,
+    pub name: String,
+    pub reason: String,
+}
+
+/// Outcome of revalidating every channel of a route.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ResyncReport {
+    pub at: DateTime<Utc>,
+    pub trigger: ResyncTrigger,
+    pub match_revision: Option<String>,
+    pub play_revision: Option<String>,
+    pub total: usize,
+    /// Channels whose source, identity or play reference changed.
+    pub updated: usize,
+    pub unchanged: usize,
+    /// Channels the gateway did not accept, or that would collide with another channel; they keep
+    /// their previous values.
+    pub failed: Vec<ResyncItem>,
+    /// Channels changed by someone else during the resync; left as they are.
+    pub skipped: Vec<ResyncItem>,
+    /// Every channel is now current (the route's synced revisions advanced).
+    pub complete: bool,
+}
+
+/// Suggestions a gateway gives for a source.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Hints {
+    pub title: Option<String>,
+    /// Two-letter lowercase region, e.g. `de`.
+    pub region: Option<String>,
+    pub group: Option<String>,
+    /// Usually a one-off event.
+    pub event: Option<bool>,
+}
+
+// -------------------------------------------------------------------- channels
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Channel {
@@ -122,20 +282,23 @@ pub struct Channel {
     pub group_title: Option<String>,
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
-    pub source: Source,
-    /// Canonical key used for de-duplication (unique per source kind).
-    pub source_key: String,
-    /// Stream URL as emitted in playlists; null while the channel's integration is not configured.
-    pub stream_url: Option<String>,
-    /// Whether the channel's integration is configured. Channels of an unconfigured integration
-    /// stay listed but are left out of playlists and guides.
-    pub configured: bool,
+    pub route_id: i64,
+    pub route_name: String,
+    /// Whether the channel's route is enabled. Channels of a disabled route stay listed but are
+    /// left out of playlists and guides.
+    pub route_enabled: bool,
+    /// Canonical source, as the route validated it.
+    pub source: String,
+    /// De-duplication key (unique per route).
+    pub identity: String,
+    /// The URL emitted in playlists.
+    pub play_url: String,
     pub is_event: bool,
     pub kickoff_at: Option<DateTime<Utc>>,
     pub enabled: bool,
     /// Slugs of playlists containing this channel.
     pub playlists: Vec<String>,
-    /// Swarm health from probes (acestream channels only); null until probed.
+    /// Check results; null until checked.
     pub health: Option<ChannelHealth>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -150,11 +313,10 @@ pub struct ChannelCreate {
     pub tvg_id: Option<String>,
     #[serde(default)]
     pub tvg_logo: Option<String>,
-    /// Either a structured source, or free-form `input` (ace id, acestream:// link, vk.com URL, any URL).
-    #[serde(default)]
-    pub source: Option<Source>,
-    #[serde(default)]
-    pub input: Option<String>,
+    /// The route that plays the channel.
+    pub route_id: i64,
+    /// What to play, in a form the route accepts (a URL for Direct; the gateway rule's input).
+    pub input: String,
     #[serde(default)]
     pub is_event: bool,
     #[serde(default)]
@@ -166,29 +328,13 @@ pub struct ChannelCreate {
     pub playlists: Vec<String>,
 }
 
-impl Default for ChannelCreate {
-    /// Matches the wire defaults (notably `enabled: true`).
-    fn default() -> Self {
-        ChannelCreate {
-            name: String::new(),
-            group_title: None,
-            tvg_id: None,
-            tvg_logo: None,
-            source: None,
-            input: None,
-            is_event: false,
-            kickoff_at: None,
-            enabled: true,
-            playlists: Vec::new(),
-        }
-    }
-}
-
 fn default_true() -> bool {
     true
 }
 
 /// Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.
+/// `route_id` and/or `input` revalidate the source (with the current source when only the route
+/// changes).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct ChannelPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,7 +349,7 @@ pub struct ChannelPatch {
     #[schema(value_type = Option<String>)]
     pub tvg_logo: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<Source>,
+    pub route_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,11 +430,14 @@ pub struct ItemsReplace {
     pub channel_ids: Vec<i64>,
 }
 
-/// App-wide settings. Service addresses live in the integrations.
+/// App-wide settings. Service addresses live in the routes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Settings {
     /// Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
     pub epg_refresh_hours: u32,
+    /// Hours between scheduled checks of all enabled channels on routes that support checks (the
+    /// first runs 10 minutes after start); 0 turns them off.
+    pub check_interval_hours: u32,
     /// Increases with every change; of two copies of the settings, the higher revision is newer.
     /// Read-only.
     #[serde(default)]
@@ -299,64 +448,8 @@ pub struct Settings {
 pub struct SettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epg_refresh_hours: Option<u32>,
-}
-
-/// What an integration needs, by type. Tagged by `kind`, which matches the integration's kind.
-/// A blank required URL means the integration is not configured.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum IntegrationConfig {
-    /// The Acestream engine (required) and, optionally, acexy in front of it.
-    Acestream {
-        /// Engine base URL, e.g. `http://media-host:6878`; blank = not configured.
-        engine_url: String,
-        /// acexy base URL. When set, playlists play through acexy (several viewers share one engine
-        /// session) and channel checks become available; when null, playlists use the engine directly.
-        acexy_url: Option<String>,
-        /// Hours between scheduled checks of all enabled acestream channels (the first runs 10
-        /// minutes after start); 0 turns them off. Checks need acexy.
-        probe_interval_hours: u32,
-    },
-    /// The VK proxy (a thin layer over streamlink).
-    Vk {
-        /// Proxy base URL; blank = not configured.
-        url: String,
-    },
-    /// Direct URLs, emitted as they are. Nothing to configure.
-    Direct {},
-}
-
-impl IntegrationConfig {
-    pub fn kind(&self) -> SourceKind {
-        match self {
-            IntegrationConfig::Acestream { .. } => SourceKind::Acestream,
-            IntegrationConfig::Vk { .. } => SourceKind::Vk,
-            IntegrationConfig::Direct {} => SourceKind::Direct,
-        }
-    }
-
-    /// The blank configuration a new database starts with.
-    pub fn blank(kind: SourceKind) -> Self {
-        match kind {
-            SourceKind::Acestream => IntegrationConfig::Acestream {
-                engine_url: String::new(),
-                acexy_url: None,
-                probe_interval_hours: 0,
-            },
-            SourceKind::Vk => IntegrationConfig::Vk { url: String::new() },
-            SourceKind::Direct => IntegrationConfig::Direct {},
-        }
-    }
-
-    /// Whether channels of this integration can be played: its required URL is set. Says nothing
-    /// about whether the service is reachable right now.
-    pub fn configured(&self) -> bool {
-        match self {
-            IntegrationConfig::Acestream { engine_url, .. } => !engine_url.is_empty(),
-            IntegrationConfig::Vk { url } => !url.is_empty(),
-            IntegrationConfig::Direct {} => true,
-        }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_interval_hours: Option<u32>,
 }
 
 /// Whether a feature is available, and why not.
@@ -383,196 +476,64 @@ impl Availability {
     }
 }
 
-/// A service lineup plays channels through (one per source kind).
+/// A labelled value reported by a gateway, for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Fact {
+    pub label: String,
+    pub value: String,
+}
+
+/// What the route's gateway reports about a channel right now. Reading it never starts a stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct Integration {
-    pub kind: SourceKind,
-    pub config: IntegrationConfig,
-    /// Its required URL is set (a stable property; see the status for reachability).
-    pub configured: bool,
-    /// Health checks of its channels (Check now and the schedule).
-    pub checks: Availability,
-    /// Channels of this integration.
-    pub channel_count: i64,
-    /// Increases with every change; of two copies, the higher revision is newer. Read-only.
-    pub revision: u64,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Partial update of an integration's config, tagged by `kind` (must match the integration).
-/// Absent fields are left unchanged; an empty string turns a required URL off.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum IntegrationPatch {
-    Acestream {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        engine_url: Option<String>,
-        /// `null` or an empty string removes acexy.
-        #[serde(default, with = "double_option", skip_serializing_if = "Option::is_none")]
-        #[schema(value_type = Option<String>)]
-        acexy_url: Option<Option<String>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        probe_interval_hours: Option<u32>,
-    },
-    Vk {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        url: Option<String>,
-    },
-    Direct {},
-}
-
-impl IntegrationPatch {
-    pub fn kind(&self) -> SourceKind {
-        match self {
-            IntegrationPatch::Acestream { .. } => SourceKind::Acestream,
-            IntegrationPatch::Vk { .. } => SourceKind::Vk,
-            IntegrationPatch::Direct {} => SourceKind::Direct,
-        }
-    }
-}
-
-/// A part of an integration with its own address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum Component {
-    /// The Acestream engine.
-    Engine,
-    /// acexy, the Acestream proxy.
-    Acexy,
-    /// The VK proxy.
-    Proxy,
-}
-
-impl Component {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Component::Engine => "engine",
-            Component::Acexy => "acexy",
-            Component::Proxy => "proxy",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ConnectionTestRequest {
-    pub component: Component,
-    /// A base URL to test instead of the saved one (e.g. an unsaved edit).
-    #[serde(default)]
-    pub url: Option<String>,
-}
-
-/// Outcome of a connection test, run from the lineup server (it cannot show whether your players
-/// can reach the same address).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct ConnectionTestResult {
-    pub component: Component,
-    pub ok: bool,
-    /// The URL that was requested.
-    pub url: String,
-    /// What the answer shows, or why the test failed.
-    pub detail: String,
-    pub http_status: Option<u16>,
-    /// Service version, when it reports one (the engine does; acexy does not).
-    pub version: Option<String>,
-    /// Streams acexy is serving now (acexy only).
-    pub active_streams: Option<u64>,
-    pub elapsed_ms: u64,
-}
-
-/// Live state of an integration's services (from the saved config).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct IntegrationStatus {
-    pub kind: SourceKind,
-    pub configured: bool,
-    /// One result per configured component; empty when nothing is configured (or for Direct).
-    pub components: Vec<ConnectionTestResult>,
-}
-
-/// Whether acexy reports a stream as being watched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum LiveState {
-    /// Someone is watching through acexy; the numbers are live.
-    Active,
-    /// Nobody is watching through acexy.
-    Inactive,
-    /// Cannot be told (no acexy, acexy unreachable, or no per-stream status).
-    Unavailable,
-}
-
-/// Live numbers of an acestream channel, read from the session acexy already has open. Reading them
-/// never starts or stops a session.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct AcestreamLive {
-    pub state: LiveState,
-    /// Why the state is unavailable, or why the numbers are missing.
+pub struct Observation {
+    /// Whether anything could be observed.
+    pub available: bool,
+    /// Why not, or why some values are missing.
     pub reason: Option<String>,
-    /// Players connected to acexy for this stream.
-    pub clients: Option<u64>,
-    /// Engine session status (`prebuf`, `dl`, ...).
-    pub status: Option<String>,
-    pub peers: Option<u64>,
-    /// Download speed, KB/s.
-    pub speed_down: Option<u64>,
-    /// Upload speed, KB/s.
-    pub speed_up: Option<u64>,
-    /// Bytes downloaded in this session.
-    pub downloaded: Option<u64>,
-    /// Bytes uploaded in this session.
-    pub uploaded: Option<u64>,
-}
-
-/// Acestream section of a channel's details.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct AcestreamInfo {
-    /// The name the engine reports for this content id (only when asked for with `name=true`).
-    pub engine_name: Option<String>,
-    /// Why the name could not be read.
-    pub engine_name_error: Option<String>,
-    pub live: AcestreamLive,
+    pub content_state: Option<ContentState>,
+    /// Whether someone is watching through the gateway's services, when known.
+    pub watching: Option<bool>,
+    pub facts: Vec<Fact>,
+    /// The source's current title, when it reports one.
+    pub title: Option<String>,
 }
 
 /// What lineup can tell about a channel right now, beyond its stored fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ChannelInfo {
     pub channel_id: i64,
-    pub kind: SourceKind,
-    /// Whether the channel's integration is configured.
-    pub configured: bool,
+    pub route_id: i64,
     /// Whether "Check now" can run for this channel.
     pub checks: Availability,
     /// Latest check result and last conclusive result (null until checked).
     pub health: Option<ChannelHealth>,
-    /// For acestream channels.
-    pub acestream: Option<AcestreamInfo>,
+    /// Null when the route can't observe (Direct, or a rule without `observe`).
+    pub observation: Option<Observation>,
+    /// Why there is no observation although the route supports it (e.g. the gateway is unreachable).
+    pub observation_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolveRequest {
+    pub route_id: i64,
     pub input: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolveResponse {
-    pub source: Source,
-    pub source_key: String,
-    /// Null while the source's integration is not configured.
-    pub stream_url: Option<String>,
-    /// Whether the source's integration is configured.
-    pub configured: bool,
-    /// Existing channel with the same source, if any.
+    pub route_id: i64,
+    #[serde(flatten)]
+    pub validated: ValidatedSource,
+    /// Existing channel on this route with the same identity, if any.
     pub duplicate_of: Option<i64>,
-    /// Name the Acestream engine reports for this content id, as-is.
-    #[serde(default)]
-    pub engine_name: Option<String>,
+    /// The duplicate's stored source, when it differs from this one (e.g. a newer access token);
+    /// editing that channel with this input updates it.
+    pub duplicate_source: Option<String>,
     /// Suggested values for a new channel; shown as editable defaults.
     pub suggestion: Suggestion,
     /// Best guide channels for the suggested name, best first (up to 5).
     #[serde(default)]
     pub matches: Vec<EpgChannel>,
-    /// Problems that did not stop the resolve, such as an unreachable engine.
-    #[serde(default)]
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -581,7 +542,6 @@ pub struct Suggestion {
     pub group_title: Option<String>,
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
-    /// VK links are usually one-off live events.
     pub is_event: bool,
 }
 
@@ -593,6 +553,8 @@ pub struct ImportRequest {
     #[serde(default)]
     pub url: Option<String>,
     pub playlist_slug: String,
+    /// The route every entry is validated with. Entries it does not accept are skipped and listed.
+    pub route_id: i64,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -602,7 +564,7 @@ pub struct ImportRequest {
 pub enum ImportAction {
     /// A new channel is created and appended.
     Create,
-    /// An existing channel with the same source is reused and appended.
+    /// An existing channel with the same identity on the route is reused and appended.
     Reuse,
     /// The channel (new or existing) is already in the playlist.
     SkipInPlaylist,
@@ -616,8 +578,9 @@ pub struct ImportEntry {
     pub group_title: Option<String>,
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
-    pub source: Source,
-    pub source_key: String,
+    /// Canonical source from the route.
+    pub source: String,
+    pub identity: String,
     pub action: ImportAction,
     pub channel_id: Option<i64>,
     /// Fields where the file differs from the existing channel (existing metadata is never overwritten).
@@ -849,7 +812,8 @@ pub struct ErrorBody {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ErrorDetail {
-    /// Stable machine-readable code: not_found, conflict, invalid, internal.
+    /// Stable machine-readable code: not_found, conflict, invalid, internal, gateway_unreachable,
+    /// gateway_error, contract_mismatch.
     pub code: String,
     pub message: String,
 }

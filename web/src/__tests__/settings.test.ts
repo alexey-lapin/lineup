@@ -9,7 +9,6 @@ vi.mock('../api', async (orig) => ({ ...(await orig<typeof import('../api')>()),
 import { ApiError, type Settings } from '../api'
 import { baseUrlError, useSection, useSettingsSection } from '../components/settings/section'
 import SettingsCard from '../components/settings/SettingsCard.vue'
-import BaseUrlField from '../components/settings/BaseUrlField.vue'
 
 /** A server object edited by two cards (as the Acestream card's fields and another card would be). */
 type Thing = { engine: string; acexy: string; hours: number; revision: number }
@@ -153,10 +152,10 @@ describe('useSection', () => {
 
 describe('useSettingsSection', () => {
   it('sends only its keys', async () => {
-    const settings = ref<Settings | undefined>({ epg_refresh_hours: 6, revision: 1 })
+    const settings = ref<Settings | undefined>({ epg_refresh_hours: 6, check_interval_hours: 0, revision: 1 })
     const guide = useSettingsSection(['epg_refresh_hours'], settings)
     guide.draft.epg_refresh_hours = 12
-    api.patchSettings.mockResolvedValueOnce({ epg_refresh_hours: 12, revision: 2 })
+    api.patchSettings.mockResolvedValueOnce({ epg_refresh_hours: 12, check_interval_hours: 0, revision: 2 })
     expect(await guide.save()).toBe(true)
     expect(api.patchSettings).toHaveBeenCalledWith({ epg_refresh_hours: 12 })
   })
@@ -171,31 +170,5 @@ describe('baseUrlError', () => {
     expect(baseUrlError('ftp://h')).toMatch(/http/)
     expect(baseUrlError('http://h#x')).toMatch(/query or fragment/)
     expect(baseUrlError('nope')).toBe('Not a valid URL')
-  })
-})
-
-describe('BaseUrlField', () => {
-  it('tests its component with the typed URL, and drops a result when the URL changed meanwhile', async () => {
-    const pending = deferred<unknown>()
-    api.testIntegration.mockReturnValueOnce(pending.promise)
-    const w = mount(BaseUrlField, {
-      props: {
-        modelValue: 'http://a:8080',
-        label: 'URL',
-        help: '',
-        kind: 'acestream',
-        component: 'acexy',
-        placeholder: ''
-      },
-      shallow: true
-    })
-    const vm = w.vm as any
-    vm.test()
-    expect(api.testIntegration).toHaveBeenCalledWith('acestream', 'acexy', 'http://a:8080')
-    await w.setProps({ modelValue: 'http://b:8080' })
-    pending.resolve({ ok: true, url: 'http://a:8080/ace/status', detail: 'acexy answered', elapsed_ms: 3 })
-    await flush()
-    expect(vm.result).toBeNull()
-    expect(vm.testing).toBe(false)
   })
 })

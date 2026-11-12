@@ -1,15 +1,15 @@
 use api_types::{
-    Channel, ChannelCreate, ChannelInfo, ChannelPatch, Component, ConnectionTestRequest, ConnectionTestResult,
-    EpgChannel, EpgFetchRequest, EpgFetchResult, EpgFetchStatus, EpgSource, EpgSourceCreate, EpgSourcePatch, Hook,
-    HookConfig, HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest, Integration, IntegrationPatch,
-    IntegrationStatus, ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeRequest,
-    ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch,
-    SourceKind, Status,
+    Channel, ChannelCreate, ChannelInfo, ChannelPatch, CheckRequest, CheckResponse, EpgChannel, EpgFetchRequest,
+    EpgFetchResult, EpgFetchStatus, EpgSource, EpgSourceCreate, EpgSourcePatch, Hook, HookConfig, HookCreate,
+    HookDelivery, HookPatch, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate,
+    PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, ResyncReport,
+    Route, RouteConfig, RouteCreate, RoutePatch, RouteStatus, RouteTestRequest, RouteTestResult, Settings,
+    SettingsPatch, Status,
 };
 use serde::Serialize;
 
 use crate::client::{CliError, Client};
-use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, HookCmd, IntegrationCmd, PlaylistCmd, SettingsCmd, output};
+use crate::{Cli, Command, EpgCmd, EpgSourcesCmd, HookCmd, PlaylistCmd, RouteCmd, SettingsCmd, output};
 
 type R<T = ()> = Result<T, CliError>;
 
@@ -21,6 +21,8 @@ struct Ctx {
     quiet: bool,
     /// Lazily loaded channel list for resolving name references.
     channels: Option<Vec<Channel>>,
+    /// Lazily loaded route list for resolving route references.
+    routes: Option<Vec<Route>>,
 }
 
 impl Ctx {
@@ -32,7 +34,8 @@ impl Ctx {
         }
     }
 
-    /// Resolve a channel reference: numeric id, exact name (case-insensitive), or a source input.
+    /// Resolve a channel reference: numeric id, exact name (case-insensitive), or a channel's exact
+    /// stored source or identity (as `lineup show` prints them).
     async fn channel_id(&mut self, r: &str) -> R<i64> {
         if let Ok(id) = r.parse::<i64>() {
             return Ok(id);
@@ -40,42 +43,43 @@ impl Ctx {
         if self.channels.is_none() {
             self.channels = Some(self.c.get("/channels").await?);
         }
-        let matches: Vec<&Channel> = self
-            .channels
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter(|c| c.name.eq_ignore_ascii_case(r))
-            .collect();
+        let all = self.channels.as_ref().unwrap();
+        let by_name: Vec<&Channel> = all.iter().filter(|c| c.name.eq_ignore_ascii_case(r)).collect();
+        let matches = if by_name.is_empty() {
+            let t = r.trim();
+            all.iter().filter(|c| c.source == t || c.identity == t).collect()
+        } else {
+            by_name
+        };
         match matches.len() {
-            1 => return Ok(matches[0].id),
-            n if n > 1 => {
+            1 => Ok(matches[0].id),
+            0 => Err(CliError::Api {
+                code: "not_found".into(),
+                message: format!("no channel matches {r:?}"),
+            }),
+            n => {
                 let ids: Vec<String> = matches.iter().map(|c| c.id.to_string()).collect();
-                return Err(CliError::Usage(format!(
+                Err(CliError::Usage(format!(
                     "{r:?} matches {n} channels (ids {}); use an id",
                     ids.join(", ")
-                )));
+                )))
             }
-            _ => {}
         }
-        // Not a name: try it as a source input. An unparseable input simply means "no match";
-        // any other failure (server error, unreachable) is reported as such.
-        match self
-            .c
-            .post::<ResolveResponse, _>("/resolve", &ResolveRequest { input: r.into() })
-            .await
-        {
-            Ok(res) => {
-                if let Some(id) = res.duplicate_of {
-                    return Ok(id);
-                }
-            }
-            Err(CliError::Api { code, .. }) if code == "invalid" => {}
-            Err(e) => return Err(e),
+    }
+
+    /// Resolve a route reference: numeric id or exact name (case-insensitive).
+    async fn route(&mut self, r: &str) -> R<Route> {
+        if self.routes.is_none() {
+            self.routes = Some(self.c.get("/routes").await?);
         }
-        Err(CliError::Api {
+        let all = self.routes.as_ref().unwrap();
+        let found = match r.trim().parse::<i64>() {
+            Ok(id) => all.iter().find(|x| x.id == id),
+            Err(_) => all.iter().find(|x| x.name.eq_ignore_ascii_case(r.trim())),
+        };
+        found.cloned().ok_or_else(|| CliError::Api {
             code: "not_found".into(),
-            message: format!("no channel matches {r:?}"),
+            message: format!("no route matches {r:?} (see `lineup route ls`)"),
         })
     }
 }
@@ -119,6 +123,7 @@ pub async fn run(cli: Cli) -> R {
         json: cli.json,
         quiet: cli.quiet,
         channels: None,
+        routes: None,
     };
     match cli.command {
         Command::Serve(_) | Command::Usage | Command::Completions { .. } => unreachable!("handled by caller"),
@@ -156,18 +161,15 @@ pub async fn run(cli: Cli) -> R {
             x.emit(&s, |s| output::status(s, &base));
         }
 
-        Command::Resolve { input } => {
-            let r: ResolveResponse = x.c.post("/resolve", &ResolveRequest { input }).await?;
+        Command::Resolve { input, route } => {
+            let route_id = x.route(&route).await?.id;
+            let r: ResolveResponse = x.c.post("/resolve", &ResolveRequest { route_id, input }).await?;
             x.emit(&r, |r| {
-                println!("source:     {}", serde_json::to_string(&r.source).unwrap_or_default());
-                println!("key:        {}", r.source_key);
-                println!("stream url: {}", output::stream_url(&r.stream_url));
-                match r.duplicate_of {
-                    Some(id) => println!("duplicate:  yes, channel {id}"),
-                    None => println!("duplicate:  no"),
-                }
-                if let Some(n) = &r.engine_name {
-                    println!("engine:     {n}");
+                output::validated(&r.validated);
+                match (r.duplicate_of, &r.duplicate_source) {
+                    (Some(id), Some(old)) => println!("duplicate:  yes, channel {id}, which has source {old}"),
+                    (Some(id), None) => println!("duplicate:  yes, channel {id}"),
+                    (None, _) => println!("duplicate:  no"),
                 }
                 output::suggestion(r);
             });
@@ -181,31 +183,22 @@ pub async fn run(cli: Cli) -> R {
             // {input, ok, channel | would_create, error: {code, message}}.
             let mut results = Vec::new();
             let mut errors: Vec<CliError> = Vec::new();
+            let route_id = x.route(&a.route).await?.id;
             for input in &a.inputs {
-                match add_one(&x, &a, input).await {
+                match add_one(&x, &a, route_id, input).await {
                     Ok(AddOutcome::Created(ch)) => {
                         if !x.json {
                             if x.quiet {
                                 println!("{}", ch.id);
                             } else {
-                                println!(
-                                    "added {} {:?} -> {}",
-                                    ch.id,
-                                    ch.name,
-                                    output::stream_url(&ch.stream_url)
-                                );
+                                println!("added {} {:?} -> {}", ch.id, ch.name, ch.play_url);
                             }
                         }
                         results.push(serde_json::json!({ "input": input, "ok": true, "channel": ch }));
                     }
                     Ok(AddOutcome::WouldCreate(req, url)) => {
                         if !x.json {
-                            println!(
-                                "would add {:?} ({}) -> {}",
-                                req.name,
-                                output::source_label(req.source.as_ref().unwrap()),
-                                output::stream_url(&url)
-                            );
+                            println!("would add {:?} ({}) -> {url}", req.name, req.input);
                         }
                         results.push(serde_json::json!({ "input": input, "ok": true, "would_create": req }));
                     }
@@ -247,10 +240,14 @@ pub async fn run(cli: Cli) -> R {
                 #[serde(skip_serializing_if = "Option::is_none")]
                 playlist: Option<String>,
                 #[serde(skip_serializing_if = "Option::is_none")]
-                kind: Option<String>,
+                route_id: Option<i64>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 health: Option<&'static str>,
             }
+            let route_id = match &l.route {
+                Some(r) => Some(x.route(r).await?.id),
+                None => None,
+            };
             let list: Vec<Channel> =
                 x.c.get_query(
                     "/channels",
@@ -258,7 +255,7 @@ pub async fn run(cli: Cli) -> R {
                         q: l.query,
                         group: l.group,
                         playlist: l.playlist,
-                        kind: l.kind.map(|k| k.as_str().to_string()),
+                        route_id,
                         health: l.health.map(|h| match h {
                             crate::HealthArg::Ok => "ok",
                             crate::HealthArg::Dead => "dead",
@@ -283,19 +280,23 @@ pub async fn run(cli: Cli) -> R {
 
         Command::Info { channel } => {
             let id = x.channel_id(&channel).await?;
-            let info: ChannelInfo = x.c.get(&format!("/channels/{id}/info?name=true")).await?;
+            let info: ChannelInfo = x.c.get(&format!("/channels/{id}/info")).await?;
             x.emit(&info, output::channel_info);
         }
 
         Command::Edit(e) => {
             let id = x.channel_id(&e.channel).await?;
+            let route_id = match &e.route {
+                Some(r) => Some(x.route(r).await?.id),
+                None => None,
+            };
             let tri = |set: Option<String>, clear: bool| if clear { Some(None) } else { set.map(Some) };
             let patch = ChannelPatch {
                 name: e.name,
                 group_title: tri(e.group, e.no_group),
                 tvg_id: tri(e.tvg_id, e.no_tvg_id),
                 tvg_logo: tri(e.logo, e.no_logo),
-                source: None,
+                route_id,
                 input: e.source,
                 is_event: if e.event {
                     Some(true)
@@ -344,10 +345,12 @@ pub async fn run(cli: Cli) -> R {
                     .map_err(|e| CliError::Usage(format!("reading {}: {e}", i.source)))?;
                 (Some(s), None)
             };
+            let route_id = x.route(&i.route).await?.id;
             let req = ImportRequest {
                 m3u_text,
                 url,
                 playlist_slug: i.playlist,
+                route_id,
                 dry_run: i.dry_run,
             };
             let r: ImportReport = x.c.post("/import", &req).await?;
@@ -357,17 +360,17 @@ pub async fn run(cli: Cli) -> R {
         Command::Epg(cmd) => epg(&mut x, cmd).await?,
         Command::Hook(cmd) => hook(&mut x, cmd).await?,
 
-        Command::Probe { channels, force } => {
+        Command::Check { channels, force } => {
             let mut ids = Vec::new();
             for c in &channels {
                 ids.push(x.channel_id(c).await?);
             }
-            let r: ProbeResponse = x.c.post_slow("/probe", &ProbeRequest { ids, force }).await?;
+            let r: CheckResponse = x.c.post_slow("/checks", &CheckRequest { ids, force }).await?;
             x.emit(&r, |r| {
                 if r.background {
-                    println!("probing all acestream channels in the background; see `lineup ls` for results");
+                    println!("checking all channels in the background; see `lineup ls` for results");
                 }
-                output::probe_results(&r.results);
+                output::check_results(&r.results);
             });
         }
 
@@ -376,7 +379,7 @@ pub async fn run(cli: Cli) -> R {
             x.emit(&r, |r| println!("refreshed: {}", r.slugs.join(", ")));
         }
 
-        Command::Integration(cmd) => integration(&mut x, cmd).await?,
+        Command::Route(cmd) => route(&mut x, cmd).await?,
         Command::Settings(SettingsCmd::Get) => {
             let s: Settings = x.c.get("/settings").await?;
             x.emit(&s, output::settings);
@@ -391,10 +394,12 @@ pub async fn run(cli: Cli) -> R {
                             .map_err(|_| CliError::Usage(format!("epg_refresh_hours: not a number: {value:?}")))?,
                     )
                 }
-                "acexy_base" | "engine_base" | "vk_base" | "probe_interval_hours" => {
-                    return Err(CliError::Usage(format!(
-                        "{key} is now part of an integration: see `lineup integration set --help`"
-                    )));
+                "check_interval_hours" => {
+                    patch.check_interval_hours = Some(
+                        value
+                            .parse()
+                            .map_err(|_| CliError::Usage(format!("check_interval_hours: not a number: {value:?}")))?,
+                    )
                 }
                 other => return Err(CliError::Usage(format!("unknown setting {other:?}"))),
             }
@@ -405,99 +410,106 @@ pub async fn run(cli: Cli) -> R {
     Ok(())
 }
 
-async fn integration(x: &mut Ctx, cmd: IntegrationCmd) -> R {
+async fn route(x: &mut Ctx, cmd: RouteCmd) -> R {
     match cmd {
-        IntegrationCmd::Ls => {
-            let list: Vec<Integration> = x.c.get("/integrations").await?;
-            x.emit(&list, |l| output::integrations(l));
+        RouteCmd::Ls => {
+            let list: Vec<Route> = x.c.get("/routes").await?;
+            if x.quiet && !x.json {
+                for r in &list {
+                    println!("{}", r.id);
+                }
+            } else {
+                x.emit(&list, |l| output::routes(l));
+            }
         }
-        IntegrationCmd::Show { kind } => {
-            let k = kind.as_str();
-            let i: Integration = x.c.get(&format!("/integrations/{k}")).await?;
-            let status: IntegrationStatus = x.c.get(&format!("/integrations/{k}/status")).await?;
-            let both = serde_json::json!({ "integration": i, "status": status });
-            x.emit(&both, |_| output::integration(&i, Some(&status)));
+        RouteCmd::Show { route } => {
+            let r = x.route(&route).await?;
+            let status: RouteStatus = x.c.get(&format!("/routes/{}/status", r.id)).await?;
+            let both = serde_json::json!({ "route": r, "status": status });
+            x.emit(&both, |_| output::route(&r, Some(&status)));
         }
-        IntegrationCmd::Set {
-            kind,
-            engine_url,
-            acexy_url,
-            probe_interval,
-            url,
+        RouteCmd::Add {
+            name,
+            direct,
+            gateway,
+            rule,
+            disabled,
         } => {
-            let kind = kind.kind();
-            let unused = |flags: &[(&str, bool)]| -> R {
-                match flags.iter().find(|(_, set)| *set) {
-                    Some((name, _)) => Err(CliError::Usage(format!(
-                        "--{name} does not apply to the {} integration",
-                        kind.as_str()
-                    ))),
-                    None => Ok(()),
-                }
+            let config = match (direct, gateway, rule) {
+                (true, None, None) => RouteConfig::Direct {},
+                (false, Some(base_url), Some(rule)) => RouteConfig::Gateway { base_url, rule },
+                _ => return Err(CliError::Usage("pass --direct, or --gateway URL --rule RULE".into())),
             };
-            let patch = match kind {
-                SourceKind::Acestream => {
-                    unused(&[("url", url.is_some())])?;
-                    IntegrationPatch::Acestream {
-                        engine_url,
-                        // "" clears acexy.
-                        acexy_url: acexy_url.map(|a| Some(a).filter(|a| !a.trim().is_empty())),
-                        probe_interval_hours: probe_interval,
-                    }
-                }
-                SourceKind::Vk => {
-                    unused(&[
-                        ("engine-url", engine_url.is_some()),
-                        ("acexy-url", acexy_url.is_some()),
-                        ("probe-interval", probe_interval.is_some()),
-                    ])?;
-                    IntegrationPatch::Vk { url }
-                }
-                SourceKind::Direct => {
-                    return Err(CliError::Usage(
-                        "the direct integration has nothing to configure".into(),
-                    ));
-                }
-            };
-            let i: Integration = x.c.patch(&format!("/integrations/{}", kind.as_str()), &patch).await?;
-            x.emit(&i, |i| output::integration(i, None));
+            let r: Route =
+                x.c.post(
+                    "/routes",
+                    &RouteCreate {
+                        name,
+                        config,
+                        enabled: !disabled,
+                    },
+                )
+                .await?;
+            x.emit(&r, |r| output::route(r, None));
         }
-        IntegrationCmd::Test { kind, component, url } => {
-            let k = kind.as_str();
-            let results: Vec<ConnectionTestResult> = match component {
-                Some(c) => {
-                    let component = match c {
-                        crate::ComponentArg::Engine => Component::Engine,
-                        crate::ComponentArg::Acexy => Component::Acexy,
-                        crate::ComponentArg::Proxy => Component::Proxy,
-                    };
-                    vec![
-                        x.c.post(
-                            &format!("/integrations/{k}/test"),
-                            &ConnectionTestRequest { component, url },
-                        )
-                        .await?,
-                    ]
-                }
-                None => {
-                    let s: IntegrationStatus = x.c.get(&format!("/integrations/{k}/status")).await?;
-                    if s.components.is_empty() {
-                        return Err(CliError::Usage(format!(
-                            "the {k} integration has nothing configured to test"
-                        )));
-                    }
-                    s.components
-                }
+        RouteCmd::Edit {
+            route,
+            name,
+            base_url,
+            enable,
+            disable,
+        } => {
+            let id = x.route(&route).await?.id;
+            let patch = RoutePatch {
+                name,
+                enabled: if enable {
+                    Some(true)
+                } else if disable {
+                    Some(false)
+                } else {
+                    None
+                },
+                base_url,
             };
-            x.emit(&results, |rs| {
-                for r in rs {
-                    output::connection_test(r);
-                    println!("        url: {} (from the lineup server)", r.url);
-                }
+            let r: Route = x.c.patch(&format!("/routes/{id}"), &patch).await?;
+            x.emit(&r, |r| output::route(r, None));
+        }
+        RouteCmd::Rm { route } => {
+            let id = x.route(&route).await?.id;
+            let _: () = x.c.delete(&format!("/routes/{id}")).await?;
+            x.emit(&serde_json::json!({ "deleted": id }), |_| {
+                println!("deleted route {id}")
             });
-            if results.iter().any(|r| !r.ok) {
+        }
+        RouteCmd::Test {
+            route,
+            gateway,
+            rule,
+            input,
+        } => {
+            let config = match (route, gateway) {
+                (Some(r), None) => x.route(&r).await?.config,
+                (None, Some(base_url)) => RouteConfig::Gateway {
+                    base_url,
+                    // Without a rule the test lists the gateway's rules and reports the empty one missing.
+                    rule: rule.unwrap_or_else(|| "-".into()),
+                },
+                _ => return Err(CliError::Usage("pass a route, or --gateway URL [--rule RULE]".into())),
+            };
+            let r: RouteTestResult =
+                x.c.post_slow("/routes/test", &RouteTestRequest { config, input })
+                    .await?;
+            x.emit(&r, output::route_test);
+            if !r.ok {
                 return Err(CliError::Reported(1));
             }
+        }
+        RouteCmd::Resync { route } => {
+            let id = x.route(&route).await?.id;
+            let r: ResyncReport =
+                x.c.post_slow(&format!("/routes/{id}/resync"), &serde_json::json!({}))
+                    .await?;
+            x.emit(&r, output::resync);
         }
     }
     Ok(())
@@ -801,19 +813,34 @@ async fn playlist(x: &mut Ctx, cmd: PlaylistCmd) -> R {
 
 enum AddOutcome {
     Created(Channel),
-    WouldCreate(ChannelCreate, Option<String>),
+    WouldCreate(ChannelCreate, String),
 }
 
-async fn add_one(x: &Ctx, a: &crate::AddArgs, input: &str) -> R<AddOutcome> {
-    let r: ResolveResponse = x.c.post("/resolve", &ResolveRequest { input: input.into() }).await?;
+async fn add_one(x: &Ctx, a: &crate::AddArgs, route_id: i64, input: &str) -> R<AddOutcome> {
+    let r: ResolveResponse =
+        x.c.post_slow(
+            "/resolve",
+            &ResolveRequest {
+                route_id,
+                input: input.into(),
+            },
+        )
+        .await?;
     if let Some(id) = r.duplicate_of {
+        let hint = match &r.duplicate_source {
+            Some(old) => format!(
+                "; it has source {old}. To update it: lineup edit {id} --source {}",
+                shell_word(input)
+            ),
+            None => String::new(),
+        };
         return Err(CliError::Api {
             code: "conflict".into(),
-            message: format!("already exists as channel {id}"),
+            message: format!("already exists as channel {id}{hint}"),
         });
     }
     if !x.json {
-        for w in &r.warnings {
+        for w in &r.validated.warnings {
             eprintln!("warning: {input}: {w}");
         }
     }
@@ -840,17 +867,26 @@ async fn add_one(x: &Ctx, a: &crate::AddArgs, input: &str) -> R<AddOutcome> {
         group_title: pick(&a.group, &s.group_title),
         tvg_id: pick(&a.tvg_id, &s.tvg_id),
         tvg_logo: pick(&a.logo, &s.tvg_logo),
-        source: Some(r.source.clone()),
-        input: None,
+        route_id,
+        input: input.to_string(),
         is_event,
         kickoff_at: a.kickoff,
         enabled: !a.disabled,
         playlists: a.playlists.clone(),
     };
     if a.dry_run {
-        return Ok(AddOutcome::WouldCreate(req, r.stream_url));
+        return Ok(AddOutcome::WouldCreate(req, r.validated.play_url));
     }
-    Ok(AddOutcome::Created(x.c.post("/channels", &req).await?))
+    Ok(AddOutcome::Created(x.c.post_slow("/channels", &req).await?))
+}
+
+/// Quote a word for a shell command line when it needs it.
+fn shell_word(s: &str) -> String {
+    if s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@%+=,".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 fn is_interactive() -> bool {

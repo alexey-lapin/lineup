@@ -12,28 +12,23 @@ Pin a release tag rather than `latest`. The container runs as uid 10001 and stor
 
 Open `http://<host>:9300`. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI.
 
-## Set up integrations
+## Set up routes
 
-Integrations are the services your channels play through, set up under **Integrations** (or with `lineup integration set`). A new installation starts with Acestream and VK off: their channels can be added and imported, but stay out of playlists and guides until their integration is set up. Direct URLs need nothing.
-
-| Integration | Address | What it is | Example |
-|---|---|---|---|
-| Acestream | Engine URL (required) | the Acestream engine: name lookups, health checks, and playback when acexy is not set | `http://media-host:6878` |
-| Acestream | acexy URL (recommended) | [acexy](https://github.com/Javinator9889/acexy) in front of the engine: playback (several viewers share one engine session), and what health checks and live details need | `http://media-host:8080` |
-| VK proxy | URL | a VK proxy (a thin layer over streamlink) serving `/vk/{owner}_{video}[?list=…]` | `http://media-host:8099` |
-
-Playlists send players to acexy (or to the engine, without acexy) and to the VK proxy, so use addresses that your players and media server can reach, not `localhost`.
+A route is how channels are played, set up under **Routes** (or with `lineup route`). A new installation has one route, **Direct**, for stream URLs that are put in playlists as they are. Anything that needs work before it plays (an Acestream id, a video page) goes through a **gateway**: a separate service that speaks lineup's gateway contract, such as lineup-gateway. Add a gateway route for each of the gateway's rules you use:
 
 ```sh
-lineup integration set acestream --engine-url http://media-host:6878 --acexy-url http://media-host:8080
-lineup integration set vk --url http://media-host:8099
-lineup integration ls
-lineup integration test acestream            # every configured part; or: test acestream engine --url URL
+lineup route test --gateway http://media-host:8099              # lists the gateway's rules
+lineup route add Acestream --gateway http://media-host:8099 --rule acestream
+lineup route add VK --gateway http://media-host:8099 --rule vk
+lineup route test VK --input "https://vk.com/video-1_2"          # try an input without saving
+lineup route ls
 ```
 
-Each address has a **Test** button that checks, from the lineup server, that the service answers: the engine's version, acexy's status (with its active stream count), or any HTTP answer from the VK proxy. It tests the URL as typed, before you save it; the card also shows the live status of the saved addresses. A passing test does not prove your players can reach the address, only that lineup can.
+Playlists send players to the gateway (or to the service it points at, such as acexy for Acestream), so use addresses that your players and media server can reach, not `localhost`. Where the gateway points players is the gateway's configuration, not lineup's.
 
-Clearing the engine URL (or the VK URL) turns that integration off; its channels keep their playlists and positions and come back when it is set again. Clearing acexy moves Acestream playback to the engine and turns health checks off.
+When you add a channel you pick its route, and the input is validated with that route only: the gateway answers with the canonical source, a play URL and suggestions (a title, a group). If the gateway is down, adding, editing and importing channels of its routes fail with a gateway error (CLI exit code 6); existing playlists and guides keep working, because lineup never calls a gateway to serve them.
+
+A route can be disabled: its channels keep their playlists and positions but are left out of playlists and guides until it is enabled again. Its kind and rule never change; create another route and move the channels (`lineup edit <channel> --route <route>`). Changing a gateway route's address (`lineup route edit VK --base-url …`) revalidates every channel with the new address first, and changes nothing if any fails. `lineup route resync <route>` revalidates every channel with the gateway now; lineup also does that on its own when the gateway reports that its rule changed.
 
 ## Point the CLI at it
 
@@ -43,7 +38,7 @@ echo 'server = "http://media-host:9300"' > ~/.config/lineup/config.toml
 lineup status
 ```
 
-Or set `LINEUP_SERVER`, or pass `--server`. Every command takes `--json` for scripts and agents, and exit codes are stable (0 ok, 2 usage, 3 not found, 4 conflict, 5 server unreachable).
+Or set `LINEUP_SERVER`, or pass `--server`. Every command takes `--json` for scripts and agents, and exit codes are stable (0 ok, 2 usage or invalid input, 3 not found, 4 conflict, 5 server unreachable, 6 a gateway failed).
 
 Shell completions:
 
@@ -56,14 +51,16 @@ CLI binaries for macOS and Linux (x86_64 and arm64) are attached to each GitHub 
 
 ## Bring in an existing playlist
 
-If you already have an M3U file, import it. Preview first; nothing is written until the second command.
+If you already have an M3U file, import it. Every entry is validated with the route you give; entries that route does not accept are skipped and listed, so a file with several kinds of channels is imported once per route. Preview first; nothing is written until the command without `--dry-run`.
 
 ```sh
-lineup import ./channels.m3u -p tv --dry-run
-lineup import ./channels.m3u -p tv
+lineup import ./channels.m3u -p tv -r Acestream --dry-run
+lineup import ./channels.m3u -p tv -r Acestream
+lineup import ./channels.m3u -p tv -r VK
+lineup import ./channels.m3u -p tv -r Direct --dry-run   # check what is left before importing the rest as direct
 ```
 
-Acestream and VK links are recognised in any of their usual forms (acexy or engine URLs, also behind a path prefix, `acestream://` ids, vk.com and vkvideo.ru links, proxy URLs). Anything else is kept as a direct URL. Re-importing is safe: channels that already exist are reused and their details are kept, and the report shows where the file differs.
+Gateway rules recognise their inputs in their usual forms (for Acestream: acexy or engine URLs, also behind a path prefix, `acestream://` ids). If the gateway fails during an import, nothing is written. Re-importing is safe: channels that already exist on the route are reused and their details are kept, and the report shows where the file differs (including a different source for the same channel).
 
 ## Use the playlist
 
@@ -146,11 +143,11 @@ Jellyfin's **Refresh Guide** task re-reads tuners and guide providers. To run it
 
 If the task id ever changes (a 404 in `lineup hook deliveries`), look it up again and `lineup hook edit <id> --url …`. Jellyfin reuses a downloaded XMLTV guide for a while (about an hour), so a refresh right after a guide change may still show the old programmes until a later refresh.
 
-## Upgrading from 0.3
+## Upgrading from 0.4
 
-lineup 0.4 starts from a new database and cannot open a 0.3 one: it refuses to start and leaves the old file untouched. To move over:
+lineup 0.5 starts from a new database and cannot open a 0.4 one: it refuses to start and leaves the old file untouched. Integrations are replaced by routes, and Acestream and VK support moved out of lineup into a gateway. To move over:
 
-1. Before upgrading, while 0.3 is still running, save what you will need (into an empty folder):
+1. Before upgrading, while 0.4 is still running, save what you will need (into an empty folder):
 
    ```sh
    lineup --json ls > channels.json                 # every channel, also disabled ones and ones in no playlist
@@ -161,30 +158,30 @@ lineup 0.4 starts from a new database and cannot open a 0.3 one: it refuses to s
    done
    lineup --json epg sources ls > epg-sources.json
    lineup --json hook ls > hooks.json               # header secrets are masked: take the Jellyfin API key from Jellyfin
-   lineup --json settings get > settings.json       # the 0.3 base URLs
+   lineup --json integration ls > integrations.json
    ```
 
-   The M3U files are what you import. The JSON files are records to recreate what an M3U does not carry: disabled channels (left out of the M3U), channels in no playlist, event flags and kickoff times.
-2. Stop and remove the 0.3 container, and keep its volume as the backup. Only the 0.3 binary can read it, so keep the 0.3 image tag too if you might roll back.
-3. Start 0.4 on a new, empty volume. With the example compose file, change the volume's `name:` (for example to `lineup-data-0.4`) and the image tag, then `docker compose up -d`. Starting 0.4 on the old volume fails with a message saying so, and changes nothing. (`deploy/restore.sh` uses the volume `lineup-data` unless you pass `VOLUME=lineup-data-0.4`.)
-4. Set up the integrations (above), preview each import, then import it (`lineup import tv.m3u -p tv --dry-run`, then without `--dry-run`). Acestream and VK channels are recognised from their stream URLs, also behind a reverse-proxy path prefix (`http://proxy/acexy/ace/getstream?id=…`); the preview shows each entry's kind, so check that none you expect as Acestream or VK shows as direct.
-5. From the JSON records, add back the channels in no playlist, disable the ones that were disabled, and set event flags and kickoff times. Then add the guide sources and hooks again.
+2. Run a gateway that has the rules you need (for example lineup-gateway with its `acestream` and `vk` rules), configured with the engine and acexy addresses from `integrations.json`.
+3. Stop and remove the 0.4 container, and keep its volume as the backup, with the 0.4 image tag in case you roll back.
+4. Start 0.5 on a new, empty volume (change the volume's `name:` in the compose file, for example to `lineup-data-0.5`, and the image tag).
+5. Add the gateway routes (above), then import each playlist once per route, previewing first. The gateway recognises its own and acexy's stream URLs; old VK proxy URLs (`/vk/<owner>_<video>`) are recognised if the gateway's VK rule accepts them, otherwise add those channels again from their vk.com links.
+6. From the JSON records, add back the channels in no playlist, disable the ones that were disabled, and set event flags and kickoff times. Then add the guide sources and hooks again, and set the check schedule under Settings if you used one.
 
 Imported channels take their name, group, tvg-id and logo from the M3U.
 
 ## Health checks
 
-lineup can check whether each Acestream channel's swarm has peers, through the engine. It starts a short session, reads its statistics and stops it again. Before each check it asks acexy whether anyone is watching that stream, and skips it if so. Checks therefore need acexy: without it they are unavailable (also with `--force`). acexy only knows about its own players, so a player connected to the engine directly can still be interrupted.
+lineup checks channels through their route's gateway, when the gateway's rule supports checks; how a check is done is up to the gateway. For Acestream, lineup-gateway starts a short engine session, reads its statistics and stops it again, and first asks acexy whether anyone is watching, skipping the channel if so. A check may also report what the source is now: live, ended with the recording not ready yet, or a recording.
 
-Clicking a channel opens its details: the engine's original name, and while someone watches through acexy, live peers, speeds and players (read from acexy's session; opening it never starts a stream), plus the latest check and **Check now**. `lineup info <channel>` prints the same.
+Clicking a channel opens its details: what the gateway observes now (for Acestream, while someone watches through acexy: peers, speeds and players; opening it never starts a stream), plus the latest check and **Check now**. `lineup info <channel>` prints the same.
 
 ```sh
-lineup probe "Sports One"   # one channel, waits for the result
-lineup probe                # all of them, in the background
+lineup check "Sports One"   # one channel, waits for the result
+lineup check                # all of them, in the background
 lineup ls --health dead
 ```
 
-Scheduled checks are off by default; set the schedule on the Acestream card (or `lineup integration set acestream --probe-interval 6`) to turn them on. Hooks can subscribe to `channel.unhealthy` and `channel.recovered`. A check measures the swarm, not whether playback works.
+Scheduled checks are off by default; set **Settings → Channel checks** (or `lineup settings set check_interval_hours 6`) to turn them on. A gateway that is down gets an "unknown" result, never "dead". Hooks can subscribe to `channel.unhealthy` and `channel.recovered`.
 
 ## Logs
 
@@ -214,6 +211,6 @@ docker stop lineup && sh deploy/restore.sh ./lineup-backup.db && docker start li
 
 It checks the backup (`integrity_check` plus a test query) before changing anything. It stages the copy next to the live database, then moves the current `lineup.db`, `-wal` and `-shm` into `/data/pre-restore-<timestamp>/` (WAL can hold committed rows, so nothing is deleted). It refuses to run while lineup is up. If validation fails, the live files are untouched, and because `&&` chains the commands, lineup stays stopped until the restore succeeds.
 
-A backup restores into the same lineup version line: 0.4 refuses a 0.3 database (see Upgrading from 0.3).
+A backup restores into the same lineup version line: 0.5 refuses a 0.4 database (see Upgrading from 0.4).
 
-Re-importing an exported M3U is **not** a full restore. It brings back that playlist's channels and their M3U fields, but not disabled channels, other playlists, integrations, settings, event flags or kickoff times. Use the database backup for that.
+Re-importing an exported M3U is **not** a full restore. It brings back that playlist's channels and their M3U fields, but not disabled channels, other playlists, routes, settings, event flags or kickoff times. Use the database backup for that.

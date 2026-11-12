@@ -1,0 +1,8 @@
+{
+  "ref": "acestream://41169a3f280a5537b0611b775e926852d372743d",
+  "outcome": "skipped",
+  "reason": "busy",
+  "content_state": null,
+  "detail": {"clients": 1},
+  "checked_at": "2026-11-11T20:00:00Z"
+}

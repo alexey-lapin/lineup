@@ -772,6 +772,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-contract"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1295,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "lineup"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "lineup-cli",
@@ -1306,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "lineup-api-types"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1316,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "lineup-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1337,15 +1345,17 @@ dependencies = [
 
 [[package]]
 name = "lineup-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
  "flate2",
  "futures-util",
+ "gateway-contract",
  "http-body-util",
  "lineup-api-types",
+ "lineup-server",
  "quick-xml",
  "reqwest",
  "rust-embed",

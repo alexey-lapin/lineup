@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 api-types.workspace = true
+gateway-contract.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
@@ -27,7 +28,12 @@ quick-xml = "0.42.0"
 flate2 = "1.1.10"
 strsim = "0.11.1"
 
+[features]
+# A stub gateway for tests of this crate and the CLI.
+test-support = []
+
 [dev-dependencies]
+lineup-server = { path = ".", features = ["test-support"] }
 http-body-util = "0.1.5"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

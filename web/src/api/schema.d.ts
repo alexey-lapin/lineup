@@ -13,6 +13,10 @@ export interface paths {
         };
         get: operations["list_channels"];
         put?: never;
+        /**
+         * Create a channel. Its input is validated with the route (a gateway route asks its gateway);
+         *     502 when the gateway fails.
+         */
         post: operations["create_channel"];
         delete?: never;
         options?: never;
@@ -33,6 +37,7 @@ export interface paths {
         delete: operations["delete_channel"];
         options?: never;
         head?: never;
+        /** Update a channel. `route_id` and/or `input` revalidate its source with the route. */
         patch: operations["patch_channel"];
         trace?: never;
     };
@@ -43,13 +48,31 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * What the services report about a channel right now. For acestream channels: live numbers of the
-         *     session acexy has open (never starts one), and the engine's name with `name=true`.
-         */
+        /** Stored check results and what the route's gateway observes now (never starts a stream). */
         get: operations["channel_info"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/checks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check channels through their routes' gateways. With `ids`, waits and returns their results
+         *     (409 if a channel's route has no checks); without, starts a run over all enabled channels of
+         *     routes with checks in the background (202).
+         */
+        post: operations["checks"];
         delete?: never;
         options?: never;
         head?: never;
@@ -215,79 +238,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/integrations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["list_integrations"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/integrations/{kind}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["get_integration"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        /**
-         * Change an integration's config. A change that alters playback URLs, or turns the integration on
-         *     or off, announces `playlist.changed` for the playlists with its channels.
-         */
-        patch: operations["patch_integration"];
-        trace?: never;
-    };
-    "/integrations/{kind}/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Test every configured component with its saved URL (versions, acexy's active stream count). */
-        get: operations["integration_status"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/integrations/{kind}/test": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Check that a component answers (at its saved URL, or `url` to try an unsaved value). Runs from
-         *     the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
-         */
-        post: operations["test_integration"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/playlists": {
         parameters: {
             query?: never;
@@ -368,28 +318,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/probe": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Check acestream channels (a short engine session each, skipped while acexy reports the stream
-         *     being watched). With `ids`, waits and returns their results; without, starts a run over all
-         *     enabled acestream channels in the background (202). 409 when checks are unavailable (no engine
-         *     or no acexy).
-         */
-        post: operations["probe"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/refresh": {
         parameters: {
             query?: never;
@@ -415,7 +343,103 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Validate an input with a route and suggest channel metadata; nothing is written. */
         post: operations["resolve"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_routes"];
+        put?: never;
+        /** Create a route. Its kind and (for gateway routes) its rule can't change later. */
+        post: operations["create_route"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/routes/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a route config (saved or not), and optionally an input with it. Runs from the lineup
+         *     server; it cannot show whether players reach the same address.
+         */
+        post: operations["test_route"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/routes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_route"];
+        put?: never;
+        post?: never;
+        /** Delete a route; 409 while channels use it. */
+        delete: operations["delete_route"];
+        options?: never;
+        head?: never;
+        /**
+         * Rename, enable or disable a route, or change a gateway route's base URL. A base URL change
+         *     revalidates every channel against the new address first and is refused (409) if any fails.
+         */
+        patch: operations["patch_route"];
+        trace?: never;
+    };
+    "/routes/{id}/resync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revalidate every channel of a gateway route with its gateway and publish the changes. Channels
+         *     that fail keep their values and are listed.
+         */
+        post: operations["resync_route"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/routes/{id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The saved route's gateway, live: whether it answers, its rule and channels pending a resync. */
+        get: operations["route_status"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -458,52 +482,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description Acestream section of a channel's details. */
-        AcestreamInfo: {
-            /** @description The name the engine reports for this content id (only when asked for with `name=true`). */
-            engine_name?: string | null;
-            /** @description Why the name could not be read. */
-            engine_name_error?: string | null;
-            live: components["schemas"]["AcestreamLive"];
-        };
-        /**
-         * @description Live numbers of an acestream channel, read from the session acexy already has open. Reading them
-         *     never starts or stops a session.
-         */
-        AcestreamLive: {
-            /**
-             * Format: int64
-             * @description Players connected to acexy for this stream.
-             */
-            clients?: number | null;
-            /**
-             * Format: int64
-             * @description Bytes downloaded in this session.
-             */
-            downloaded?: number | null;
-            /** Format: int64 */
-            peers?: number | null;
-            /** @description Why the state is unavailable, or why the numbers are missing. */
-            reason?: string | null;
-            /**
-             * Format: int64
-             * @description Download speed, KB/s.
-             */
-            speed_down?: number | null;
-            /**
-             * Format: int64
-             * @description Upload speed, KB/s.
-             */
-            speed_up?: number | null;
-            state: components["schemas"]["LiveState"];
-            /** @description Engine session status (`prebuf`, `dl`, ...). */
-            status?: string | null;
-            /**
-             * Format: int64
-             * @description Bytes uploaded in this session.
-             */
-            uploaded?: number | null;
-        };
         /** @description Whether a feature is available, and why not. */
         Availability: {
             available: boolean;
@@ -511,11 +489,6 @@ export interface components {
             reason?: string | null;
         };
         Channel: {
-            /**
-             * @description Whether the channel's integration is configured. Channels of an unconfigured integration
-             *     stay listed but are left out of playlists and guides.
-             */
-            configured: boolean;
             /** Format: date-time */
             created_at: string;
             enabled: boolean;
@@ -523,17 +496,26 @@ export interface components {
             health?: components["schemas"]["ChannelHealth"] | null;
             /** Format: int64 */
             id: number;
+            /** @description De-duplication key (unique per route). */
+            identity: string;
             is_event: boolean;
             /** Format: date-time */
             kickoff_at?: string | null;
             name: string;
+            /** @description The URL emitted in playlists. */
+            play_url: string;
             /** @description Slugs of playlists containing this channel. */
             playlists: string[];
-            source: components["schemas"]["Source"];
-            /** @description Canonical key used for de-duplication (unique per source kind). */
-            source_key: string;
-            /** @description Stream URL as emitted in playlists; null while the channel's integration is not configured. */
-            stream_url?: string | null;
+            /**
+             * @description Whether the channel's route is enabled. Channels of a disabled route stay listed but are
+             *     left out of playlists and guides.
+             */
+            route_enabled: boolean;
+            /** Format: int64 */
+            route_id: number;
+            route_name: string;
+            /** @description Canonical source, as the route validated it. */
+            source: string;
             tvg_id?: string | null;
             tvg_logo?: string | null;
             /** Format: date-time */
@@ -542,41 +524,54 @@ export interface components {
         ChannelCreate: {
             enabled?: boolean;
             group_title?: string | null;
-            input?: string | null;
+            /** @description What to play, in a form the route accepts (a URL for Direct; the gateway rule's input). */
+            input: string;
             is_event?: boolean;
             /** Format: date-time */
             kickoff_at?: string | null;
             name: string;
             /** @description Playlists (by slug) to append the new channel to. */
             playlists?: string[];
-            source?: components["schemas"]["Source"] | null;
+            /**
+             * Format: int64
+             * @description The route that plays the channel.
+             */
+            route_id: number;
             tvg_id?: string | null;
             tvg_logo?: string | null;
         };
-        /** @description Probe results of a channel. Only `ok` and `dead` are conclusive. */
+        /** @description Check results of a channel. Only `ok` and `dead` are conclusive. */
         ChannelHealth: {
-            conclusive?: components["schemas"]["ProbeOutcome"] | null;
+            conclusive?: components["schemas"]["CheckOutcome"] | null;
             /** Format: date-time */
             conclusive_at?: string | null;
-            /** @description Engine statistics or the error of the last attempt. */
+            content_state?: components["schemas"]["ContentState"] | null;
+            /** @description Gateway details of the last attempt. */
             detail: Record<string, never>;
-            last_attempt: components["schemas"]["ProbeOutcome"];
+            last_attempt: components["schemas"]["CheckOutcome"];
             /** Format: date-time */
             last_attempt_at: string;
+            /** @description Why the last attempt was `unknown` or `skipped` (e.g. `busy`). */
+            reason?: string | null;
         };
         /** @description What lineup can tell about a channel right now, beyond its stored fields. */
         ChannelInfo: {
-            acestream?: components["schemas"]["AcestreamInfo"] | null;
             /** Format: int64 */
             channel_id: number;
             /** @description Whether "Check now" can run for this channel. */
             checks: components["schemas"]["Availability"];
-            /** @description Whether the channel's integration is configured. */
-            configured: boolean;
             health?: components["schemas"]["ChannelHealth"] | null;
-            kind: components["schemas"]["SourceKind"];
+            observation?: components["schemas"]["Observation"] | null;
+            /** @description Why there is no observation although the route supports it (e.g. the gateway is unreachable). */
+            observation_error?: string | null;
+            /** Format: int64 */
+            route_id: number;
         };
-        /** @description Partial update. Absent fields are left unchanged; for nullable fields, `null` clears. */
+        /**
+         * @description Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.
+         *     `route_id` and/or `input` revalidate the source (with the current source when only the route
+         *     changes).
+         */
         ChannelPatch: {
             enabled?: boolean | null;
             group_title?: string | null;
@@ -585,43 +580,49 @@ export interface components {
             /** Format: date-time */
             kickoff_at?: string | null;
             name?: string | null;
-            source?: components["schemas"]["Source"] | null;
+            /** Format: int64 */
+            route_id?: number | null;
             tvg_id?: string | null;
             tvg_logo?: string | null;
         };
+        /** @enum {string} */
+        CheckOutcome: "ok" | "dead" | "unknown" | "skipped";
+        CheckRequest: {
+            /** @description Check even if the channel seems to be in use. */
+            force?: boolean;
+            /**
+             * @description Channels to check; all enabled channels of routes that support checks when empty (that run
+             *     continues in the background).
+             */
+            ids?: number[];
+        };
+        CheckResponse: {
+            /**
+             * @description True when a run over all channels was started in the background; results then arrive as
+             *     channel updates and events.
+             */
+            background: boolean;
+            /** @description Results, when specific channels were checked. */
+            results: components["schemas"]["CheckResult"][];
+        };
+        CheckResult: {
+            /** Format: int64 */
+            channel_id: number;
+            content_state?: components["schemas"]["ContentState"] | null;
+            detail: Record<string, never>;
+            outcome: components["schemas"]["CheckOutcome"];
+            reason?: string | null;
+            /**
+             * @description False when the result was not stored (the channel or its route changed meanwhile, or the
+             *     check did not run).
+             */
+            recorded: boolean;
+        };
         /**
-         * @description A part of an integration with its own address.
+         * @description What a page source currently is, when the gateway can tell.
          * @enum {string}
          */
-        Component: "engine" | "acexy" | "proxy";
-        ConnectionTestRequest: {
-            component: components["schemas"]["Component"];
-            /** @description A base URL to test instead of the saved one (e.g. an unsaved edit). */
-            url?: string | null;
-        };
-        /**
-         * @description Outcome of a connection test, run from the lineup server (it cannot show whether your players
-         *     can reach the same address).
-         */
-        ConnectionTestResult: {
-            /**
-             * Format: int64
-             * @description Streams acexy is serving now (acexy only).
-             */
-            active_streams?: number | null;
-            component: components["schemas"]["Component"];
-            /** @description What the answer shows, or why the test failed. */
-            detail: string;
-            /** Format: int64 */
-            elapsed_ms: number;
-            /** Format: int32 */
-            http_status?: number | null;
-            ok: boolean;
-            /** @description The URL that was requested. */
-            url: string;
-            /** @description Service version, when it reports one (the engine does; acexy does not). */
-            version?: string | null;
-        };
+        ContentState: "live" | "ended_processing" | "recording";
         /** @enum {string} */
         DeliveryTrigger: "events" | "test";
         /** @description A channel offered by a guide source. */
@@ -711,14 +712,38 @@ export interface components {
             error: components["schemas"]["ErrorDetail"];
         };
         ErrorDetail: {
-            /** @description Stable machine-readable code: not_found, conflict, invalid, internal. */
+            /**
+             * @description Stable machine-readable code: not_found, conflict, invalid, internal, gateway_unreachable,
+             *     gateway_error, contract_mismatch.
+             */
             code: string;
             message: string;
+        };
+        /** @description A labelled value reported by a gateway, for display. */
+        Fact: {
+            label: string;
+            value: string;
         };
         FieldDiff: {
             existing?: string | null;
             field: string;
             incoming?: string | null;
+        };
+        GatewaySummary: {
+            /** Format: int32 */
+            contract: number;
+            name: string;
+            rules: components["schemas"]["RuleSummary"][];
+            version: string;
+        };
+        /** @description Suggestions a gateway gives for a source. */
+        Hints: {
+            /** @description Usually a one-off event. */
+            event?: boolean | null;
+            group?: string | null;
+            /** @description Two-letter lowercase region, e.g. `de`. */
+            region?: string | null;
+            title?: string | null;
         };
         Hook: {
             config: components["schemas"]["HookConfig"];
@@ -796,11 +821,12 @@ export interface components {
             /** @description Fields where the file differs from the existing channel (existing metadata is never overwritten). */
             diff: components["schemas"]["FieldDiff"][];
             group_title?: string | null;
+            identity: string;
             /** @description 1-based entry index in the file. */
             index: number;
             name: string;
-            source: components["schemas"]["Source"];
-            source_key: string;
+            /** @description Canonical source from the route. */
+            source: string;
             tvg_id?: string | null;
             tvg_logo?: string | null;
         };
@@ -817,84 +843,12 @@ export interface components {
             /** @description Raw m3u text (exactly one of `m3u_text` / `url`). */
             m3u_text?: string | null;
             playlist_slug: string;
-            url?: string | null;
-        };
-        /** @description A service lineup plays channels through (one per source kind). */
-        Integration: {
             /**
              * Format: int64
-             * @description Channels of this integration.
+             * @description The route every entry is validated with. Entries it does not accept are skipped and listed.
              */
-            channel_count: number;
-            /** @description Health checks of its channels (Check now and the schedule). */
-            checks: components["schemas"]["Availability"];
-            config: components["schemas"]["IntegrationConfig"];
-            /** @description Its required URL is set (a stable property; see the status for reachability). */
-            configured: boolean;
-            kind: components["schemas"]["SourceKind"];
-            /**
-             * Format: int64
-             * @description Increases with every change; of two copies, the higher revision is newer. Read-only.
-             */
-            revision: number;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        /**
-         * @description What an integration needs, by type. Tagged by `kind`, which matches the integration's kind.
-         *     A blank required URL means the integration is not configured.
-         */
-        IntegrationConfig: {
-            /**
-             * @description acexy base URL. When set, playlists play through acexy (several viewers share one engine
-             *     session) and channel checks become available; when null, playlists use the engine directly.
-             */
-            acexy_url?: string | null;
-            /** @description Engine base URL, e.g. `http://media-host:6878`; blank = not configured. */
-            engine_url: string;
-            /** @enum {string} */
-            kind: "acestream";
-            /**
-             * Format: int32
-             * @description Hours between scheduled checks of all enabled acestream channels (the first runs 10
-             *     minutes after start); 0 turns them off. Checks need acexy.
-             */
-            probe_interval_hours: number;
-        } | {
-            /** @enum {string} */
-            kind: "vk";
-            /** @description Proxy base URL; blank = not configured. */
-            url: string;
-        } | {
-            /** @enum {string} */
-            kind: "direct";
-        };
-        /**
-         * @description Partial update of an integration's config, tagged by `kind` (must match the integration).
-         *     Absent fields are left unchanged; an empty string turns a required URL off.
-         */
-        IntegrationPatch: {
-            /** @description `null` or an empty string removes acexy. */
-            acexy_url?: string | null;
-            engine_url?: string | null;
-            /** @enum {string} */
-            kind: "acestream";
-            /** Format: int32 */
-            probe_interval_hours?: number | null;
-        } | {
-            /** @enum {string} */
-            kind: "vk";
+            route_id: number;
             url?: string | null;
-        } | {
-            /** @enum {string} */
-            kind: "direct";
-        };
-        /** @description Live state of an integration's services (from the saved config). */
-        IntegrationStatus: {
-            /** @description One result per configured component; empty when nothing is configured (or for Direct). */
-            components: components["schemas"]["ConnectionTestResult"][];
-            configured: boolean;
-            kind: components["schemas"]["SourceKind"];
         };
         ItemAdd: {
             /** Format: int64 */
@@ -909,17 +863,25 @@ export interface components {
             /** @description Full new order of channel ids. */
             channel_ids: number[];
         };
-        /**
-         * @description Whether acexy reports a stream as being watched.
-         * @enum {string}
-         */
-        LiveState: "active" | "inactive" | "unavailable";
         MoveRequest: {
             /**
              * Format: int64
              * @description New 1-based position (clamped).
              */
             position: number;
+        };
+        /** @description What the route's gateway reports about a channel right now. Reading it never starts a stream. */
+        Observation: {
+            /** @description Whether anything could be observed. */
+            available: boolean;
+            content_state?: components["schemas"]["ContentState"] | null;
+            facts: components["schemas"]["Fact"][];
+            /** @description Why not, or why some values are missing. */
+            reason?: string | null;
+            /** @description The source's current title, when it reports one. */
+            title?: string | null;
+            /** @description Whether someone is watching through the gateway's services, when known. */
+            watching?: boolean | null;
         };
         Playlist: {
             /** Format: int64 */
@@ -952,32 +914,6 @@ export interface components {
             name?: string | null;
             slug?: string | null;
         };
-        /** @enum {string} */
-        ProbeOutcome: "ok" | "dead" | "unknown" | "skipped";
-        ProbeRequest: {
-            /** @description Probe even if the stream seems to be in use. */
-            force?: boolean;
-            /**
-             * @description Channels to check; all enabled acestream channels when empty (that run continues in the
-             *     background). Checks need acexy.
-             */
-            ids?: number[];
-        };
-        ProbeResponse: {
-            /**
-             * @description True when a run over all channels was started in the background; results then arrive as
-             *     channel updates and events.
-             */
-            background: boolean;
-            /** @description Results, when specific channels were probed. */
-            results: components["schemas"]["ProbeResult"][];
-        };
-        ProbeResult: {
-            /** Format: int64 */
-            channel_id: number;
-            detail: Record<string, never>;
-            outcome: components["schemas"]["ProbeOutcome"];
-        };
         RefreshRequest: {
             /** @description Playlists to refresh; all when absent or empty. */
             slugs?: string[];
@@ -987,30 +923,160 @@ export interface components {
         };
         ResolveRequest: {
             input: string;
+            /** Format: int64 */
+            route_id: number;
         };
-        ResolveResponse: {
-            /** @description Whether the source's integration is configured. */
-            configured: boolean;
+        ResolveResponse: components["schemas"]["ValidatedSource"] & {
             /**
              * Format: int64
-             * @description Existing channel with the same source, if any.
+             * @description Existing channel on this route with the same identity, if any.
              */
             duplicate_of?: number | null;
-            /** @description Name the Acestream engine reports for this content id, as-is. */
-            engine_name?: string | null;
+            /**
+             * @description The duplicate's stored source, when it differs from this one (e.g. a newer access token);
+             *     editing that channel with this input updates it.
+             */
+            duplicate_source?: string | null;
             /** @description Best guide channels for the suggested name, best first (up to 5). */
             matches?: components["schemas"]["EpgChannel"][];
-            source: components["schemas"]["Source"];
-            source_key: string;
-            /** @description Null while the source's integration is not configured. */
-            stream_url?: string | null;
+            /** Format: int64 */
+            route_id: number;
             /** @description Suggested values for a new channel; shown as editable defaults. */
             suggestion: components["schemas"]["Suggestion"];
-            /** @description Problems that did not stop the resolve, such as an unreachable engine. */
-            warnings?: string[];
         };
-        /** @description App-wide settings. Service addresses live in the integrations. */
+        ResyncItem: {
+            /** Format: int64 */
+            channel_id: number;
+            name: string;
+            reason: string;
+        };
+        /** @description Outcome of revalidating every channel of a route. */
+        ResyncReport: {
+            /** Format: date-time */
+            at: string;
+            /** @description Every channel is now current (the route's synced revisions advanced). */
+            complete: boolean;
+            /**
+             * @description Channels the gateway did not accept, or that would collide with another channel; they keep
+             *     their previous values.
+             */
+            failed: components["schemas"]["ResyncItem"][];
+            match_revision?: string | null;
+            play_revision?: string | null;
+            /** @description Channels changed by someone else during the resync; left as they are. */
+            skipped: components["schemas"]["ResyncItem"][];
+            total: number;
+            trigger: components["schemas"]["ResyncTrigger"];
+            unchanged: number;
+            /** @description Channels whose source, identity or play reference changed. */
+            updated: number;
+        };
+        /** @enum {string} */
+        ResyncTrigger: "manual" | "base_url_change" | "revision_change";
+        Route: {
+            /** Format: int64 */
+            channel_count: number;
+            config: components["schemas"]["RouteConfig"];
+            /** Format: date-time */
+            created_at: string;
+            enabled: boolean;
+            /** Format: int64 */
+            id: number;
+            last_resync?: components["schemas"]["ResyncReport"] | null;
+            name: string;
+            /**
+             * Format: int64
+             * @description Increases with every change; of two copies, the higher revision is newer. Read-only.
+             */
+            revision: number;
+            /** @description The rule's match revision at the last resync that updated every channel (gateway only). */
+            synced_match_revision?: string | null;
+            /** @description The rule's play revision at the last resync that updated every channel (gateway only). */
+            synced_play_revision?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /**
+         * @description How a route plays its channels. Tagged by `kind`; the kind and a gateway's rule can't change
+         *     after the route is created.
+         */
+        RouteConfig: {
+            /** @enum {string} */
+            kind: "direct";
+        } | {
+            /** @description Gateway base URL, as players reach it (e.g. `http://media-host:8099`). */
+            base_url: string;
+            /** @enum {string} */
+            kind: "gateway";
+            /** @description One of the gateway's rules (e.g. `acestream`, `vk`). */
+            rule: string;
+        };
+        RouteCreate: {
+            config: components["schemas"]["RouteConfig"];
+            enabled?: boolean;
+            name: string;
+        };
+        /** @description Partial update. The kind and a gateway's rule can't change; create another route instead. */
+        RoutePatch: {
+            /**
+             * @description New gateway base URL. Every channel of the route is revalidated against it first; if any
+             *     fails, nothing changes.
+             */
+            base_url?: string | null;
+            enabled?: boolean | null;
+            name?: string | null;
+        };
+        /** @description Live state of a route's gateway (from the saved config). */
+        RouteStatus: {
+            detail: string;
+            /** Format: int64 */
+            elapsed_ms: number;
+            gateway?: components["schemas"]["GatewaySummary"] | null;
+            /** @description The gateway answered and has the route's rule. */
+            ok: boolean;
+            /**
+             * Format: int64
+             * @description Channels whose play reference is from another play revision than the gateway's current one
+             *     (they need a resync). Null when the gateway did not answer.
+             */
+            pending_channels?: number | null;
+            /** Format: int64 */
+            route_id: number;
+            rule?: components["schemas"]["RuleSummary"] | null;
+        };
+        /** @description Test a route config before (or without) saving it. */
+        RouteTestRequest: {
+            config: components["schemas"]["RouteConfig"];
+            /** @description Also validate this input with the config. */
+            input?: string | null;
+        };
+        RouteTestResult: {
+            /** @description What the test shows, or why it failed. */
+            detail: string;
+            /** Format: int64 */
+            elapsed_ms: number;
+            gateway?: components["schemas"]["GatewaySummary"] | null;
+            ok: boolean;
+            sample?: components["schemas"]["ValidatedSource"] | null;
+        };
+        /** @description A gateway rule, as the gateway describes it. */
+        RuleSummary: {
+            /** @description `observe`, `check`. */
+            capabilities: string[];
+            input_hint?: string | null;
+            match_revision: string;
+            name: string;
+            play_revision: string;
+            title: string;
+        };
+        /** @description App-wide settings. Service addresses live in the routes. */
         Settings: {
+            /**
+             * Format: int32
+             * @description Hours between scheduled checks of all enabled channels on routes that support checks (the
+             *     first runs 10 minutes after start); 0 turns them off.
+             */
+            check_interval_hours: number;
             /**
              * Format: int32
              * @description Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
@@ -1025,41 +1091,30 @@ export interface components {
         };
         SettingsPatch: {
             /** Format: int32 */
+            check_interval_hours?: number | null;
+            /** Format: int32 */
             epg_refresh_hours?: number | null;
         };
-        /** @description A channel's stream source. Its kind is also the channel's integration, which builds the URL. */
-        Source: {
-            id: string;
-            /** @enum {string} */
-            kind: "acestream";
-        } | {
-            /** @enum {string} */
-            kind: "vk";
-            list?: string | null;
-            /** Format: int64 */
-            owner_id: number;
-            /** Format: int64 */
-            video_id: number;
-        } | {
-            /** @enum {string} */
-            kind: "direct";
-            url: string;
-        };
-        /**
-         * @description A source kind, which is also the integration that plays it (one integration per kind).
-         * @enum {string}
-         */
-        SourceKind: "acestream" | "vk" | "direct";
         Status: {
             version: string;
         };
         Suggestion: {
             group_title?: string | null;
-            /** @description VK links are usually one-off live events. */
             is_event: boolean;
             name: string;
             tvg_id?: string | null;
             tvg_logo?: string | null;
+        };
+        /** @description A source as a route validated it. */
+        ValidatedSource: {
+            hints: components["schemas"]["Hints"];
+            /** @description De-duplication key within the route. */
+            identity: string;
+            /** @description The URL players get. */
+            play_url: string;
+            /** @description Canonical source, stored with the channel. */
+            source: string;
+            warnings: string[];
         };
     };
     responses: never;
@@ -1075,13 +1130,14 @@ export interface operations {
             query?: {
                 /** @description Exact group-title. */
                 group?: string;
-                /** @description Case-insensitive substring of name, tvg-id or source key. */
+                /** @description Case-insensitive substring of name, tvg-id, source or identity. */
                 q?: string;
                 /** @description Only channels in this playlist. */
                 playlist?: string;
-                kind?: components["schemas"]["SourceKind"];
-                /** @description Only channels whose last conclusive probe result is this (`ok` or `dead`). */
-                health?: components["schemas"]["ProbeOutcome"];
+                /** @description Only channels of this route. */
+                route_id?: number;
+                /** @description Only channels whose last conclusive check result is this (`ok` or `dead`). */
+                health?: components["schemas"]["CheckOutcome"];
             };
             header?: never;
             path?: never;
@@ -1129,6 +1185,14 @@ export interface operations {
                 };
             };
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1233,14 +1297,27 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     channel_info: {
         parameters: {
-            query?: {
-                /** @description Also ask the engine for the content's name (an extra request; once per view is enough). */
-                name?: boolean;
-            };
+            query?: never;
             header?: never;
             path: {
                 id: number;
@@ -1258,6 +1335,61 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    checks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckResponse"];
+                };
+            };
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckResponse"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1679,149 +1811,6 @@ export interface operations {
             };
         };
     };
-    list_integrations: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Integration"][];
-                };
-            };
-        };
-    };
-    get_integration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                kind: components["schemas"]["SourceKind"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Integration"];
-                };
-            };
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    patch_integration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                kind: components["schemas"]["SourceKind"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["IntegrationPatch"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Integration"];
-                };
-            };
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    integration_status: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                kind: components["schemas"]["SourceKind"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["IntegrationStatus"];
-                };
-            };
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    test_integration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                kind: components["schemas"]["SourceKind"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ConnectionTestRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConnectionTestResult"];
-                };
-            };
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     list_playlists: {
         parameters: {
             query?: never;
@@ -2123,61 +2112,6 @@ export interface operations {
             };
         };
     };
-    probe: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ProbeRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProbeResponse"];
-                };
-            };
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProbeResponse"];
-                };
-            };
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     refresh: {
         parameters: {
             query?: never;
@@ -2230,7 +2164,315 @@ export interface operations {
                     "application/json": components["schemas"]["ResolveResponse"];
                 };
             };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_routes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"][];
+                };
+            };
+        };
+    };
+    create_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RouteCreate"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    test_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RouteTestRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteTestResult"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    delete_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    patch_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RoutePatch"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Route"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    resync_route: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResyncReport"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    route_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RouteStatus"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

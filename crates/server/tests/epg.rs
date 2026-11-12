@@ -250,13 +250,19 @@ mod output {
     const ACE2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
     const ACE3: &str = "914c3344a2cb94beeb26c187ca10e5c862090dba";
 
-    fn ch(name: &str, input: &str, tvg_id: Option<&str>) -> ChannelCreate {
+    /// A channel on `route_id` (direct routes take any URL).
+    fn ch(name: &str, route_id: i64, url: &str, tvg_id: Option<&str>) -> ChannelCreate {
         ChannelCreate {
             name: name.into(),
-            input: Some(input.into()),
+            group_title: None,
             tvg_id: tvg_id.map(str::to_string),
+            tvg_logo: None,
+            route_id,
+            input: url.into(),
+            is_event: false,
+            kickoff_at: None,
+            enabled: true,
             playlists: vec!["jf".into()],
-            ..Default::default()
         }
     }
 
@@ -267,25 +273,14 @@ mod output {
         let store = Arc::new(Store::open(&data.path().join("lineup.db")).await.unwrap());
         let app = App::new(store.clone(), data.path());
         let epg = app.epg.clone();
+        let catalog = app.catalog.clone();
         let router = router_for(app);
-        let engine = |url: &str| api_types::IntegrationPatch::Acestream {
-            engine_url: Some(url.into()),
-            acexy_url: None,
-            probe_interval_hours: None,
-        };
-        store
-            .patch_integration(api_types::SourceKind::Acestream, engine("http://e:6878"))
+        // A second route for the stream channels, so it can be turned off on its own.
+        let streams = store
+            .create_route("Streams", api_types::RouteConfig::Direct {}, true)
             .await
-            .unwrap();
-        store
-            .patch_integration(
-                api_types::SourceKind::Vk,
-                api_types::IntegrationPatch::Vk {
-                    url: Some("http://v:8099".into()),
-                },
-            )
-            .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         store
             .create_playlist(PlaylistCreate {
@@ -294,19 +289,20 @@ mod output {
             })
             .await
             .unwrap();
-        let arena = store
-            .create_channel(ch("Arena", ACE1, Some("Arena1.de")))
+        let url = |id: &str| format!("http://h/ace/getstream?id={id}");
+        let arena = catalog
+            .create_channel(ch("Arena", streams, &url(ACE1), Some("Arena1.de")))
             .await
             .unwrap();
-        let mut sports = ch("Sports", ACE2, Some("SportsOne.uk"));
+        let mut sports = ch("Sports", streams, &url(ACE2), Some("SportsOne.uk"));
         sports.enabled = false;
-        store.create_channel(sports).await.unwrap();
-        let mut event = ch("Cup <Final>", "https://vk.com/video-1_2", None);
+        catalog.create_channel(sports).await.unwrap();
+        let mut event = ch("Cup <Final>", 1, "https://vk.com/video-1_2", None);
         event.is_event = true;
         event.kickoff_at = Some(Utc.with_ymd_and_hms(2099, 1, 1, 20, 0, 0).unwrap());
-        let event = store.create_channel(event).await.unwrap();
-        store
-            .create_channel(ch("Unknown", ACE3, Some("Nope.xx")))
+        let event = catalog.create_channel(event).await.unwrap();
+        catalog
+            .create_channel(ch("Unknown", streams, &url(ACE3), Some("Nope.xx")))
             .await
             .unwrap();
 
@@ -357,7 +353,7 @@ mod output {
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&again, &later));
-        store
+        catalog
             .patch_channel(
                 arena.id,
                 ChannelPatch {
@@ -374,19 +370,13 @@ mod output {
         let xml = std::str::from_utf8(&r.body).unwrap();
         assert!(xml.contains("SportsOne.uk") && !xml.contains("Arena1.de"), "{xml}");
 
-        // Turning the Acestream integration off removes its channels from the guide too, and turning
-        // it on again brings them back.
-        store
-            .patch_integration(api_types::SourceKind::Acestream, engine(""))
-            .await
-            .unwrap();
+        // Turning the streams' route off removes its channels from the guide too, and turning it on
+        // again brings them back.
+        store.update_route(streams, None, Some(false)).await.unwrap();
         let off = epg.playlist_xml_at("jf", now).await.unwrap();
         let off = std::str::from_utf8(&off.body).unwrap();
         assert!(!off.contains("SportsOne.uk") && off.contains(&ev_id), "{off}");
-        store
-            .patch_integration(api_types::SourceKind::Acestream, engine("http://e:6878"))
-            .await
-            .unwrap();
+        store.update_route(streams, None, Some(true)).await.unwrap();
         let on = epg.playlist_xml_at("jf", now).await.unwrap();
         assert!(std::str::from_utf8(&on.body).unwrap().contains("SportsOne.uk"));
 
@@ -427,36 +417,33 @@ mod resolve {
     use super::*;
 
     #[tokio::test]
-    async fn suggestions_from_engine_and_guide() {
+    async fn suggestions_from_gateway_hints_and_guide() {
         let (base, _up) = upstream().await;
-        // A fake engine answering name lookups.
-        let engine = axum::Router::new().route(
-            "/server/api",
-            get(
-                |q: axum::extract::Query<std::collections::HashMap<String, String>>| async move {
-                    assert_eq!(q.0["method"], "get_media_files");
-                    axum::Json(serde_json::json!({"result": {"0": "Arena 1 Bar HD [DE]"}, "error": null}))
-                },
-            ),
+        let gw = lineup_server::testing::StubGateway::start().await;
+        let ace = "41169a3f280a5537b0611b775e926852d372743d";
+        gw.set_hints(
+            ace,
+            gateway_contract::Hints {
+                title: Some("Arena 1".into()),
+                region: Some("de".into()),
+                group: Some("Sports".into()),
+                event: None,
+            },
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let engine_addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, engine).await.unwrap() });
 
         let data = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&data.path().join("lineup.db")).await.unwrap());
-        let epg = Epg::new(store.clone(), data.path());
-        store
-            .patch_integration(
-                api_types::SourceKind::Acestream,
-                api_types::IntegrationPatch::Acestream {
-                    engine_url: Some(format!("http://{engine_addr}")),
-                    acexy_url: None,
-                    probe_interval_hours: None,
-                },
-            )
+        let app = lineup_server::http::App::new(store.clone(), data.path());
+        let route = |rule: &str| api_types::RouteConfig::Gateway {
+            base_url: gw.url.clone(),
+            rule: rule.into(),
+        };
+        let ace_route = store
+            .create_route("Acestream", route("acestream"), true)
             .await
-            .unwrap();
+            .unwrap()
+            .id;
+        let vk_route = store.create_route("VK", route("vk"), true).await.unwrap().id;
         store
             .create_epg_source(EpgSourceCreate {
                 url: format!("{base}/guide.xml.gz"),
@@ -466,44 +453,29 @@ mod resolve {
             })
             .await
             .unwrap();
-        epg.fetch(&[]).await.unwrap();
+        app.epg.fetch(&[]).await.unwrap();
 
-        let ace = "41169a3f280a5537b0611b775e926852d372743d";
-        let r = lineup_server::resolve::resolve(&store, epg.client(), &format!("acestream://{ace}"))
+        let r = app
+            .catalog
+            .resolve(ace_route, &format!("acestream://{ace}"))
             .await
             .unwrap();
-        assert_eq!(r.engine_name.as_deref(), Some("Arena 1 Bar HD [DE]"));
         assert_eq!(r.suggestion.name, "Arena 1");
         assert_eq!(r.suggestion.tvg_id.as_deref(), Some("Arena1.de"));
         assert_eq!(r.suggestion.group_title.as_deref(), Some("Sports"));
         assert_eq!(r.matches[0].xmltv_id, "Arena1.de");
-        assert!(r.warnings.is_empty());
+        assert!(r.validated.warnings.is_empty());
 
-        // VK: event and group, no engine call.
-        let r = lineup_server::resolve::resolve(&store, epg.client(), "https://vk.com/video-1_2")
-            .await
-            .unwrap();
+        // VK: event and group from the hints; no title, so no guide matching.
+        let r = app.catalog.resolve(vk_route, "https://vk.com/video-1_2").await.unwrap();
         assert!(r.suggestion.is_event);
         assert_eq!(r.suggestion.group_title.as_deref(), Some("VK"));
         assert!(r.matches.is_empty());
 
-        // Engine down: a warning, and the placeholder name.
-        store
-            .patch_integration(
-                api_types::SourceKind::Acestream,
-                api_types::IntegrationPatch::Acestream {
-                    engine_url: Some("http://127.0.0.1:1".into()),
-                    acexy_url: None,
-                    probe_interval_hours: None,
-                },
-            )
-            .await
-            .unwrap();
-        let r = lineup_server::resolve::resolve(&store, epg.client(), ace)
-            .await
-            .unwrap();
-        assert_eq!(r.suggestion.name, "Acestream 41169a3f");
-        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        // An id without hints: the identity is the placeholder name.
+        let other = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
+        let r = app.catalog.resolve(ace_route, other).await.unwrap();
+        assert_eq!(r.suggestion.name, format!("ace:{other}"));
     }
 }
 

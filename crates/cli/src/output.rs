@@ -1,17 +1,14 @@
 //! Human-readable rendering.
 
 use api_types::{
-    Channel, ChannelInfo, ConnectionTestResult, DeliveryTrigger, EpgChannel, EpgFetchResult, EpgFetchStatus, EpgSource,
-    Hook, HookConfig, HookDelivery, ImportAction, ImportReport, Integration, IntegrationConfig, IntegrationStatus,
-    LiveState, Playlist, PlaylistDetail, ProbeOutcome, ProbeResult, ResolveResponse, Settings, Source, Status,
+    Channel, ChannelInfo, CheckOutcome, CheckResult, ContentState, DeliveryTrigger, EpgChannel, EpgFetchResult,
+    EpgFetchStatus, EpgSource, Hook, HookConfig, HookDelivery, ImportAction, ImportReport, Playlist, PlaylistDetail,
+    ResolveResponse, ResyncReport, Route, RouteConfig, RouteStatus, RouteTestResult, Settings, Status, ValidatedSource,
 };
 
-pub fn source_label(s: &Source) -> String {
-    match s {
-        Source::Acestream { id } => format!("ace:{}", &id[..8.min(id.len())]),
-        Source::Vk { owner_id, video_id, .. } => format!("vk:{owner_id}_{video_id}"),
-        Source::Direct { url } => format!("direct:{}", truncate(url, 40)),
-    }
+/// A short label for a channel's source: its route and identity.
+pub fn source_label(route: &str, identity: &str) -> String {
+    format!("{route}: {}", truncate(identity, 48))
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -69,7 +66,7 @@ pub fn channels(list: &[Channel]) {
                     c.id.to_string(),
                     name,
                     c.group_title.clone().unwrap_or_default(),
-                    source_label(&c.source),
+                    source_label(&c.route_name, &c.identity),
                     c.tvg_id.clone().unwrap_or_default(),
                     health_label(c),
                     c.playlists.join(","),
@@ -79,12 +76,15 @@ pub fn channels(list: &[Channel]) {
     );
 }
 
-fn outcome(o: ProbeOutcome) -> &'static str {
-    match o {
-        ProbeOutcome::Ok => "ok",
-        ProbeOutcome::Dead => "dead",
-        ProbeOutcome::Unknown => "unknown",
-        ProbeOutcome::Skipped => "skipped",
+fn outcome(o: CheckOutcome) -> &'static str {
+    o.as_str()
+}
+
+fn state(s: ContentState) -> &'static str {
+    match s {
+        ContentState::Live => "live",
+        ContentState::EndedProcessing => "ended, recording not ready",
+        ContentState::Recording => "recording",
     }
 }
 
@@ -103,16 +103,27 @@ fn health_label(c: &Channel) -> String {
     }
 }
 
-pub fn probe_results(list: &[ProbeResult]) {
+pub fn check_results(list: &[CheckResult]) {
     for r in list {
-        let detail = r
-            .detail
-            .as_ref()
-            .and_then(|d| d.get("error").or_else(|| d.get("reason")))
-            .and_then(|v| v.as_str())
-            .map(|s| format!(": {s}"))
-            .unwrap_or_default();
-        println!("channel {}: {}{detail}", r.channel_id, outcome(r.outcome));
+        let mut extra = Vec::new();
+        if let Some(s) = r.content_state {
+            extra.push(state(s).to_string());
+        }
+        if let Some(why) = &r.reason {
+            extra.push(why.clone());
+        }
+        if let Some(e) = r.detail.as_ref().and_then(|d| d.get("error")).and_then(|v| v.as_str()) {
+            extra.push(e.to_string());
+        }
+        if !r.recorded {
+            extra.push("not recorded".into());
+        }
+        let extra = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", extra.join("; "))
+        };
+        println!("channel {}: {}{extra}", r.channel_id, outcome(r.outcome));
     }
 }
 
@@ -123,8 +134,19 @@ pub fn channel(c: &Channel) {
     println!("group:      {}", opt(&c.group_title));
     println!("tvg-id:     {}", opt(&c.tvg_id));
     println!("logo:       {}", opt(&c.tvg_logo));
-    println!("source:     {}", serde_json::to_string(&c.source).unwrap_or_default());
-    println!("stream url: {}", stream_url(&c.stream_url));
+    println!(
+        "route:      {} ({}){}",
+        c.route_name,
+        c.route_id,
+        if c.route_enabled {
+            ""
+        } else {
+            ", disabled: left out of playlists"
+        }
+    );
+    println!("source:     {}", c.source);
+    println!("identity:   {}", c.identity);
+    println!("play url:   {}", c.play_url);
     println!("enabled:    {}", c.enabled);
     if c.is_event {
         println!(
@@ -174,7 +196,7 @@ pub fn playlist(p: &PlaylistDetail) {
                     i.position.to_string(),
                     i.channel.id.to_string(),
                     name,
-                    source_label(&i.channel.source),
+                    source_label(&i.channel.route_name, &i.channel.identity),
                 ]
             })
             .collect(),
@@ -217,7 +239,7 @@ pub fn import(r: &ImportReport) {
                     action.into(),
                     e.channel_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
                     e.name.clone(),
-                    source_label(&e.source),
+                    truncate(&e.identity, 48),
                     diff,
                 ]
             })
@@ -239,118 +261,159 @@ pub fn import(r: &ImportReport) {
 }
 
 pub fn settings(s: &Settings) {
-    println!("epg_refresh_hours: {}", s.epg_refresh_hours);
-}
-
-/// A stream URL, or why there is none.
-pub fn stream_url(u: &Option<String>) -> String {
-    u.clone()
-        .unwrap_or_else(|| "- (integration not configured; left out of playlists)".into())
+    println!("epg_refresh_hours:    {}", s.epg_refresh_hours);
+    println!("check_interval_hours: {}", s.check_interval_hours);
 }
 
 fn or_dash(o: &Option<String>) -> &str {
     o.as_deref().filter(|s| !s.is_empty()).unwrap_or("-")
 }
 
-pub fn integrations(list: &[Integration]) {
+fn config_summary(c: &RouteConfig) -> String {
+    match c {
+        RouteConfig::Direct {} => "direct: URLs are played as they are".into(),
+        RouteConfig::Gateway { base_url, rule } => format!("gateway {base_url}, rule {rule}"),
+    }
+}
+
+pub fn routes(list: &[Route]) {
     table(
-        &["KIND", "CONFIGURED", "CHANNELS", "CONFIG"],
+        &["ID", "NAME", "ENABLED", "CHANNELS", "CONFIG"],
         list.iter()
-            .map(|i| {
+            .map(|r| {
                 vec![
-                    i.kind.as_str().to_string(),
-                    if i.configured { "yes" } else { "no" }.to_string(),
-                    i.channel_count.to_string(),
-                    config_summary(&i.config),
+                    r.id.to_string(),
+                    r.name.clone(),
+                    if r.enabled { "yes" } else { "no" }.to_string(),
+                    r.channel_count.to_string(),
+                    config_summary(&r.config),
                 ]
             })
             .collect(),
     );
 }
 
-fn config_summary(c: &IntegrationConfig) -> String {
-    match c {
-        IntegrationConfig::Acestream {
-            engine_url,
-            acexy_url,
-            probe_interval_hours,
-        } => format!(
-            "engine {}, acexy {}, checks every {}",
-            if engine_url.is_empty() { "-" } else { engine_url },
-            or_dash(acexy_url),
-            if *probe_interval_hours == 0 {
-                "- (off)".to_string()
-            } else {
-                format!("{probe_interval_hours} h")
-            }
-        ),
-        IntegrationConfig::Vk { url } => format!("proxy {}", if url.is_empty() { "-" } else { url }),
-        IntegrationConfig::Direct {} => "URLs are played as they are".into(),
-    }
-}
-
-pub fn integration(i: &Integration, status: Option<&IntegrationStatus>) {
-    println!("kind:       {}", i.kind.as_str());
+pub fn route(r: &Route, status: Option<&RouteStatus>) {
+    println!("id:         {}", r.id);
+    println!("name:       {}", r.name);
     println!(
-        "configured: {}",
-        if i.configured {
+        "enabled:    {}",
+        if r.enabled {
             "yes"
         } else {
             "no (its channels are left out of playlists and guides)"
         }
     );
-    match &i.config {
-        IntegrationConfig::Acestream {
-            engine_url,
-            acexy_url,
-            probe_interval_hours,
-        } => {
-            println!("engine:     {}", if engine_url.is_empty() { "-" } else { engine_url });
-            match acexy_url {
-                Some(a) => println!("acexy:      {a}"),
-                None => println!("acexy:      - (playlists use the engine directly; recommended for several viewers)"),
-            }
-            if *probe_interval_hours == 0 {
-                println!("schedule:   off");
-            } else {
-                println!("schedule:   checks every {probe_interval_hours} h");
-            }
+    match &r.config {
+        RouteConfig::Direct {} => println!("kind:       direct (URLs are played as they are)"),
+        RouteConfig::Gateway { base_url, rule } => {
+            println!("kind:       gateway");
+            println!("base url:   {base_url}");
+            println!("rule:       {rule}");
+            println!(
+                "synced:     match {}, play {}",
+                or_dash(&r.synced_match_revision),
+                or_dash(&r.synced_play_revision)
+            );
         }
-        IntegrationConfig::Vk { url } => println!("proxy:      {}", if url.is_empty() { "-" } else { url }),
-        IntegrationConfig::Direct {} => {}
     }
-    if let Some(why) = &i.checks.reason
-        && i.kind == api_types::SourceKind::Acestream
-    {
-        println!("            checks unavailable: {why}");
+    println!("channels:   {}", r.channel_count);
+    if let Some(rep) = &r.last_resync {
+        print!("last sync:  ");
+        resync_line(rep);
     }
-    println!("channels:   {}", i.channel_count);
     if let Some(s) = status {
-        for c in &s.components {
-            connection_test(c);
+        println!(
+            "status:     {}: {} ({} ms)",
+            if s.ok { "ok" } else { "failed" },
+            s.detail,
+            s.elapsed_ms
+        );
+        if let Some(rule) = &s.rule {
+            println!(
+                "            rule {:?}: match {}, play {}, can: {}",
+                rule.title,
+                rule.match_revision,
+                rule.play_revision,
+                if rule.capabilities.is_empty() {
+                    "-".into()
+                } else {
+                    rule.capabilities.join(", ")
+                }
+            );
+        }
+        if let Some(n) = s.pending_channels {
+            println!("            {n} channel(s) pending a resync");
         }
     }
 }
 
-pub fn connection_test(r: &ConnectionTestResult) {
+fn resync_line(r: &ResyncReport) {
     println!(
-        "{:<7} {}: {} ({} ms)",
-        r.component.as_str(),
+        "{} ({:?}): {} updated, {} unchanged, {} failed, {} skipped{}",
+        r.at.format("%Y-%m-%d %H:%M UTC"),
+        r.trigger,
+        r.updated,
+        r.unchanged,
+        r.failed.len(),
+        r.skipped.len(),
+        if r.complete { "" } else { " (incomplete)" }
+    );
+}
+
+pub fn resync(r: &ResyncReport) {
+    resync_line(r);
+    for i in r.failed.iter().chain(&r.skipped) {
+        println!("  channel {} ({}): {}", i.channel_id, i.name, i.reason);
+    }
+}
+
+pub fn validated(v: &ValidatedSource) {
+    println!("source:     {}", v.source);
+    println!("identity:   {}", v.identity);
+    println!("play url:   {}", v.play_url);
+    if let Some(t) = &v.hints.title {
+        println!("title:      {t}");
+    }
+    for w in &v.warnings {
+        println!("warning:    {w}");
+    }
+}
+
+pub fn route_test(r: &RouteTestResult) {
+    println!(
+        "{}: {} ({} ms)",
         if r.ok { "ok" } else { "failed" },
         r.detail,
         r.elapsed_ms
     );
+    if let Some(g) = &r.gateway {
+        println!("gateway:    {} {} (contract {})", g.name, g.version, g.contract);
+        for rule in &g.rules {
+            println!(
+                "  rule {:<12} {}{}",
+                rule.name,
+                rule.title,
+                rule.input_hint.as_deref().map(|h| format!(": {h}")).unwrap_or_default()
+            );
+        }
+    }
+    if let Some(v) = &r.sample {
+        validated(v);
+    }
 }
 
 pub fn channel_info(i: &ChannelInfo) {
-    println!("channel:    {} ({})", i.channel_id, i.kind.as_str());
-    if !i.configured {
-        println!("            integration not configured: left out of playlists and guides");
-    }
+    println!("channel:    {} (route {})", i.channel_id, i.route_id);
     match &i.health {
         Some(h) => {
             let at = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
-            println!("last check: {} at {}", outcome(h.last_attempt), at(h.last_attempt_at));
+            let extra = h.content_state.map(|s| format!(", {}", state(s))).unwrap_or_default();
+            println!(
+                "last check: {} at {}{extra}",
+                outcome(h.last_attempt),
+                at(h.last_attempt_at)
+            );
             if let (Some(c), Some(t)) = (h.conclusive, h.conclusive_at)
                 && h.conclusive != Some(h.last_attempt)
             {
@@ -364,28 +427,32 @@ pub fn channel_info(i: &ChannelInfo) {
     {
         println!("            checks unavailable: {why}");
     }
-    let Some(a) = &i.acestream else { return };
-    match (&a.engine_name, &a.engine_name_error) {
-        (Some(n), _) => println!("engine name: {n}"),
-        (None, Some(e)) => println!("engine name: - ({e})"),
-        _ => {}
+    if let Some(e) = &i.observation_error {
+        println!("now:        - ({e})");
     }
-    let l = &a.live;
-    let state = match l.state {
-        LiveState::Active => "watched now",
-        LiveState::Inactive => "not watched",
-        LiveState::Unavailable => "unknown",
-    };
-    match &l.reason {
-        Some(r) => println!("live:       {state} ({r})"),
-        None => println!("live:       {state}"),
+    let Some(o) = &i.observation else { return };
+    let mut now = Vec::new();
+    if let Some(s) = o.content_state {
+        now.push(state(s).to_string());
     }
-    if l.state == LiveState::Active {
-        let n = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
-        println!("  clients:  {}", n(l.clients));
-        println!("  status:   {}", l.status.as_deref().unwrap_or("-"));
-        println!("  peers:    {}", n(l.peers));
-        println!("  speed:    down {} KB/s, up {} KB/s", n(l.speed_down), n(l.speed_up));
+    match o.watching {
+        Some(true) => now.push("watched now".into()),
+        Some(false) => now.push("not watched".into()),
+        None => {}
+    }
+    if !o.available {
+        now.push("nothing to observe".into());
+    }
+    let reason = o.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+    println!(
+        "now:        {}{reason}",
+        if now.is_empty() { "-".into() } else { now.join(", ") }
+    );
+    if let Some(t) = &o.title {
+        println!("title:      {t}");
+    }
+    for f in &o.facts {
+        println!("  {}: {}", f.label, f.value);
     }
 }
 

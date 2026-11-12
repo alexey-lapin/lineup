@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use api_types::{
-    Channel, ChannelCreate, ChannelInfo, ChannelPatch, ConnectionTestRequest, ConnectionTestResult, EpgChannel,
+    Channel, ChannelCreate, ChannelInfo, ChannelPatch, CheckOutcome, CheckRequest, CheckResponse, EpgChannel,
     EpgFetchRequest, EpgFetchResult, EpgSource, EpgSourceCreate, EpgSourcePatch, ErrorBody, ErrorDetail, Hook,
-    HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest, Integration, IntegrationPatch, IntegrationStatus,
-    ItemAdd, ItemsReplace, Playlist, PlaylistCreate, PlaylistDetail, PlaylistPatch, ProbeOutcome, ProbeRequest,
-    ProbeResponse, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, Settings, SettingsPatch,
-    SourceKind, Status,
+    HookCreate, HookDelivery, HookPatch, ImportReport, ImportRequest, ItemAdd, ItemsReplace, Playlist, PlaylistCreate,
+    PlaylistDetail, PlaylistPatch, RefreshRequest, RefreshResponse, ResolveRequest, ResolveResponse, ResyncReport,
+    ResyncTrigger, Route, RouteCreate, RoutePatch, RouteStatus, RouteTestRequest, RouteTestResult, Settings,
+    SettingsPatch, Status,
 };
 use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
@@ -22,6 +22,7 @@ use utoipa::{IntoParams, OpenApi};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::catalog::Catalog;
 use crate::epg::Epg;
 use crate::store::{ChannelFilter, Store};
 use crate::{Error, web};
@@ -32,7 +33,8 @@ pub struct App {
     pub store: Arc<Store>,
     pub epg: Arc<Epg>,
     pub hooks: Arc<crate::hooks::Hooks>,
-    pub prober: Arc<crate::probe::Prober>,
+    pub catalog: Catalog,
+    pub checker: Arc<crate::checker::Checker>,
     /// Where temporary files (backups) are written; the data dir in production.
     scratch: std::path::PathBuf,
     /// Flips to true on shutdown, ending open event streams so the server can stop.
@@ -49,11 +51,23 @@ impl App {
     /// As [`App::new`] with custom hook timing (tests). The hook dispatcher is not started; call
     /// `app.hooks.spawn()`.
     pub fn with_timing(store: Arc<Store>, data_dir: &std::path::Path, timing: crate::hooks::Timing) -> Self {
+        Self::with_parts(store, data_dir, timing, crate::gateway::Gateway::default())
+    }
+
+    /// As [`App::with_timing`] with a given gateway client (tests).
+    pub fn with_parts(
+        store: Arc<Store>,
+        data_dir: &std::path::Path,
+        timing: crate::hooks::Timing,
+        gateway: crate::gateway::Gateway,
+    ) -> Self {
         let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
         let epg = Epg::new(store.clone(), data_dir);
+        let catalog = Catalog::new(store.clone(), gateway);
         App {
             hooks: crate::hooks::Hooks::new(store.clone(), epg.client().clone(), timing),
-            prober: crate::probe::Prober::new(store.clone(), epg.client().clone(), Default::default()),
+            checker: crate::checker::Checker::new(catalog.clone(), Default::default()),
+            catalog,
             epg,
             store,
             scratch: data_dir.to_path_buf(),
@@ -78,13 +92,10 @@ impl std::ops::Deref for App {
 pub type AppState = App;
 
 #[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "lineup",
-        description = "IPTV channel and playlist manager: M3U playlists and XMLTV guides over HTTP"
-    ),
-    components(schemas(SourceKind))
-)]
+#[openapi(info(
+    title = "lineup",
+    description = "IPTV channel and playlist manager: M3U playlists and XMLTV guides over HTTP"
+))]
 struct ApiDoc;
 
 fn api_router() -> OpenApiRouter<AppState> {
@@ -94,17 +105,18 @@ fn api_router() -> OpenApiRouter<AppState> {
         .routes(routes!(get_channel, patch_channel, delete_channel))
         .routes(routes!(channel_info))
         .routes(routes!(resolve))
-        .routes(routes!(probe))
+        .routes(routes!(checks))
         .routes(routes!(list_playlists, create_playlist))
         .routes(routes!(get_playlist, patch_playlist, delete_playlist))
         .routes(routes!(add_item, replace_items))
         .routes(routes!(remove_item))
         .routes(routes!(move_item))
         .routes(routes!(get_settings, patch_settings))
-        .routes(routes!(list_integrations))
-        .routes(routes!(get_integration, patch_integration))
-        .routes(routes!(test_integration))
-        .routes(routes!(integration_status))
+        .routes(routes!(list_routes, create_route))
+        .routes(routes!(get_route, patch_route, delete_route))
+        .routes(routes!(test_route))
+        .routes(routes!(route_status))
+        .routes(routes!(resync_route))
         .routes(routes!(import))
         .routes(routes!(refresh))
         .routes(routes!(list_epg_sources, create_epg_source))
@@ -193,8 +205,12 @@ impl IntoResponse for ApiError {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            e if e.is_gateway() => StatusCode::BAD_GATEWAY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if self.0.is_gateway() {
+            tracing::warn!("{}", self.0);
+        }
         if status.is_server_error() {
             tracing::error!("{}", self.0);
         }
@@ -269,13 +285,14 @@ async fn status() -> Json<Status> {
 struct ChannelQuery {
     /// Exact group-title.
     group: Option<String>,
-    /// Case-insensitive substring of name, tvg-id or source key.
+    /// Case-insensitive substring of name, tvg-id, source or identity.
     q: Option<String>,
     /// Only channels in this playlist.
     playlist: Option<String>,
-    kind: Option<SourceKind>,
-    /// Only channels whose last conclusive probe result is this (`ok` or `dead`).
-    health: Option<ProbeOutcome>,
+    /// Only channels of this route.
+    route_id: Option<i64>,
+    /// Only channels whose last conclusive check result is this (`ok` or `dead`).
+    health: Option<CheckOutcome>,
 }
 
 #[utoipa::path(get, path = "/channels", params(ChannelQuery), responses((status = 200, body = Vec<Channel>)))]
@@ -287,19 +304,22 @@ async fn list_channels(
         group: q.group,
         q: q.q,
         playlist: q.playlist,
-        kind: q.kind,
+        route_id: q.route_id,
         health: q.health,
     };
     Ok(Json(s.list_channels(&filter).await?))
 }
 
+/// Create a channel. Its input is validated with the route (a gateway route asks its gateway);
+/// 502 when the gateway fails.
 #[utoipa::path(post, path = "/channels", request_body = ChannelCreate,
-    responses((status = 201, body = Channel), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
+    responses((status = 201, body = Channel), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody),
+        (status = 502, body = ErrorBody)))]
 async fn create_channel(
     State(s): State<AppState>,
     Body(req): Body<ChannelCreate>,
 ) -> ApiResult<(StatusCode, Json<Channel>)> {
-    Ok((StatusCode::CREATED, Json(s.create_channel(req).await?)))
+    Ok((StatusCode::CREATED, Json(s.catalog.create_channel(req).await?)))
 }
 
 #[utoipa::path(get, path = "/channels/{id}", params(("id" = i64, Path)),
@@ -308,14 +328,16 @@ async fn get_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> Ap
     Ok(Json(s.get_channel(id).await?))
 }
 
+/// Update a channel. `route_id` and/or `input` revalidate its source with the route.
 #[utoipa::path(patch, path = "/channels/{id}", params(("id" = i64, Path)), request_body = ChannelPatch,
-    responses((status = 200, body = Channel), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+    responses((status = 200, body = Channel), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody),
+        (status = 422, body = ErrorBody), (status = 502, body = ErrorBody)))]
 async fn patch_channel(
     State(s): State<AppState>,
     ApiPath(id): ApiPath<i64>,
     Body(req): Body<ChannelPatch>,
 ) -> ApiResult<Json<Channel>> {
-    Ok(Json(s.patch_channel(id, req).await?))
+    Ok(Json(s.catalog.patch_channel(id, req).await?))
 }
 
 #[utoipa::path(delete, path = "/channels/{id}", params(("id" = i64, Path)),
@@ -325,59 +347,45 @@ async fn delete_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) ->
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Validate an input with a route and suggest channel metadata; nothing is written.
 #[utoipa::path(post, path = "/resolve", request_body = ResolveRequest,
-    responses((status = 200, body = ResolveResponse), (status = 422, body = ErrorBody)))]
+    responses((status = 200, body = ResolveResponse), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody),
+        (status = 502, body = ErrorBody)))]
 async fn resolve(State(s): State<AppState>, Body(req): Body<ResolveRequest>) -> ApiResult<Json<ResolveResponse>> {
-    Ok(Json(
-        crate::resolve::resolve(&s.store, s.epg.client(), &req.input).await?,
-    ))
+    Ok(Json(s.catalog.resolve(req.route_id, &req.input).await?))
 }
 
-#[derive(Debug, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-struct InfoQuery {
-    /// Also ask the engine for the content's name (an extra request; once per view is enough).
-    #[serde(default)]
-    name: bool,
-}
-
-/// What the services report about a channel right now. For acestream channels: live numbers of the
-/// session acexy has open (never starts one), and the engine's name with `name=true`.
-#[utoipa::path(get, path = "/channels/{id}/info", params(("id" = i64, Path), InfoQuery),
+/// Stored check results and what the route's gateway observes now (never starts a stream).
+#[utoipa::path(get, path = "/channels/{id}/info", params(("id" = i64, Path)),
     responses((status = 200, body = ChannelInfo), (status = 404, body = ErrorBody)))]
-async fn channel_info(
-    State(s): State<AppState>,
-    ApiPath(id): ApiPath<i64>,
-    ApiQuery(q): ApiQuery<InfoQuery>,
-) -> ApiResult<Json<ChannelInfo>> {
-    Ok(Json(crate::live::channel_info(&s.store, id, q.name).await?))
+async fn channel_info(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<ChannelInfo>> {
+    Ok(Json(s.catalog.channel_info(id).await?))
 }
 
-/// Check acestream channels (a short engine session each, skipped while acexy reports the stream
-/// being watched). With `ids`, waits and returns their results; without, starts a run over all
-/// enabled acestream channels in the background (202). 409 when checks are unavailable (no engine
-/// or no acexy).
-#[utoipa::path(post, path = "/probe", request_body = ProbeRequest,
-    responses((status = 200, body = ProbeResponse), (status = 202, body = ProbeResponse),
-        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
-async fn probe(
+/// Check channels through their routes' gateways. With `ids`, waits and returns their results
+/// (409 if a channel's route has no checks); without, starts a run over all enabled channels of
+/// routes with checks in the background (202).
+#[utoipa::path(post, path = "/checks", request_body = CheckRequest,
+    responses((status = 200, body = CheckResponse), (status = 202, body = CheckResponse),
+        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 502, body = ErrorBody)))]
+async fn checks(
     State(s): State<AppState>,
-    Body(req): Body<ProbeRequest>,
-) -> ApiResult<(StatusCode, Json<ProbeResponse>)> {
+    Body(req): Body<CheckRequest>,
+) -> ApiResult<(StatusCode, Json<CheckResponse>)> {
     if req.ids.is_empty() {
-        s.prober.start_all(req.force).await?;
+        s.checker.spawn_all(req.force);
         return Ok((
             StatusCode::ACCEPTED,
-            Json(ProbeResponse {
+            Json(CheckResponse {
                 background: true,
                 results: vec![],
             }),
         ));
     }
-    let results = s.prober.probe(&req.ids, req.force).await?;
+    let results = s.checker.check(&req.ids, req.force).await?;
     Ok((
         StatusCode::OK,
-        Json(ProbeResponse {
+        Json(CheckResponse {
             background: false,
             results,
         }),
@@ -483,58 +491,69 @@ async fn patch_settings(State(s): State<AppState>, Body(req): Body<SettingsPatch
     Ok(Json(s.patch_settings(req).await?))
 }
 
-// -------------------------------------------------------------------- integrations
+// -------------------------------------------------------------------- routes
 
-#[utoipa::path(get, path = "/integrations", responses((status = 200, body = Vec<Integration>)))]
-async fn list_integrations(State(s): State<AppState>) -> ApiResult<Json<Vec<Integration>>> {
-    Ok(Json(s.list_integrations().await?))
+#[utoipa::path(get, path = "/routes", responses((status = 200, body = Vec<Route>)))]
+async fn list_routes(State(s): State<AppState>) -> ApiResult<Json<Vec<Route>>> {
+    Ok(Json(s.list_routes().await?))
 }
 
-#[utoipa::path(get, path = "/integrations/{kind}", params(("kind" = SourceKind, Path)),
-    responses((status = 200, body = Integration), (status = 422, body = ErrorBody)))]
-async fn get_integration(
-    State(s): State<AppState>,
-    ApiPath(kind): ApiPath<SourceKind>,
-) -> ApiResult<Json<Integration>> {
-    Ok(Json(s.get_integration(kind).await?))
+/// Create a route. Its kind and (for gateway routes) its rule can't change later.
+#[utoipa::path(post, path = "/routes", request_body = RouteCreate,
+    responses((status = 201, body = Route), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
+async fn create_route(State(s): State<AppState>, Body(req): Body<RouteCreate>) -> ApiResult<(StatusCode, Json<Route>)> {
+    Ok((StatusCode::CREATED, Json(s.catalog.create_route(req).await?)))
 }
 
-/// Change an integration's config. A change that alters playback URLs, or turns the integration on
-/// or off, announces `playlist.changed` for the playlists with its channels.
-#[utoipa::path(patch, path = "/integrations/{kind}", params(("kind" = SourceKind, Path)),
-    request_body = IntegrationPatch,
-    responses((status = 200, body = Integration), (status = 422, body = ErrorBody)))]
-async fn patch_integration(
-    State(s): State<AppState>,
-    ApiPath(kind): ApiPath<SourceKind>,
-    Body(req): Body<IntegrationPatch>,
-) -> ApiResult<Json<Integration>> {
-    Ok(Json(s.patch_integration(kind, req).await?))
+#[utoipa::path(get, path = "/routes/{id}", params(("id" = i64, Path)),
+    responses((status = 200, body = Route), (status = 404, body = ErrorBody)))]
+async fn get_route(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<Route>> {
+    Ok(Json(s.get_route(id).await?))
 }
 
-/// Check that a component answers (at its saved URL, or `url` to try an unsaved value). Runs from
-/// the lineup server; a failed connection is `ok: false`, an invalid URL is 422.
-#[utoipa::path(post, path = "/integrations/{kind}/test", params(("kind" = SourceKind, Path)),
-    request_body = ConnectionTestRequest,
-    responses((status = 200, body = ConnectionTestResult), (status = 422, body = ErrorBody)))]
-async fn test_integration(
+/// Rename, enable or disable a route, or change a gateway route's base URL. A base URL change
+/// revalidates every channel against the new address first and is refused (409) if any fails.
+#[utoipa::path(patch, path = "/routes/{id}", params(("id" = i64, Path)), request_body = RoutePatch,
+    responses((status = 200, body = Route), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody),
+        (status = 422, body = ErrorBody), (status = 502, body = ErrorBody)))]
+async fn patch_route(
     State(s): State<AppState>,
-    ApiPath(kind): ApiPath<SourceKind>,
-    Body(req): Body<ConnectionTestRequest>,
-) -> ApiResult<Json<ConnectionTestResult>> {
-    Ok(Json(
-        crate::connection::test(&s.store, kind, req.component, req.url.as_deref()).await?,
-    ))
+    ApiPath(id): ApiPath<i64>,
+    Body(req): Body<RoutePatch>,
+) -> ApiResult<Json<Route>> {
+    Ok(Json(s.catalog.patch_route(id, req).await?))
 }
 
-/// Test every configured component with its saved URL (versions, acexy's active stream count).
-#[utoipa::path(get, path = "/integrations/{kind}/status", params(("kind" = SourceKind, Path)),
-    responses((status = 200, body = IntegrationStatus), (status = 422, body = ErrorBody)))]
-async fn integration_status(
-    State(s): State<AppState>,
-    ApiPath(kind): ApiPath<SourceKind>,
-) -> ApiResult<Json<IntegrationStatus>> {
-    Ok(Json(crate::connection::status(&s.store, kind).await?))
+/// Delete a route; 409 while channels use it.
+#[utoipa::path(delete, path = "/routes/{id}", params(("id" = i64, Path)),
+    responses((status = 204), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+async fn delete_route(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
+    s.delete_route(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Test a route config (saved or not), and optionally an input with it. Runs from the lineup
+/// server; it cannot show whether players reach the same address.
+#[utoipa::path(post, path = "/routes/test", request_body = RouteTestRequest,
+    responses((status = 200, body = RouteTestResult), (status = 422, body = ErrorBody)))]
+async fn test_route(State(s): State<AppState>, Body(req): Body<RouteTestRequest>) -> ApiResult<Json<RouteTestResult>> {
+    Ok(Json(s.catalog.test_route(req).await?))
+}
+
+/// The saved route's gateway, live: whether it answers, its rule and channels pending a resync.
+#[utoipa::path(get, path = "/routes/{id}/status", params(("id" = i64, Path)),
+    responses((status = 200, body = RouteStatus), (status = 404, body = ErrorBody)))]
+async fn route_status(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<RouteStatus>> {
+    Ok(Json(s.catalog.route_status(id).await?))
+}
+
+/// Revalidate every channel of a gateway route with its gateway and publish the changes. Channels
+/// that fail keep their values and are listed.
+#[utoipa::path(post, path = "/routes/{id}/resync", params(("id" = i64, Path)),
+    responses((status = 200, body = ResyncReport), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody),
+        (status = 422, body = ErrorBody), (status = 502, body = ErrorBody)))]
+async fn resync_route(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<ResyncReport>> {
+    Ok(Json(s.catalog.resync(id, ResyncTrigger::Manual).await?.1))
 }
 
 // -------------------------------------------------------------------- import, refresh
@@ -547,7 +566,11 @@ async fn import(State(s): State<AppState>, Body(req): Body<ImportRequest>) -> Ap
         (None, Some(url)) => fetch_text(&url).await?,
         _ => return Err(Error::Invalid("exactly one of `m3u_text` or `url` is required".into()).into()),
     };
-    Ok(Json(s.import(&text, &req.playlist_slug, req.dry_run).await?))
+    Ok(Json(
+        s.catalog
+            .import(&text, &req.playlist_slug, req.route_id, req.dry_run)
+            .await?,
+    ))
 }
 
 /// Largest m3u accepted by import-by-URL (direct imports are bounded by the request body limit).

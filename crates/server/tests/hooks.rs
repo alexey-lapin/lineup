@@ -87,7 +87,7 @@ async fn wait_for(shared: &Shared, n: usize) -> Vec<Req> {
     panic!("expected {n} requests, got {:?}", shared.lock().unwrap().requests);
 }
 
-async fn make_changes(store: &Store) {
+async fn make_changes(store: &Arc<Store>) {
     store
         .create_playlist(PlaylistCreate {
             slug: "jf".into(),
@@ -95,12 +95,20 @@ async fn make_changes(store: &Store) {
         })
         .await
         .unwrap();
-    store
+    // A direct route never calls a gateway.
+    let catalog = lineup_server::catalog::Catalog::new(store.clone(), lineup_server::gateway::Gateway::default());
+    catalog
         .create_channel(ChannelCreate {
             name: "A".into(),
-            input: Some("41169a3f280a5537b0611b775e926852d372743d".into()),
+            group_title: None,
+            tvg_id: None,
+            tvg_logo: None,
+            route_id: 1,
+            input: "http://h/a.m3u8".into(),
+            is_event: false,
+            kickoff_at: None,
+            enabled: true,
             playlists: vec!["jf".into()],
-            ..Default::default()
         })
         .await
         .unwrap();

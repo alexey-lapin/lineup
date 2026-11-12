@@ -22,6 +22,10 @@ const {
 const guide = useSettingsSection(['epg_refresh_hours'], settings, {
   validate: (d) => hoursError(d.epg_refresh_hours)
 })
+const checks = useSettingsSection(['check_interval_hours'], settings, {
+  validate: (d) => hoursError(d.check_interval_hours)
+})
+const anyDirty = computed(() => guide.dirty || checks.dirty)
 
 /** Edit the draft (kept out of the template: vue-tsc mistypes deep v-model targets). */
 function setDraft(section: { draft: object }, key: string, value: string | number) {
@@ -64,10 +68,17 @@ async function fetchAll() {
 
 // ---------------------------------------------------------------- unsaved changes
 
-onBeforeRouteLeave(() => !guide.dirty || window.confirm('Discard unsaved settings?'))
+const checking = ref(false)
+async function checkAll() {
+  checking.value = true
+  await run(() => api.check([]), 'Checking all channels in the background')
+  checking.value = false
+}
+
+onBeforeRouteLeave(() => !anyDirty.value || window.confirm('Discard unsaved settings?'))
 const onUnload = (e: BeforeUnloadEvent) => e.preventDefault()
 watch(
-  () => guide.dirty,
+  anyDirty,
   (d) => (d ? window.addEventListener('beforeunload', onUnload) : window.removeEventListener('beforeunload', onUnload)),
   { immediate: true }
 )
@@ -96,8 +107,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
         />
 
         <p class="text-sm text-muted">
-          Service addresses (the Acestream engine, acexy, the VK proxy) are set on the
-          <ULink to="/integrations" class="underline">Integrations</ULink> page.
+          Service addresses (gateways) are set on the
+          <ULink to="/routes" class="underline">Routes</ULink> page.
         </p>
 
         <section class="flex flex-col gap-4">
@@ -150,6 +161,45 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', onUnload))
                 label="Manage sources"
                 trailing-icon="i-lucide-arrow-right"
                 to="/epg"
+              />
+            </template>
+          </SettingsCard>
+        </section>
+
+        <section class="flex flex-col gap-4">
+          <h2 class="text-lg font-semibold">Channel checks</h2>
+          <SettingsCard
+            title="Scheduled checks"
+            icon="i-lucide-activity"
+            description="Channels on gateway routes whose rule can check them. The gateway skips channels someone is watching."
+            :section="checks"
+            :loading="loading"
+          >
+            <UFormField
+              label="Check every (hours)"
+              help="The first run is 10 minutes after start; a run with skipped channels is retried after 30 minutes. 0 turns the schedule off."
+            >
+              <UInput
+                :model-value="checks.draft.check_interval_hours"
+                type="number"
+                min="0"
+                max="168"
+                class="w-32"
+                size="lg"
+                @update:model-value="(v: unknown) => setDraft(checks, 'check_interval_hours', Number(v))"
+              />
+            </UFormField>
+            <template #actions>
+              <UButton
+                icon="i-lucide-activity"
+                color="neutral"
+                variant="subtle"
+                size="lg"
+                class="min-h-11"
+                label="Check all now"
+                :loading="checking"
+                :disabled="loading"
+                @click="checkAll"
               />
             </template>
           </SettingsCard>
