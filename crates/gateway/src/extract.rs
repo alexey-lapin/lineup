@@ -74,8 +74,10 @@ struct Inner {
     cache: Mutex<HashMap<String, Entry>>,
     /// Per-page locks for coalescing; removed by the lookup that created them.
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Lookups admitted (running or waiting for a slot).
-    admitted: std::sync::atomic::AtomicUsize,
+    /// Lookups admitted (running or waiting for a slot), per priority: background work never
+    /// takes playback's places.
+    admitted_playback: std::sync::atomic::AtomicUsize,
+    admitted_background: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -88,8 +90,10 @@ const SHORT_TTL: Duration = Duration::from_secs(60);
 /// Backoff after failures: 1, 2, 5, 10 minutes.
 const BACKOFF: [u64; 4] = [60, 120, 300, 600];
 const MAX_CACHED: usize = 1000;
-/// Lookups admitted at once (running plus waiting); more are refused.
+/// Playback lookups admitted at once (running plus waiting); more are refused.
 const MAX_ADMITTED: usize = 16;
+/// Background lookups admitted at once.
+const MAX_ADMITTED_BACKGROUND: usize = 8;
 /// How long an admitted lookup may wait for a slot.
 const QUEUE_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -101,7 +105,8 @@ impl Extractor {
             background: Arc::new(Semaphore::new(1)),
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
-            admitted: std::sync::atomic::AtomicUsize::new(0),
+            admitted_playback: std::sync::atomic::AtomicUsize::new(0),
+            admitted_background: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -150,8 +155,12 @@ impl Inner {
 
     async fn lookup(self: Arc<Self>, page: &str, priority: Priority) -> Result<Descriptor, ExtractError> {
         use std::sync::atomic::Ordering;
-        if self.admitted.fetch_add(1, Ordering::SeqCst) >= MAX_ADMITTED {
-            self.admitted.fetch_sub(1, Ordering::SeqCst);
+        let (counter, max) = match priority {
+            Priority::Playback => (&self.admitted_playback, MAX_ADMITTED),
+            Priority::Background => (&self.admitted_background, MAX_ADMITTED_BACKGROUND),
+        };
+        if counter.fetch_add(1, Ordering::SeqCst) >= max {
+            counter.fetch_sub(1, Ordering::SeqCst);
             return Err(ExtractError::Failed("too many lookups are waiting; try again".into()));
         }
         struct Admitted<'a>(&'a std::sync::atomic::AtomicUsize);
@@ -160,7 +169,7 @@ impl Inner {
                 self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        let _admitted = Admitted(&self.admitted);
+        let _admitted = Admitted(counter);
         // Background work takes its slot before the page lock, so it never holds a page that a
         // playback request waits for while it is itself still queued.
         let _bg = match priority {
@@ -179,7 +188,9 @@ impl Inner {
             .entry(page.to_string())
             .or_default()
             .clone();
-        let _page = lock.lock().await;
+        let _page = tokio::time::timeout(QUEUE_DEADLINE, lock.lock())
+            .await
+            .map_err(|_| ExtractError::Failed("the lookup queue is full; try again".into()))?;
         // Whatever happens next, this page's entry leaves the in-flight table.
         struct Done<'a>(&'a Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>, &'a str);
         impl Drop for Done<'_> {
@@ -679,6 +690,46 @@ mod tests {
         x.0.store("q", &Ok(live.clone()));
         x.observed_ended("q", &live);
         assert!(x.0.cache.lock().unwrap()["q"].until <= Instant::now() + SHORT_TTL);
+    }
+
+    #[tokio::test]
+    async fn background_work_never_refuses_playback() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("yt-dlp");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.3\necho '{\"formats\": [{\"protocol\": \"m3u8_native\", \"url\": \"https://cdn/a.m3u8\"}]}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let x = Extractor::new(
+            Tools {
+                yt_dlp: Some(script),
+                streamlink: None,
+                proxy: "http://127.0.0.1:9".into(),
+                timeout: Duration::from_secs(5),
+            },
+            2,
+        );
+        // Fill background admission with lookups of distinct pages.
+        let bg: Vec<_> = (0..20)
+            .map(|i| {
+                let x = x.clone();
+                tokio::spawn(async move {
+                    x.descriptor(&format!("https://vk.com/video1_{i}"), Priority::Background)
+                        .await
+                })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let r = x.descriptor("https://vk.com/video9_9", Priority::Playback).await;
+        assert!(r.is_ok(), "{r:?}");
+        let refused = futures_util::future::join_all(bg)
+            .await
+            .into_iter()
+            .filter(|r| matches!(r, Ok(Err(ExtractError::Failed(m))) if m.contains("too many")))
+            .count();
+        assert!(refused > 0, "background admission is bounded");
     }
 
     #[tokio::test]

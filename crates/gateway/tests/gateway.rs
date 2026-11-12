@@ -601,3 +601,39 @@ async fn an_ended_playlist_from_a_live_lookup_is_not_a_recording() {
         "{r}"
     );
 }
+
+#[tokio::test]
+async fn a_refresh_never_splices_and_concurrent_expiries_share_one_refresh() {
+    let f = fixture(false).await;
+    f.cdn.lock().unwrap().generation = 1;
+    let master_url = format!("{}/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-1_3", f.url);
+    let child = |master: &str| {
+        url::Url::parse(&master_url)
+            .unwrap()
+            .join(master.lines().find(|l| l.starts_with("s/")).unwrap())
+            .unwrap()
+    };
+    let c = child(&reqwest::get(&master_url).await.unwrap().text().await.unwrap());
+    assert_eq!(reqwest::get(c.clone()).await.unwrap().status(), 200);
+    // Several requests hit the expired URL at once: one refresh, all served, the session survives.
+    f.cdn.lock().unwrap().generation = 2;
+    let all = futures_util::future::join_all((0..4).map(|_| reqwest::get(c.clone()))).await;
+    for r in all {
+        assert_eq!(r.unwrap().status(), 200);
+    }
+    assert_eq!(
+        reqwest::get(c).await.unwrap().status(),
+        200,
+        "the refreshed session still plays"
+    );
+
+    // A growing playlist whose refresh comes back finished is not continued (no splicing).
+    let c = child(&reqwest::get(&master_url).await.unwrap().text().await.unwrap());
+    assert_eq!(reqwest::get(c.clone()).await.unwrap().status(), 200);
+    {
+        let mut cdn = f.cdn.lock().unwrap();
+        cdn.generation = 3;
+        cdn.ended = true;
+    }
+    assert_eq!(reqwest::get(c).await.unwrap().status(), 410);
+}

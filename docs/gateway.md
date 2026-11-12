@@ -39,12 +39,16 @@ CDN, with the user agent the lookup used, so the URLs are not revoked by other c
   the player reopens the channel.
 - Lookups are cached for 60 s; once a media playlist with `#EXT-X-ENDLIST` is seen for a lookup
   that did not say live, up to 3 h (never past the signed URL's expiry). Failures back off (1, 2,
-  5, 10 min). Lookups are coalesced per page, at most 16 are admitted at once, and background
-  work (observe, check) uses one slot so playback always has one.
+  5, 10 min). An empty ENDLIST playlist (recording still processing) keeps the short lifetime.
+  Lookups are coalesced per page; playback admits 16 lookups and background work (observe, check)
+  8 more of its own, and background work runs in one slot, so it never refuses or blocks playback.
 - An upstream 400/401/403/404/410 means the signed URLs expired (VK answers 400). The lookup is
-  dropped. A media playlist is refreshed once per session, and only onto the new master's playlist
-  with exactly the same definition (variant attributes or rendition tag); otherwise, and for
-  segments, the player gets 410 and its next open starts afresh.
+  dropped. A media playlist is refreshed once per session (concurrent requests share one refresh),
+  and only onto the new master's playlist with exactly the same definition (variant attributes or
+  rendition tag) whose timeline provably continues: same live/recorded state, same target
+  duration, media sequence within or right after the window already served, and never a growing
+  playlist continued as a finished one. Otherwise, and for segments, the player gets 410 and its
+  next open starts afresh (on the recording, once the broadcast has ended).
 - Status: ENDLIST with segments and a lookup that is not live is a recording; ENDLIST from a lookup
   that still says live, or without segments, is "ended, recording not ready" (inconclusive in
   checks). Only explicit "video not found/removed/private" messages from the extractors count as a
