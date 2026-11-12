@@ -1,0 +1,410 @@
+//! HLS relay for page rules.
+//!
+//! `GET /play/<rule>.m3u8?ref=<ref>` looks the page up (cached), opens a session bound to that
+//! lookup, and returns the master playlist with every URI rewritten to `s/<session>/<n>.<ext>`.
+//! Child playlists and segments are then served from `/play/s/<session>/<n>.<ext>`: playlists are
+//! fetched fresh on every request (live playlists change) and rewritten again; segments, keys and
+//! init sections are streamed, with `Range` passed through. Only the gateway talks to the CDN, with
+//! the headers the lookup found; client headers other than `Range`/`If-Range` are never forwarded.
+//!
+//! An upstream 401/403/404/410 means the signed URLs expired or were revoked: the lookup is
+//! dropped from the cache and the client gets 410, so reopening the play URL starts afresh. A
+//! session never switches to another lookup (no splicing of a recording into a live timeline).
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use axum::body::Body;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use url::Url;
+
+use crate::extract::{Descriptor, ExtractError, Extractor, Priority};
+use crate::hls::{self, Kind, Summary};
+use crate::net::{Allow, check_url, read_capped};
+
+struct Session {
+    page: String,
+    headers: Vec<(String, String)>,
+    entries: Vec<(Url, Kind)>,
+    index: HashMap<String, usize>,
+    last_used: Instant,
+}
+
+pub struct Relay {
+    pub client: reqwest::Client,
+    pub allow: Allow,
+    pub extractor: Arc<Extractor>,
+    sessions: Mutex<HashMap<String, Session>>,
+    max_sessions: usize,
+    max_resources: usize,
+    idle: std::time::Duration,
+    manifest_bytes: usize,
+}
+
+const HLS_TYPE: &str = "application/vnd.apple.mpegurl";
+
+impl Relay {
+    pub fn new(
+        client: reqwest::Client,
+        allow: Allow,
+        extractor: Arc<Extractor>,
+        limits: &crate::config::Limits,
+    ) -> Self {
+        Relay {
+            client,
+            allow,
+            extractor,
+            sessions: Mutex::new(HashMap::new()),
+            max_sessions: limits.sessions,
+            max_resources: limits.session_resources,
+            idle: limits.session_idle(),
+            manifest_bytes: limits.manifest_bytes,
+        }
+    }
+
+    /// Open a session for `page` and answer with its rewritten master playlist.
+    pub async fn play(&self, page: &str, head: bool) -> Response {
+        let d = match self.extractor.descriptor(page, Priority::Playback).await {
+            Ok(d) => d,
+            Err(e) => return extract_error(&e),
+        };
+        let sid = self.open_session(page, &d);
+        let (body, _) = match self.fetch_playlist(&sid, &d.manifest_url, &d.headers, true).await {
+            Ok(r) => r,
+            Err(r) => return r,
+        };
+        playlist_response(body, head)
+    }
+
+    /// Serve `/play/s/<sid>/<file>`.
+    pub async fn resource(&self, sid: &str, file: &str, req: &HeaderMap, head: bool) -> Response {
+        let Some(n) = file.split('.').next().and_then(|s| s.parse::<usize>().ok()) else {
+            return text(StatusCode::NOT_FOUND, "no such resource");
+        };
+        let entry = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let Some(s) = sessions.get_mut(sid) else {
+                return text(
+                    StatusCode::GONE,
+                    "this playback session expired; open the channel again",
+                );
+            };
+            s.last_used = Instant::now();
+            s.entries
+                .get(n)
+                .cloned()
+                .map(|(u, k)| (u, k, s.headers.clone(), s.page.clone()))
+        };
+        let Some((url, kind, headers, page)) = entry else {
+            return text(StatusCode::NOT_FOUND, "no such resource");
+        };
+        match kind {
+            Kind::Playlist => match self.fetch_playlist(sid, url.as_str(), &headers, false).await {
+                Ok((body, _)) => playlist_response(body, head),
+                Err(r) => r,
+            },
+            Kind::Resource => self.stream(&url, &headers, &page, req, head).await,
+        }
+    }
+
+    /// The content state of `page`: its lookup's live flag and its first media playlist's ENDLIST.
+    pub async fn probe(&self, page: &str, priority: Priority) -> Result<(Descriptor, Summary), ExtractError> {
+        let d = self.extractor.descriptor(page, priority).await?;
+        let mut url = d.manifest_url.clone();
+        for _ in 0..2 {
+            let (body, final_url) = self
+                .get_text(&url, &d.headers)
+                .await
+                .map_err(|e| ExtractError::Failed(format!("fetching the playlist: {e}")))?;
+            let mut first_variant = None;
+            let (_, summary) = hls::rewrite(&body, &final_url, |u, k| {
+                if k == Kind::Playlist && first_variant.is_none() {
+                    first_variant = Some(u.to_string());
+                }
+                Ok(String::new())
+            })
+            .map_err(|e| ExtractError::Failed(format!("the playlist: {e}")))?;
+            match (summary.master, first_variant) {
+                (true, Some(v)) => url = v,
+                _ => return Ok((d, summary)),
+            }
+        }
+        Err(ExtractError::Failed("nested master playlists".into()))
+    }
+
+    fn open_session(&self, page: &str, d: &Descriptor) -> String {
+        let sid = new_id();
+        let mut sessions = self.sessions.lock().unwrap();
+        let now = Instant::now();
+        sessions.retain(|_, s| now.duration_since(s.last_used) < self.idle);
+        while sessions.len() >= self.max_sessions {
+            // Drop the least recently used.
+            let Some(oldest) = sessions.iter().min_by_key(|(_, s)| s.last_used).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            sessions.remove(&oldest);
+        }
+        sessions.insert(
+            sid.clone(),
+            Session {
+                page: page.to_string(),
+                headers: d.headers.clone(),
+                entries: Vec::new(),
+                index: HashMap::new(),
+                last_used: now,
+            },
+        );
+        sid
+    }
+
+    /// Fetch and rewrite a playlist of session `sid`. `top`: the master, served at
+    /// `/play/<rule>.m3u8`, whose URIs need the `s/<sid>/` prefix.
+    async fn fetch_playlist(
+        &self,
+        sid: &str,
+        url: &str,
+        headers: &[(String, String)],
+        top: bool,
+    ) -> Result<(String, Summary), Response> {
+        let (body, final_url) = match self.get_text(url, headers).await {
+            Ok(r) => r,
+            Err(Upstream::Gone) => {
+                self.forget(sid);
+                return Err(text(
+                    StatusCode::GONE,
+                    "the stream's URLs expired; open the channel again",
+                ));
+            }
+            Err(e) => return Err(text(StatusCode::BAD_GATEWAY, &e.to_string())),
+        };
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(s) = sessions.get_mut(sid) else {
+            return Err(text(
+                StatusCode::GONE,
+                "this playback session expired; open the channel again",
+            ));
+        };
+        let max = self.max_resources;
+        let rewritten = hls::rewrite(&body, &final_url, |u, k| {
+            let key = u.to_string();
+            let n = match s.index.get(&key) {
+                Some(n) => *n,
+                None => {
+                    if s.entries.len() >= max {
+                        return Err("this playback session has too many resources".into());
+                    }
+                    s.entries.push((u.clone(), k));
+                    s.index.insert(key, s.entries.len() - 1);
+                    s.entries.len() - 1
+                }
+            };
+            let ext = match k {
+                Kind::Playlist => "m3u8".to_string(),
+                Kind::Resource => extension(&u),
+            };
+            Ok(if top {
+                format!("s/{sid}/{n}.{ext}")
+            } else {
+                format!("{n}.{ext}")
+            })
+        });
+        match rewritten {
+            Ok(r) => Ok(r),
+            Err(e) => Err(text(StatusCode::BAD_GATEWAY, &format!("cannot relay this stream: {e}"))),
+        }
+    }
+
+    fn forget(&self, sid: &str) {
+        let page = self.sessions.lock().unwrap().remove(sid).map(|s| s.page);
+        if let Some(p) = page {
+            self.extractor.invalidate(&p);
+        }
+    }
+
+    async fn get_text(&self, url: &str, headers: &[(String, String)]) -> Result<(String, Url), Upstream> {
+        let u = Url::parse(url).map_err(|_| Upstream::Failed("bad upstream URL".into()))?;
+        check_url(&u, &self.allow).map_err(|e| Upstream::Failed(e.to_string()))?;
+        let mut req = self.client.get(u);
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        let res = req
+            .send()
+            .await
+            .map_err(|e| Upstream::Failed(e.without_url().to_string()))?;
+        let status = res.status().as_u16();
+        if matches!(status, 401 | 403 | 404 | 410) {
+            return Err(Upstream::Gone);
+        }
+        if !res.status().is_success() {
+            return Err(Upstream::Failed(format!("upstream answered HTTP {status}")));
+        }
+        let final_url = res.url().clone();
+        let bytes = read_capped(res, self.manifest_bytes)
+            .await
+            .map_err(|e| Upstream::Failed(e.to_string()))?;
+        let text = String::from_utf8(bytes).map_err(|_| Upstream::Failed("the playlist is not UTF-8".into()))?;
+        Ok((text, final_url))
+    }
+
+    async fn stream(
+        &self,
+        url: &Url,
+        headers: &[(String, String)],
+        page: &str,
+        req: &HeaderMap,
+        head: bool,
+    ) -> Response {
+        if let Err(e) = check_url(url, &self.allow) {
+            return text(StatusCode::FORBIDDEN, &e.to_string());
+        }
+        let mut up = if head {
+            self.client.head(url.clone())
+        } else {
+            self.client.get(url.clone())
+        };
+        for (k, v) in headers {
+            up = up.header(k, v);
+        }
+        for name in [header::RANGE, header::IF_RANGE] {
+            if let Some(v) = req.get(&name).and_then(|v| v.to_str().ok()) {
+                if name == header::RANGE && !valid_range(v) {
+                    return text(StatusCode::RANGE_NOT_SATISFIABLE, "only one byte range is supported");
+                }
+                up = up.header(name.as_str(), v);
+            }
+        }
+        let res = match up.send().await {
+            Ok(r) => r,
+            Err(e) => return text(StatusCode::BAD_GATEWAY, &format!("upstream: {}", e.without_url())),
+        };
+        let status = res.status().as_u16();
+        if matches!(status, 401 | 403 | 404 | 410) {
+            self.extractor.invalidate(page);
+            return text(StatusCode::GONE, "the stream's URLs expired; open the channel again");
+        }
+        if !(res.status().is_success() || status == 416) {
+            return text(StatusCode::BAD_GATEWAY, &format!("upstream answered HTTP {status}"));
+        }
+        let mut out = Response::builder().status(status);
+        for name in [
+            header::CONTENT_TYPE,
+            header::CONTENT_LENGTH,
+            header::CONTENT_RANGE,
+            header::ACCEPT_RANGES,
+            header::LAST_MODIFIED,
+            header::ETAG,
+        ] {
+            if let Some(v) = res.headers().get(&name) {
+                out = out.header(name, v.clone());
+            }
+        }
+        out = out.header(header::CACHE_CONTROL, "no-store");
+        let body = if head {
+            Body::empty()
+        } else {
+            Body::from_stream(res.bytes_stream())
+        };
+        out.body(body)
+            .unwrap_or_else(|_| text(StatusCode::BAD_GATEWAY, "bad upstream response"))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Upstream {
+    #[error("the stream's URLs expired")]
+    Gone,
+    #[error("{0}")]
+    Failed(String),
+}
+
+fn playlist_response(body: String, head: bool) -> Response {
+    let len = body.len();
+    let mut r = if head { Body::empty() } else { Body::from(body) }.into_response();
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(HLS_TYPE));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    r
+}
+
+pub fn text(status: StatusCode, msg: &str) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        msg.to_string(),
+    )
+        .into_response()
+}
+
+fn extract_error(e: &ExtractError) -> Response {
+    match e {
+        ExtractError::NotFound(m) => text(StatusCode::NOT_FOUND, m),
+        ExtractError::NoStream(m) => text(StatusCode::SERVICE_UNAVAILABLE, m),
+        ExtractError::Failed(m) => text(StatusCode::BAD_GATEWAY, m),
+    }
+}
+
+/// `bytes=a-b`, `bytes=a-` or `bytes=-n`: one range only.
+fn valid_range(v: &str) -> bool {
+    let Some(r) = v.trim().strip_prefix("bytes=") else {
+        return false;
+    };
+    if r.contains(',') {
+        return false;
+    }
+    let Some((a, b)) = r.split_once('-') else { return false };
+    let num = |s: &str| s.is_empty() || s.bytes().all(|c| c.is_ascii_digit());
+    num(a) && num(b) && !(a.is_empty() && b.is_empty())
+}
+
+/// A short extension from the upstream path, for players that look at it.
+fn extension(u: &Url) -> String {
+    let last = u.path_segments().and_then(|mut s| s.next_back()).unwrap_or_default();
+    match last.rsplit_once('.') {
+        Some((_, e)) if (1..=5).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric()) => {
+            e.to_ascii_lowercase()
+        }
+        _ => "bin".into(),
+    }
+}
+
+/// A session id: 64 bits from a randomly keyed hasher (a new key per process and call).
+fn new_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(N.fetch_add(1, Ordering::Relaxed));
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    format!("{:016x}", h.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranges() {
+        assert!(valid_range("bytes=0-99"));
+        assert!(valid_range("bytes=100-"));
+        assert!(valid_range("bytes=-500"));
+        for bad in ["bytes=0-1,5-6", "items=0-1", "bytes=-", "bytes=a-b"] {
+            assert!(!valid_range(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn extensions() {
+        let e = |s: &str| extension(&Url::parse(s).unwrap());
+        assert_eq!(e("https://c/a/seg-1.ts?x=1"), "ts");
+        assert_eq!(e("https://c/a/init.MP4"), "mp4");
+        assert_eq!(e("https://c/key"), "bin");
+    }
+}

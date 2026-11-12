@@ -1,0 +1,25 @@
+# lineup-gateway configuration. Mount your own at /etc/lineup-gateway.toml.
+
+listen = "0.0.0.0:8099"
+
+# The acestream rule: Acestream ids played through acexy. Remove the section to turn it off.
+# [acestream]
+# engine_control = "http://acestream:6878"     # gateway -> engine (names, checks)
+# acexy_control  = "http://acexy:8080"         # gateway -> acexy (activity guard, live numbers)
+# acexy_public   = "http://media-host:8080"    # written into play URLs: as players reach acexy
+
+# The vk rule: VK video pages, live or recorded, relayed as HLS.
+[vk]
+
+[tools]
+yt_dlp = "/opt/tools/bin/yt-dlp"
+streamlink = "/opt/tools/bin/streamlink"
+
+[limits]
+extractions = 2
+extraction_timeout_secs = 60
+manifest_bytes = 2097152
+sessions = 64
+session_idle_secs = 1800
+session_resources = 100000
+upstream_timeout_secs = 15
