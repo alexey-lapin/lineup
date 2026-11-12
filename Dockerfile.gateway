@@ -1,0 +1,30 @@
+# lineup-gateway: the Rust binary plus pinned extractors (yt-dlp, streamlink) in a venv.
+# Build: docker build -f Dockerfile.gateway -t lineup-gateway .
+
+# ---- gateway ---------------------------------------------------------------
+FROM rust:1.97-alpine AS rust
+RUN apk add --no-cache musl-dev build-base
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rustfmt.toml ./
+COPY crates ./crates
+RUN cargo build --release --locked -p lineup-gateway && cp target/release/lineup-gateway /lineup-gateway && rm -rf target
+
+# ---- extractors ------------------------------------------------------------
+FROM python:3.12-alpine AS tools
+# Pinned: update both together and run the gateway's smoke test (docs/gateway.md).
+RUN python -m venv /opt/tools \
+    && /opt/tools/bin/pip install --no-cache-dir 'yt-dlp==2026.10.26' 'streamlink==8.6.0'
+
+# ---- runtime ---------------------------------------------------------------
+FROM python:3.12-alpine
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -D -H -u 10002 gateway
+COPY --from=tools /opt/tools /opt/tools
+COPY --from=rust /lineup-gateway /usr/local/bin/lineup-gateway
+COPY deploy/gateway.example.toml /etc/lineup-gateway.toml
+USER gateway
+ENV LINEUP_GATEWAY_CONFIG=/etc/lineup-gateway.toml
+EXPOSE 8099
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
+    CMD wget -qO- http://127.0.0.1:8099/healthz >/dev/null || exit 1
+ENTRYPOINT ["lineup-gateway"]
