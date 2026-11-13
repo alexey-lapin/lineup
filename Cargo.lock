@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "gateway-contract"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "lineup"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "lineup-cli",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "lineup-api-types"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "lineup-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "lineup-gateway"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "lineup-server"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",

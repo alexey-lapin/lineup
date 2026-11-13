@@ -3,7 +3,7 @@ import { useToast } from '@nuxt/ui/composables'
 import type { DropdownMenuItem, TableColumn } from '@nuxt/ui'
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, sourceLabel, type Channel } from '../api'
+import { api, type Channel } from '../api'
 import ChannelDetail from '../components/ChannelDetail.vue'
 import ChannelForm from '../components/ChannelForm.vue'
 import { copy, playerLinks, useAction, useChannels, useInvalidateAll, useRoutes } from '../composables'
@@ -243,7 +243,8 @@ function actions(c: Channel): DropdownMenuItem[][] {
         </template>
         <template #source-cell="{ row }">
           <UBadge
-            :label="sourceLabel(row.original)"
+            :label="row.original.identity"
+            :title="`${row.original.route_name}: ${row.original.identity}`"
             color="neutral"
             variant="outline"
             class="font-mono max-w-48 truncate"

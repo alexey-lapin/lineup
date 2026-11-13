@@ -150,11 +150,6 @@ export function guideUrl(slug: string): string {
   return `${window.location.origin}/p/${encodeURIComponent(slug)}/epg.xml`
 }
 
-/** A short label for a channel's source: its route and identity. */
-export function sourceLabel(c: Pick<Channel, 'route_name' | 'identity'>): string {
-  return `${c.route_name}: ${c.identity}`
-}
-
 /** Display text of a content state. */
 export const CONTENT_STATES: Record<ContentState, string> = {
   live: 'Live',

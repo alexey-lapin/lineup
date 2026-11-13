@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { api, routeSummary, sourceLabel, type Channel, type EpgChannel, type ResolveResponse } from '../api'
+import { api, routeSummary, type Channel, type EpgChannel, type ResolveResponse } from '../api'
 import EpgSearch from './EpgSearch.vue'
 import { lastRoute, rememberRoute, useAction, useChannels, useInvalidateAll, usePlaylists, useRoutes } from '../composables'
 import { floating } from '../safe-area'
@@ -277,7 +277,7 @@ async function save() {
           :title="
             duplicateOf != null
               ? `Already exists as channel ${duplicateOf}`
-              : sourceLabel({ route_name: route?.name ?? '', identity: currentResolution.identity })
+              : currentResolution.identity
           "
           :ui="{ description: 'break-all' }"
         >

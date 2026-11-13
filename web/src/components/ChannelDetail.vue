@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import { computed, ref } from 'vue'
-import { api, CONTENT_STATES, sourceLabel, type Channel } from '../api'
+import { api, CONTENT_STATES, type Channel } from '../api'
 import { copy, liveEpoch, playerLinks, useAction, useInvalidateAll, usePolling, useRoutes } from '../composables'
 
 /**
@@ -92,7 +92,7 @@ const links = computed(() => (props.channel ? playerLinks(props.channel.play_url
             <dd class="font-mono break-all">{{ channel.source }}</dd>
             <template v-if="channel.identity !== channel.source">
               <dt class="text-muted">Identity</dt>
-              <dd class="font-mono break-all">{{ sourceLabel(channel) }}</dd>
+              <dd class="font-mono break-all">{{ channel.identity }}</dd>
             </template>
             <dt class="text-muted">Plays from</dt>
             <dd class="break-all">{{ channel.play_url }}</dd>
