@@ -257,3 +257,77 @@ describe('ChannelForm suggestions', () => {
     expect(vm.state.tvg_logo).toBe('http://mine')
   })
 })
+
+describe('identities are shown as the route defines them', () => {
+  // An opaque identity on a route with a custom name: shown once, never prefixed with the route.
+  const opaque = { ...ch(1, 'Opaque'), route_name: 'My Gateway Route', identity: 'any/opaque id:1' }
+  const slots = (names: string[]) => ({ template: `<div>${names.map((n) => `<slot name="${n}" />`).join('')}<slot /></div>` })
+  const Badge = { props: ['label'], template: '<span class="badge">{{ label }}</span>' }
+
+  it('channel detail: the identity alone, and no Identity row when it is the source', async () => {
+    const { list } = plugins()
+    const stubs = { USlideover: slots(['description', 'body', 'footer']), UBadge: Badge }
+    const ChannelDetail = (await import('../components/ChannelDetail.vue')).default
+    const w = mount(ChannelDetail, { props: { channel: opaque, open: true }, shallow: true, global: { plugins: list, stubs } })
+    await flush()
+    expect(w.html()).toContain('any/opaque id:1')
+    expect(w.html()).not.toContain('My Gateway Route: any/opaque')
+    const direct = { ...ch(2, 'Direct'), route_name: 'Direct', source: 'http://h/a.m3u8', identity: 'http://h/a.m3u8' }
+    await w.setProps({ channel: direct })
+    await flush()
+    expect(w.text()).not.toContain('Identity')
+  })
+
+  it('channels list: the identity in the badge, the route in its tooltip', async () => {
+    const { list } = plugins()
+    api.channels.mockResolvedValue([opaque])
+    const UTable = {
+      props: ['data'],
+      template: '<div><div v-for="r in data" :key="r.id"><slot name="source-cell" :row="{ original: r }" /></div></div>'
+    }
+    const ChannelsPage = (await import('../pages/ChannelsPage.vue')).default
+    const UDashboardPanel = slots(['header', 'body'])
+    const w = mount(ChannelsPage, { shallow: true, global: { plugins: list, stubs: { UDashboardPanel, UTable, UBadge: Badge } } })
+    await flush()
+    const badge = w.find('.badge')
+    expect(badge.text()).toBe('any/opaque id:1')
+    expect(badge.attributes('title')).toBe('My Gateway Route: any/opaque id:1')
+  })
+
+  it('playlist: group and identity', async () => {
+    const { list } = plugins()
+    api.playlist.mockResolvedValue({ ...detail('a', []), items: [{ position: 1, channel: { ...opaque, group_title: 'G' } }] })
+    const w = mount(PlaylistPage, {
+      props: { slug: 'a' },
+      shallow: true,
+      global: { plugins: list, stubs: { UDashboardPanel: slots(['header', 'body']) }, renderStubDefaultSlot: true }
+    })
+    await flush()
+    expect(w.text()).toContain('G · any/opaque id:1')
+    expect(w.text()).not.toContain('My Gateway Route:')
+  })
+
+  it('channel form: the identity alone, and the duplicate warning still wins', async () => {
+    const { list } = plugins()
+    const UAlert = { props: ['title'], template: '<div class="alert">{{ title }}</div>' }
+    const w = mount(ChannelForm, {
+      props: { open: true },
+      shallow: true,
+      global: { plugins: list, stubs: { UAlert, USlideover: slots(['body', 'footer']) }, renderStubDefaultSlot: true }
+    })
+    const vm = w.vm as any
+    vm.state.route_id = 2
+    await flush()
+    api.resolve.mockResolvedValueOnce({ ...resolution(2, 'x'), identity: 'any/opaque id:1' })
+    vm.state.input = 'x'
+    await vm.resolveInput()
+    await flush()
+    expect(w.find('.alert').text()).toBe('any/opaque id:1')
+    api.resolve.mockResolvedValueOnce({ ...resolution(2, 'y'), identity: 'other', duplicate_of: 7 })
+    vm.state.input = 'y'
+    await flush()
+    await vm.resolveInput()
+    await flush()
+    expect(w.find('.alert').text()).toBe('Already exists as channel 7')
+  })
+})

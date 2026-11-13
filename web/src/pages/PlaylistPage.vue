@@ -4,7 +4,7 @@ import { useQuery } from '@pinia/colada'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { VueDraggable } from 'vue-draggable-plus'
-import { api, guideUrl, playlistUrl, sourceLabel, type PlaylistDetail } from '../api'
+import { api, guideUrl, playlistUrl, type PlaylistDetail } from '../api'
 import { copy, useAction, useChannels, useInvalidateAll } from '../composables'
 import { floating } from '../safe-area'
 
@@ -195,7 +195,7 @@ async function deletePlaylist() {
               <span v-if="!item.channel.enabled" class="text-xs text-muted">(disabled)</span>
             </div>
             <div class="text-xs text-muted truncate">
-              {{ item.channel.group_title ?? "—" }} · {{ sourceLabel(item.channel) }}
+              {{ item.channel.group_title ?? "—" }} · {{ item.channel.identity }}
             </div>
           </div>
           <UButton
