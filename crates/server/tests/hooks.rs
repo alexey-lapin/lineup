@@ -247,7 +247,8 @@ async fn jellyfin_recipe_is_a_plain_webhook() {
                 headers: [("Authorization".to_string(), "MediaBrowser Token=\"key123\"".to_string())].into(),
             },
             events: Some(vec!["playlist.changed".into(), "epg.updated".into()]),
-            debounce_secs: Some(1),
+            // 10 units (200 ms here): both changes land in one window even on a slow machine.
+            debounce_secs: Some(10),
             enabled: true,
         })
         .await
