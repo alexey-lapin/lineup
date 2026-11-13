@@ -389,10 +389,7 @@ async fn vk_play_relays_everything_through_the_gateway() {
     )
     .await;
     let m = &r["results"][0];
-    assert_eq!(
-        m["ref"],
-        "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
-    );
+    assert_eq!(m["ref"], "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c");
     let play = m["play"].as_str().unwrap();
     // Behind a reverse-proxy prefix the play path is appended below the base; here the base is the root.
     let master_url = format!("{}/{play}", f.url);
