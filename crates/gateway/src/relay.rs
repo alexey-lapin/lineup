@@ -90,7 +90,7 @@ impl Relay {
         };
         let (body, _) = match self.fetch_playlist(&sid, &d.manifest_url, None).await {
             Ok(r) => r,
-            Err(Refetch::Response(r)) => return r,
+            Err(Refetch::Response(r)) => return *r,
             Err(Refetch::Expired) => return self.expired(&sid),
         };
         playlist_response(body, false)
@@ -128,7 +128,7 @@ impl Relay {
                     },
                     None => self.expired(sid),
                 },
-                Err(Refetch::Response(r)) => r,
+                Err(Refetch::Response(r)) => *r,
             },
             Kind::Resource => self.stream(&url, &headers, &page, req, head).await,
         }
@@ -273,7 +273,7 @@ impl Relay {
             match sessions.get(sid) {
                 Some(s) => s.descriptor.headers.clone(),
                 None => {
-                    return Err(Refetch::Response(text(
+                    return Err(reply(text(
                         StatusCode::GONE,
                         "this playback session expired; open the channel again",
                     )));
@@ -282,13 +282,13 @@ impl Relay {
         };
         let (body, final_url) = match self.get_text(url, &headers).await {
             Ok(r) => r,
-            Err(Upstream::Gone) if top => return Err(Refetch::Response(self.expired(sid))),
+            Err(Upstream::Gone) if top => return Err(reply(self.expired(sid))),
             Err(Upstream::Gone) => return Err(Refetch::Expired),
-            Err(e) => return Err(Refetch::Response(text(StatusCode::BAD_GATEWAY, &e.to_string()))),
+            Err(e) => return Err(reply(text(StatusCode::BAD_GATEWAY, &e.to_string()))),
         };
         let mut sessions = self.sessions.lock().unwrap();
         let Some(s) = sessions.get_mut(sid) else {
-            return Err(Refetch::Response(text(
+            return Err(reply(text(
                 StatusCode::GONE,
                 "this playback session expired; open the channel again",
             )));
@@ -331,7 +331,7 @@ impl Relay {
                 }
                 Ok((body, summary))
             }
-            Err(e) => Err(Refetch::Response(text(
+            Err(e) => Err(reply(text(
                 StatusCode::BAD_GATEWAY,
                 &format!("cannot relay this stream: {e}"),
             ))),
@@ -464,7 +464,12 @@ fn expired_status(status: u16) -> bool {
 enum Refetch {
     /// The playlist's URL expired; a compatible refresh may help.
     Expired,
-    Response(Response),
+    /// A finished answer for the player (boxed: a response is large).
+    Response(Box<Response>),
+}
+
+fn reply(r: Response) -> Refetch {
+    Refetch::Response(Box::new(r))
 }
 
 #[derive(Debug, thiserror::Error)]
