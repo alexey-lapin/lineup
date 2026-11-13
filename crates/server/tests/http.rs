@@ -320,13 +320,8 @@ async fn resolve_suggests_and_reports_duplicates() {
         r["suggestion"]["name"], "vk:-1_2",
         "no title: the identity is the placeholder"
     );
-    assert_eq!(
-        (
-            r["suggestion"]["group_title"].as_str(),
-            r["suggestion"]["is_event"].as_bool()
-        ),
-        (Some("VK"), Some(true))
-    );
+    assert_eq!(r["suggestion"]["group_title"].as_str(), Some("VK"));
+    assert!(r["suggestion"].get("is_event").is_none(), "no event flag any more");
     assert!(
         r["play_url"]
             .as_str()
@@ -799,4 +794,31 @@ async fn import_by_url_is_size_capped() {
     }
     let (_, _, l) = call(&app, "GET", "/api/v1/playlists", None).await;
     assert_eq!(l, json!([]), "nothing was created");
+}
+
+#[tokio::test]
+async fn removed_event_fields_are_ignored() {
+    // Clients written for the event flag still work: the old keys are accepted and dropped.
+    let app = app().await;
+    let (s, _, c) = call(
+        &app,
+        "POST",
+        "/api/v1/channels",
+        Some(json!({
+            "name": "Old client", "route_id": DIRECT, "input": "http://h/a.m3u8",
+            "is_event": true, "kickoff_at": "2026-11-08T14:00:00Z"
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{c}");
+    assert!(c.get("is_event").is_none() && c.get("kickoff_at").is_none(), "{c}");
+    let id = c["id"].as_i64().unwrap();
+    let (s, _, c) = call(
+        &app,
+        "PATCH",
+        &format!("/api/v1/channels/{id}"),
+        Some(json!({"is_event": false, "kickoff_at": null, "name": "Renamed"})),
+    )
+    .await;
+    assert_eq!((s, c["name"].as_str()), (StatusCode::OK, Some("Renamed")), "{c}");
 }

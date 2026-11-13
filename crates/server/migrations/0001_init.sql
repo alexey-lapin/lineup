@@ -42,8 +42,6 @@ CREATE TABLE channels (
     play            TEXT,             -- gateway play reference (relative to base_url, or absolute)
     play_revision   TEXT,             -- the rule's play_revision when `play` was obtained
     source_revision INTEGER NOT NULL DEFAULT 0, -- bumped on every change of route/source/identity/play
-    is_event        INTEGER NOT NULL DEFAULT 0,
-    kickoff_at      TEXT,
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,

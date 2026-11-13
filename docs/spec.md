@@ -25,8 +25,8 @@ lineup itself knows no streaming protocol. A channel is played through a **route
 - In-app playback.
 - Auth: lineup is meant for a trusted LAN.
 - Change history or revert.
-- Expiry for event channels (they stay until removed).
-- Placeholder EPG for channels other than event channels.
+- Channel expiry (channels stay until removed).
+- Real schedules for streams without guide data (see the fallback in §5).
 - Rule-based playlist membership.
 - Custom URL templates (direct routes only take whole URLs).
 
@@ -66,7 +66,6 @@ channels(
   play TEXT NULL,       -- gateway play reference: base-relative path or absolute http(s) URL
   play_revision TEXT NULL,   -- the rule's play revision when `play` was obtained
   source_revision INT,       -- bumped on every change of route/source/identity/play
-  is_event BOOL DEFAULT false, kickoff_at DATETIME NULL,
   enabled BOOL DEFAULT true,
   created_at, updated_at,
   UNIQUE(route_id, identity)
@@ -153,17 +152,15 @@ http://media-host:8080/ace/getstream?id=816b…
 Built per request from the per-source caches, for the same eligible channels as the M3U (§4b). Output order is all `<channel>` elements first, then all `<programme>` elements, as the XMLTV DTD requires.
 
 **Upstream channels**
-- For each non-event channel in the playlist, take the matching `<channel>` and its programmes from the source caches.
+- For each channel in the playlist whose effective tvg-id an enabled source carries (its published index, which also counts ids that only appear in programmes), take the matching `<channel>` and its programmes from the source caches, even if they have no programmes in the window.
 - When the same id appears in several sources, the source with the highest priority wins, and only that source's programmes are used. No programme deduplication.
 
-**Event channels** (`is_event`, on any route)
-- Always emit a synthetic `<channel id="{effective_tvg_id}">` with the channel name as display-name. If an upstream source happens to carry the same id, the synthetic one replaces it.
-- Programmes, relative to `now` truncated to the hour, covering now to +24h:
-  - With `kickoff_at`: the logical blocks are "Pre-match" [−∞, kickoff), the title [kickoff, kickoff+2h), and the title marked "(ended)" [kickoff+2h, +∞).
-  - Each block is clipped to the window [hour, hour+24h). Empty intersections are dropped.
-  - Without kickoff: the title over the whole window.
-  - Every block longer than 2h is then split at even UTC hours (multiples of 2h since the epoch); the kickoff and kickoff+2h boundaries stay exact. Players therefore never show a day-long programme: a kickoff 48h away gives twelve Pre-match blocks, an event without kickoff gives 2h blocks of its title.
-- These blocks are a guide placeholder, not the broadcast's actual state (checks report that, §9).
+**Channels without guide data** (no enabled source carries the effective tvg-id, including channels without a tvg-id, `lineup.<id>`)
+- A synthetic `<channel id="{effective_tvg_id}">` with the channel name as display-name.
+- Programmes titled with the channel name, without description, over the window [hour, hour+24h) (`hour`: now truncated to the UTC hour; 24 elapsed hours).
+- Boundaries: every instant the server's local wall time (`TZ`, read at start) is a whole hour, plus every instant its UTC offset changes, so no block is longer than an hour even across a half-hour daylight-saving change; the first and last blocks are clipped to the window. Repeated local hours in a fold are distinct instants; skipped ones in a gap do not exist. A half-hour zone such as Asia/Kolkata gets 25 blocks.
+- These are placeholders so every channel shows up in guides, not broadcast times.
+- Several channels sharing an effective id: the first eligible one in playlist order names it.
 
 **Caching**
 - The response is cached in memory, keyed by (playlist, output version, current hour).
@@ -213,7 +210,7 @@ You pick the route, then paste the input. `POST /api/v1/resolve {route_id, input
 - `duplicate_of`, an existing channel on the route with the same identity, and `duplicate_source` when that channel's stored source differs (for example a newer access token in the link). Editing that channel with the new input updates it ("Update source");
 - suggestions and guide matches.
 
-Suggestions come from the gateway's hints (`title`, `region`, `group`, `event`): `name` from the title (or a placeholder: host and last path segment for direct URLs, the identity for gateway routes), `group_title` from the group, the event flag. When there is a title, it is fuzzy-matched against `epg_channels.display_names` with normalized token similarity (strsim), with a bonus for a matching region suffix (`.de`, `.uk`, `.us`); the top 5 `{xmltv_id, display_name, icon, score}` are returned, and the best one's tvg-id and logo are suggested when it scores at least 0.6. Gateway warnings (such as a failed title lookup) never fail the resolve.
+Suggestions come from the gateway's hints (`title`, `region`, `group`): `name` from the title (or a placeholder: host and last path segment for direct URLs, the identity for gateway routes), `group_title` from the group. When there is a title, it is fuzzy-matched against `epg_channels.display_names` with normalized token similarity (strsim), with a bonus for a matching region suffix (`.de`, `.uk`, `.us`); the top 5 `{xmltv_id, display_name, icon, score}` are returned, and the best one's tvg-id and logo are suggested when it scores at least 0.6. Gateway warnings (such as a failed title lookup) never fail the resolve.
 
 Site- or protocol-specific suggestion logic (cleaning engine names, region tags, a "Sports" guess) belongs to the gateway rule that produces the hints. The UI fills empty fields with the suggestions and offers the other matches and a guide search. In the CLI, the suggested name is always used unless `--name` is given; the other suggestions are applied with `--yes`, or after a confirmation prompt on a terminal. Explicit flags always win. Creating a channel validates the input again; a preview is never trusted.
 
@@ -230,7 +227,7 @@ Site- or protocol-specific suggestion logic (cleaning engine names, region tags,
 
 | Mutation | Affected playlists | Emits |
 |---|---|---|
-| channel name / group / tvg_id / logo / source / route / enabled / is_event / kickoff | all containing the channel | `playlist.changed` (+ `epg.updated` if tvg_id / is_event / kickoff, or an event channel's name, changed) |
+| channel name / group / tvg_id / logo / source / route / enabled | all containing the channel | `playlist.changed` (+ `epg.updated` if the tvg_id or name changed) |
 | channel delete | all that contained it (captured before delete) | `playlist.changed` |
 | item add / remove / move / replace | that playlist | `playlist.changed` |
 | playlist create / rename / delete | that slug | `playlist.changed` |
@@ -326,7 +323,7 @@ GET    /events (SSE)   -- live updates for the UI: channel/playlist/route change
 
 ```
 serve
-add <input>... --route <route> [--name --group --tvg-id --logo --playlist <slug>] [--event --kickoff <time>] [--yes] [--dry-run]
+add <input>... --route <route> [--name --group --tvg-id --logo --playlist <slug>] [--yes] [--dry-run]
 resolve <input> --route <route>
 ls [query] [--group --playlist --route --health dead] ; show <channel> ; info <channel>
 edit <channel> [--name … --source <input> --route <route>] ; rm <channel> ; enable/disable <channel>

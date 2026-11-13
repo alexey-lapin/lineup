@@ -144,19 +144,13 @@ pub struct AddArgs {
     /// Append to this playlist (repeatable).
     #[arg(long = "playlist", short = 'p')]
     pub playlists: Vec<String>,
-    /// Mark as a live event (a one-off match etc.).
-    #[arg(long)]
-    pub event: bool,
-    /// Event kickoff time (RFC 3339, e.g. 2026-11-05T20:00:00Z).
-    #[arg(long)]
-    pub kickoff: Option<chrono::DateTime<chrono::Utc>>,
     /// Create disabled.
     #[arg(long)]
     pub disabled: bool,
     /// Show what would be added without saving.
     #[arg(long)]
     pub dry_run: bool,
-    /// Accept the suggested group, tvg-id, logo and event flag without asking. Explicit flags win.
+    /// Accept the suggested group, tvg-id, logo without asking. Explicit flags win.
     #[arg(long, short = 'y')]
     pub yes: bool,
 }
@@ -206,14 +200,6 @@ pub struct EditArgs {
     /// Move to another route (id or name); the source is revalidated with it.
     #[arg(long, short = 'r')]
     pub route: Option<String>,
-    #[arg(long, conflicts_with = "no_event")]
-    pub event: bool,
-    #[arg(long)]
-    pub no_event: bool,
-    #[arg(long, conflicts_with = "no_kickoff")]
-    pub kickoff: Option<chrono::DateTime<chrono::Utc>>,
-    #[arg(long)]
-    pub no_kickoff: bool,
 }
 
 #[derive(Debug, Subcommand)]

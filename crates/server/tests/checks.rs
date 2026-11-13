@@ -56,8 +56,6 @@ impl Fixture {
                 tvg_logo: None,
                 route_id,
                 input: input.into(),
-                is_event: false,
-                kickoff_at: None,
                 enabled: true,
                 playlists: vec![],
             })

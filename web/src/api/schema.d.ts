@@ -498,9 +498,6 @@ export interface components {
             id: number;
             /** @description De-duplication key (unique per route). */
             identity: string;
-            is_event: boolean;
-            /** Format: date-time */
-            kickoff_at?: string | null;
             name: string;
             /** @description The URL emitted in playlists. */
             play_url: string;
@@ -526,9 +523,6 @@ export interface components {
             group_title?: string | null;
             /** @description What to play, in a form the route accepts (a URL for Direct; the gateway rule's input). */
             input: string;
-            is_event?: boolean;
-            /** Format: date-time */
-            kickoff_at?: string | null;
             name: string;
             /** @description Playlists (by slug) to append the new channel to. */
             playlists?: string[];
@@ -576,9 +570,6 @@ export interface components {
             enabled?: boolean | null;
             group_title?: string | null;
             input?: string | null;
-            is_event?: boolean | null;
-            /** Format: date-time */
-            kickoff_at?: string | null;
             name?: string | null;
             /** Format: int64 */
             route_id?: number | null;
@@ -738,8 +729,6 @@ export interface components {
         };
         /** @description Suggestions a gateway gives for a source. */
         Hints: {
-            /** @description Usually a one-off event. */
-            event?: boolean | null;
             group?: string | null;
             /** @description Two-letter lowercase region, e.g. `de`. */
             region?: string | null;
@@ -1100,7 +1089,6 @@ export interface components {
         };
         Suggestion: {
             group_title?: string | null;
-            is_event: boolean;
             name: string;
             tvg_id?: string | null;
             tvg_logo?: string | null;

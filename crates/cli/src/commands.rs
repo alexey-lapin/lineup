@@ -298,14 +298,6 @@ pub async fn run(cli: Cli) -> R {
                 tvg_logo: tri(e.logo, e.no_logo),
                 route_id,
                 input: e.source,
-                is_event: if e.event {
-                    Some(true)
-                } else if e.no_event {
-                    Some(false)
-                } else {
-                    None
-                },
-                kickoff_at: if e.no_kickoff { Some(None) } else { e.kickoff.map(Some) },
                 enabled: None,
             };
             let ch: Channel = x.c.patch(&format!("/channels/{id}"), &patch).await?;
@@ -845,7 +837,7 @@ async fn add_one(x: &Ctx, a: &crate::AddArgs, route_id: i64, input: &str) -> R<A
         }
     }
     let s = &r.suggestion;
-    let has_extra = s.group_title.is_some() || s.tvg_id.is_some() || s.tvg_logo.is_some() || s.is_event;
+    let has_extra = s.group_title.is_some() || s.tvg_id.is_some() || s.tvg_logo.is_some();
     // Suggestions beyond the name are applied with --yes, or after confirming on a terminal.
     let accept = a.yes
         || (has_extra && !x.json && !x.quiet && is_interactive() && {
@@ -861,7 +853,6 @@ async fn add_one(x: &Ctx, a: &crate::AddArgs, route_id: i64, input: &str) -> R<A
             .clone()
             .or_else(|| if accept { suggested.clone() } else { None })
     };
-    let is_event = a.event || a.kickoff.is_some() || (accept && s.is_event);
     let req = ChannelCreate {
         name: a.name.clone().unwrap_or_else(|| s.name.clone()),
         group_title: pick(&a.group, &s.group_title),
@@ -869,8 +860,6 @@ async fn add_one(x: &Ctx, a: &crate::AddArgs, route_id: i64, input: &str) -> R<A
         tvg_logo: pick(&a.logo, &s.tvg_logo),
         route_id,
         input: input.to_string(),
-        is_event,
-        kickoff_at: a.kickoff,
         enabled: !a.disabled,
         playlists: a.playlists.clone(),
     };

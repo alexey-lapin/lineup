@@ -224,7 +224,6 @@ function actions(c: Channel): DropdownMenuItem[][] {
               </div>
               <div v-if="row.original.tvg_id" class="text-xs text-muted truncate">{{ row.original.tvg_id }}</div>
             </div>
-            <UBadge v-if="row.original.is_event" label="event" color="warning" variant="subtle" size="sm" />
             <UTooltip v-if="!row.original.route_enabled" :content="floating()" :text="routeOff(row.original)">
               <UBadge label="route off" color="neutral" variant="outline" size="sm" icon="i-lucide-plug" />
             </UTooltip>

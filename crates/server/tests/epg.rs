@@ -259,8 +259,6 @@ mod output {
             tvg_logo: None,
             route_id,
             input: url.into(),
-            is_event: false,
-            kickoff_at: None,
             enabled: true,
             playlists: vec!["jf".into()],
         }
@@ -297,20 +295,33 @@ mod output {
         let mut sports = ch("Sports", streams, &url(ACE2), Some("SportsOne.uk"));
         sports.enabled = false;
         catalog.create_channel(sports).await.unwrap();
-        let mut event = ch("Cup <Final>", 1, "https://vk.com/video-1_2", None);
-        event.is_event = true;
-        event.kickoff_at = Some(Utc.with_ymd_and_hms(2099, 1, 1, 20, 0, 0).unwrap());
-        let event = catalog.create_channel(event).await.unwrap();
+        // No guide id at all: its name fills the guide.
+        let event = catalog
+            .create_channel(ch("Cup <Final>", 1, "https://vk.com/video-1_2", None))
+            .await
+            .unwrap();
+        // A disabled first channel with a shared id does not name it; the enabled second one does.
+        let mut hidden = ch("Hidden", streams, &url("a".repeat(40).as_str()), Some("Shared.xx"));
+        hidden.enabled = false;
+        catalog.create_channel(hidden).await.unwrap();
+        catalog
+            .create_channel(ch("Shared", streams, &url(&"b".repeat(40)), Some("Shared.xx")))
+            .await
+            .unwrap();
         catalog
             .create_channel(ch("Unknown", streams, &url(ACE3), Some("Nope.xx")))
             .await
             .unwrap();
 
-        // Before any source is fetched: only the event channel.
+        // Before any source is fetched: every channel falls back to its name.
         let now = Utc.with_ymd_and_hms(2099, 1, 1, 18, 30, 0).unwrap();
         let r = epg.playlist_xml_at("jf", now).await.unwrap();
         let xml = std::str::from_utf8(&r.body).unwrap();
-        assert!(!xml.contains("Arena1.de"), "{xml}");
+        assert!(
+            xml.contains("<channel id=\"Arena1.de\"><display-name>Arena</display-name></channel>")
+                && xml.contains("channel=\"Arena1.de\"><title>Arena</title>"),
+            "{xml}"
+        );
 
         store
             .create_epg_source(EpgSourceCreate {
@@ -332,15 +343,26 @@ mod output {
             "{xml}"
         );
         assert!(!xml.contains("SportsOne.uk"), "disabled channels are left out: {xml}");
-        assert!(!xml.contains("Nope.xx"), "ids without guide data are left out");
+        // Upstream data wins; it is never mixed with the fallback.
+        assert!(!xml.contains("channel=\"Arena1.de\"><title>Arena</title>"), "{xml}");
+        assert!(xml.contains("<title>v1</title>"));
+        // Ids no source carries: the channel's name, hour by hour, from the current hour.
+        assert!(
+            xml.contains("<channel id=\"Nope.xx\"><display-name>Unknown</display-name>"),
+            "{xml}"
+        );
         assert!(xml.contains(&format!(
             "<channel id=\"{ev_id}\"><display-name>Cup &lt;Final&gt;</display-name>"
         )));
-        assert!(xml.contains("<title>v1</title>"));
-        assert!(xml.contains(&format!(
-            "<programme start=\"20990101180000 +0000\" stop=\"20990101200000 +0000\" channel=\"{ev_id}\"><title>Pre-match</title>"
-        )));
-        assert!(xml.contains("<title>Cup &lt;Final&gt; (ended)</title>"));
+        assert!(xml.contains("<programme start=\"20990101180000 +0000\" stop="));
+        let slots = xml
+            .matches(&format!("channel=\"{ev_id}\"><title>Cup &lt;Final&gt;</title>"))
+            .count();
+        assert!((24..=25).contains(&slots), "hourly over 24 hours: {slots}");
+        assert!(
+            xml.contains("<display-name>Shared</display-name>") && !xml.contains("Hidden"),
+            "{xml}"
+        );
         // All channels before any programme.
         assert!(xml.rfind("<channel ").unwrap() < xml.find("<programme ").unwrap());
         assert!(xml.trim_end().ends_with("</tv>"));
@@ -379,6 +401,32 @@ mod output {
         store.update_route(streams, None, Some(true)).await.unwrap();
         let on = epg.playlist_xml_at("jf", now).await.unwrap();
         assert!(std::str::from_utf8(&on.body).unwrap().contains("SportsOne.uk"));
+
+        // Renaming a fallback channel changes the guide within the hour and announces it.
+        let mut events = store.subscribe();
+        let before = epg.playlist_xml_at("jf", now).await.unwrap();
+        catalog
+            .patch_channel(
+                event.id,
+                ChannelPatch {
+                    name: Some("Cup Final".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let after = epg.playlist_xml_at("jf", now).await.unwrap();
+        assert_ne!(before.etag, after.etag);
+        assert!(
+            std::str::from_utf8(&after.body)
+                .unwrap()
+                .contains("<title>Cup Final</title>")
+        );
+        let mut saw_epg = false;
+        while let Ok(e) = events.try_recv() {
+            saw_epg |= matches!(e, lineup_server::store::Event::EpgUpdated { .. });
+        }
+        assert!(saw_epg, "a rename announces guide changes");
 
         // Over HTTP: ETag and 304; unknown playlist is 404; the m3u announces the guide URL.
         let get = |uri: &str, inm: Option<&str>| {
@@ -427,7 +475,6 @@ mod resolve {
                 title: Some("Arena 1".into()),
                 region: Some("de".into()),
                 group: Some("Sports".into()),
-                event: None,
             },
         );
 
@@ -466,9 +513,8 @@ mod resolve {
         assert_eq!(r.matches[0].xmltv_id, "Arena1.de");
         assert!(r.validated.warnings.is_empty());
 
-        // VK: event and group from the hints; no title, so no guide matching.
+        // VK: group from the hints; no title, so no guide matching.
         let r = app.catalog.resolve(vk_route, "https://vk.com/video-1_2").await.unwrap();
-        assert!(r.suggestion.is_event);
         assert_eq!(r.suggestion.group_title.as_deref(), Some("VK"));
         assert!(r.matches.is_empty());
 

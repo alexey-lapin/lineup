@@ -96,7 +96,7 @@ Each playlist gets its own guide with just its channels:
 http://media-host:9300/p/tv/epg.xml
 ```
 
-Add it wherever your player takes an XMLTV guide; in Jellyfin that is **Dashboard → Live TV → TV Guide Data Providers → Add → XMLTV**. A channel gets guide data when its tvg-id matches a channel id in one of the sources. Channels marked as events get placeholder programmes ("Pre-match", the event, then "ended") built from their kickoff time, so they always show up in the guide.
+Add it wherever your player takes an XMLTV guide; in Jellyfin that is **Dashboard → Live TV → TV Guide Data Providers → Add → XMLTV**. A channel gets guide data when its tvg-id matches a channel id in one of the sources. A channel that no source covers gets its own name as hourly programmes (on whole hours of the server's time zone, set with `TZ`; restart to change it), so it still shows up in the guide. These are placeholders, not broadcast times.
 
 Players cache the guide (Jellyfin for about an hour), so guide changes can take a while to appear.
 
@@ -165,7 +165,7 @@ lineup 0.5 starts from a new database and cannot open a 0.4 one: it refuses to s
 3. Stop and remove the 0.4 container, and keep its volume as the backup, with the 0.4 image tag in case you roll back.
 4. Start 0.5 on a new, empty volume (change the volume's `name:` in the compose file, for example to `lineup-data-0.5`, and the image tag).
 5. Add the gateway routes (above), then import each playlist once per route, previewing first. The gateway recognises its own and acexy's stream URLs; old VK proxy URLs (`/vk/<owner>_<video>`) are recognised if the gateway's VK rule accepts them, otherwise add those channels again from their vk.com links.
-6. From the JSON records, add back the channels in no playlist, disable the ones that were disabled, and set event flags and kickoff times. Then add the guide sources and hooks again, and set the check schedule under Settings if you used one.
+6. From the JSON records, add back the channels in no playlist and disable the ones that were disabled. Event flags and kickoff times no longer exist in 0.5. Then add the guide sources and hooks again, and set the check schedule under Settings if you used one.
 
 Imported channels take their name, group, tvg-id and logo from the M3U.
 
@@ -213,4 +213,4 @@ It checks the backup (`integrity_check` plus a test query) before changing anyth
 
 A backup restores into the same lineup version line: 0.5 refuses a 0.4 database (see Upgrading from 0.4).
 
-Re-importing an exported M3U is **not** a full restore. It brings back that playlist's channels and their M3U fields, but not disabled channels, other playlists, routes, settings, event flags or kickoff times. Use the database backup for that.
+Re-importing an exported M3U is **not** a full restore. It brings back that playlist's channels and their M3U fields, but not disabled channels, other playlists, routes or settings. Use the database backup for that.

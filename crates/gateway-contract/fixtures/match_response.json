@@ -6,7 +6,7 @@
       "identity": "ace:41169a3f280a5537b0611b775e926852d372743d",
       "ref": "acestream://41169a3f280a5537b0611b775e926852d372743d",
       "play": "http://192.168.1.50:8080/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d",
-      "hints": {"title": "Arena 1", "region": "de", "group": "Sports", "event": null},
+      "hints": {"title": "Arena 1", "region": "de", "group": "Sports"},
       "warnings": []
     },
     {
@@ -15,7 +15,7 @@
       "identity": "ace:41169a3f280a5537b0611b775e926852d372743d",
       "ref": "acestream://41169a3f280a5537b0611b775e926852d372743d",
       "play": "http://192.168.1.50:8080/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d",
-      "hints": {"title": null, "region": null, "group": null, "event": null},
+      "hints": {"title": null, "region": null, "group": null},
       "warnings": ["engine name lookup failed: timed out after 5s"]
     },
     {

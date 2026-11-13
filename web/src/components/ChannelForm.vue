@@ -23,8 +23,6 @@ const state = ref({
   group_title: '' as string | undefined,
   tvg_id: '',
   tvg_logo: '',
-  is_event: false,
-  kickoff: '',
   enabled: true,
   playlists: [] as string[]
 })
@@ -42,8 +40,6 @@ const pickerOpen = ref(false)
  */
 const autofilled = ref({ name: '', group_title: '', tvg_id: '', tvg_logo: '' })
 type AutoField = keyof typeof autofilled.value
-/** The event flag as last set from a suggestion; null until a suggestion set it. */
-const autoEvent = ref<boolean | null>(null)
 
 function fill(field: AutoField, value: string | null | undefined) {
   const current = (state.value[field] ?? '') as string
@@ -51,14 +47,6 @@ function fill(field: AutoField, value: string | null | undefined) {
   if (!owned) return
   state.value[field] = value ?? ''
   autofilled.value[field] = value ?? ''
-}
-
-function fillEvent(value: boolean) {
-  // Untouched: still the initial value, or what the previous suggestion set.
-  const owned = autoEvent.value === null ? !state.value.is_event : state.value.is_event === autoEvent.value
-  if (!owned) return
-  state.value.is_event = value
-  autoEvent.value = value
 }
 
 function useMatch(m: EpgChannel) {
@@ -90,17 +78,6 @@ const inputHelp = computed(() => {
 /** Key of what a resolution was made for: route and input. */
 const key = (routeId: number | undefined, input: string) => `${routeId ?? ''} ${input}`
 
-/** `datetime-local` value <-> RFC 3339 UTC. */
-function toLocalInput(iso?: string | null) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-function fromLocalInput(v: string) {
-  return v ? new Date(v).toISOString() : null
-}
-
 // Any open/close or input edit starts a new resolution "session": late responses are dropped.
 let resolveSeq = 0
 /** Input of the request in flight, if any. */
@@ -127,12 +104,9 @@ watch(
     state.value.group_title = c?.group_title ?? undefined
     state.value.tvg_id = c?.tvg_id ?? ''
     state.value.tvg_logo = c?.tvg_logo ?? ''
-    state.value.is_event = c?.is_event ?? false
-    state.value.kickoff = toLocalInput(c?.kickoff_at)
     state.value.enabled = c?.enabled ?? true
     state.value.playlists = playlists.value?.length === 1 && !c ? [playlists.value[0]!.slug] : []
     autofilled.value = { name: '', group_title: '', tvg_id: '', tvg_logo: '' }
-    autoEvent.value = null
   },
   { immediate: true }
 )
@@ -177,7 +151,6 @@ async function resolveInput() {
       fill('group_title', s.group_title)
       fill('tvg_id', s.tvg_id)
       fill('tvg_logo', s.tvg_logo)
-      fillEvent(s.is_event)
     }
   } catch (e) {
     if (seq === resolveSeq) resolveError.value = (e as Error).message
@@ -228,8 +201,6 @@ async function save() {
     group_title: state.value.group_title || null,
     tvg_id: state.value.tvg_id || null,
     tvg_logo: state.value.tvg_logo || null,
-    is_event: state.value.is_event,
-    kickoff_at: state.value.is_event ? fromLocalInput(state.value.kickoff) : null,
     enabled: state.value.enabled
   }
   const input = state.value.input.trim()
@@ -378,11 +349,6 @@ async function save() {
             @click="useMatch(m)"
           />
         </div>
-
-        <USwitch v-model="state.is_event" label="Live event" description="A one-off match or stream" />
-        <UFormField v-if="state.is_event" label="Kickoff" help="Optional, your local time">
-          <UInput v-model="state.kickoff" type="datetime-local" class="w-full" />
-        </UFormField>
 
         <USwitch v-model="state.enabled" label="Enabled" description="Disabled channels keep their number but are left out of playlists" />
 

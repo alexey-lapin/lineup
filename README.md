@@ -23,7 +23,7 @@ lineup route add Acestream --gateway http://media-host:8099 --rule acestream   #
 lineup route ls | show <route> | edit <route> [--name --base-url --enable|--disable] | rm <route> | resync <route>
 lineup add -r Acestream acestream://<id> -p tv --yes   # name, group, tvg-id and logo suggested from the gateway and guide
 lineup add -r Acestream <id> --name "Arena 1" --group Sports --tvg-id Arena.1.de -p tv
-lineup add -r VK "https://vk.com/video-1_2?list=..." --name "A vs B" --event --kickoff 2026-11-08T20:00:00Z -p tv
+lineup add -r VK "https://vk.com/video-1_2?list=..." --name "A vs B" -p tv
 lineup add -r Direct https://example.com/live.m3u8 -p tv
 lineup ls [query] [--group G] [--playlist P] [--route R] [--health ok|dead]
 lineup show|edit|rm|enable|disable <channel>   # channel = id, exact name, or its stored source/identity

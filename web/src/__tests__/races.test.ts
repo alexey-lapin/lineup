@@ -28,7 +28,6 @@ const ch = (id: number, name: string) => ({
   id,
   name,
   enabled: true,
-  is_event: false,
   playlists: [],
   route_id: 2,
   route_name: 'Acestream',
@@ -65,7 +64,7 @@ const resolution = (route_id: number, input: string, suggestion: Record<string, 
   duplicate_of: null,
   duplicate_source: null,
   matches: [],
-  suggestion: { name: input, group_title: null, tvg_id: null, tvg_logo: null, is_event: false, ...suggestion }
+  suggestion: { name: input, group_title: null, tvg_id: null, tvg_logo: null, ...suggestion }
 })
 
 beforeEach(() => {
@@ -240,11 +239,11 @@ describe('ChannelForm suggestions', () => {
     await flush()
 
     api.resolve.mockResolvedValueOnce(
-      resolution(1, 'http://a', { name: 'VK 1_2', group_title: 'VK', tvg_id: 'A.uk', tvg_logo: 'http://l', is_event: true })
+      resolution(1, 'http://a', { name: 'VK 1_2', group_title: 'VK', tvg_id: 'A.uk', tvg_logo: 'http://l' })
     )
     vm.state.input = 'http://a'
     await vm.resolveInput()
-    expect([vm.state.group_title, vm.state.tvg_id, vm.state.is_event]).toEqual(['VK', 'A.uk', true])
+    expect([vm.state.group_title, vm.state.tvg_id]).toEqual(['VK', 'A.uk'])
 
     // The user edits the logo; the next source suggests nothing beyond a name.
     vm.state.tvg_logo = 'http://mine'
@@ -255,15 +254,6 @@ describe('ChannelForm suggestions', () => {
     expect(vm.state.name).toBe('b')
     expect(vm.state.group_title).toBe('')
     expect(vm.state.tvg_id).toBe('')
-    expect(vm.state.is_event).toBe(false)
     expect(vm.state.tvg_logo).toBe('http://mine')
-
-    // An event flag the user set by hand stays.
-    vm.state.is_event = true
-    api.resolve.mockResolvedValueOnce(resolution(1, 'http://c', { name: 'c' }))
-    vm.state.input = 'http://c'
-    await flush()
-    await vm.resolveInput()
-    expect(vm.state.is_event).toBe(true)
   })
 })

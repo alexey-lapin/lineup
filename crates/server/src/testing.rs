@@ -256,7 +256,6 @@ async fn matching(State(s): St, Json(req): Json<MatchRequest>) -> Response {
                         title: None,
                         region: None,
                         group: Some("VK".into()),
-                        event: Some(true),
                     },
                     warnings: vec![],
                 }),

@@ -281,8 +281,6 @@ impl Store {
                 tvg_logo: clean_opt(req.tvg_logo),
                 route_id: req.route_id,
                 validated: req.validated,
-                is_event: req.is_event,
-                kickoff_at: req.kickoff_at,
                 enabled: req.enabled,
             },
         )
@@ -322,12 +320,6 @@ impl Store {
         if let Some(v) = patch.tvg_logo {
             next.tvg_logo = clean_opt(v);
         }
-        if let Some(v) = patch.is_event {
-            next.is_event = v;
-        }
-        if let Some(v) = patch.kickoff_at {
-            next.kickoff_at = v;
-        }
         if let Some(v) = patch.enabled {
             next.enabled = v;
         }
@@ -348,23 +340,19 @@ impl Store {
             || next.group_title != cur.group_title
             || next.tvg_id != cur.tvg_id
             || next.tvg_logo != cur.tvg_logo
-            || next.is_event != cur.is_event
-            || next.kickoff_at != cur.kickoff_at
             || next.enabled != cur.enabled;
         if !meta_changed && !source_changed {
             return Ok(cur);
         }
 
         sqlx::query(
-            "UPDATE channels SET name=?, group_title=?, tvg_id=?, tvg_logo=?, is_event=?, kickoff_at=?, enabled=?,
+            "UPDATE channels SET name=?, group_title=?, tvg_id=?, tvg_logo=?, enabled=?,
              updated_at=? WHERE id=?",
         )
         .bind(&next.name)
         .bind(&next.group_title)
         .bind(&next.tvg_id)
         .bind(&next.tvg_logo)
-        .bind(next.is_event)
-        .bind(next.kickoff_at.map(|t| t.to_rfc3339()))
         .bind(next.enabled)
         .bind(now())
         .bind(id)
@@ -376,13 +364,10 @@ impl Store {
         }
         let affected: BTreeSet<String> = cur.playlists.iter().cloned().collect();
         tx.commit().await?;
-        // Guide-affecting fields: the tvg-id selects upstream data; event channels get placeholders
-        // built from their name and kickoff.
+        // Guide-affecting fields: the tvg-id selects upstream data, and a channel no source carries
+        // gets its name as programmes.
         let after = self.get_channel(id).await?;
-        let guide_changed = next.tvg_id != cur.tvg_id
-            || next.is_event != cur.is_event
-            || next.kickoff_at != cur.kickoff_at
-            || (next.is_event && next.name != cur.name);
+        let guide_changed = next.tvg_id != cur.tvg_id || next.name != cur.name;
         let in_playlists = !affected.is_empty();
         self.outputs_changed_locked(affected);
         if guide_changed && in_playlists {
@@ -708,8 +693,6 @@ impl Store {
                         tvg_logo: inc.tvg_logo.clone(),
                         route_id,
                         validated: inc.validated.clone(),
-                        is_event: false,
-                        kickoff_at: None,
                         enabled: true,
                     },
                 )
@@ -762,8 +745,6 @@ struct NewChannel {
     tvg_logo: Option<String>,
     route_id: i64,
     validated: Validated,
-    is_event: bool,
-    kickoff_at: Option<DateTime<Utc>>,
     enabled: bool,
 }
 
@@ -776,8 +757,6 @@ pub struct NewChannelRequest {
     pub route_id: i64,
     pub route_revision: u64,
     pub validated: Validated,
-    pub is_event: bool,
-    pub kickoff_at: Option<DateTime<Utc>>,
     pub enabled: bool,
     pub playlists: Vec<String>,
 }
@@ -789,8 +768,6 @@ pub struct ChannelUpdate {
     pub group_title: Option<Option<String>>,
     pub tvg_id: Option<Option<String>>,
     pub tvg_logo: Option<Option<String>>,
-    pub is_event: Option<bool>,
-    pub kickoff_at: Option<Option<DateTime<Utc>>>,
     pub enabled: Option<bool>,
     pub source: Option<SourceChange>,
 }
@@ -985,8 +962,8 @@ async fn insert_channel(conn: &mut SqliteConnection, c: &NewChannel) -> Result<i
     let v = &c.validated;
     let res = sqlx::query(
         "INSERT INTO channels(name, group_title, tvg_id, tvg_logo, route_id, source, identity, play, play_revision,
-                              is_event, kickoff_at, enabled, created_at, updated_at)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              enabled, created_at, updated_at)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&c.name)
     .bind(&c.group_title)
@@ -997,8 +974,6 @@ async fn insert_channel(conn: &mut SqliteConnection, c: &NewChannel) -> Result<i
     .bind(&v.identity)
     .bind(&v.play)
     .bind(&v.play_revision)
-    .bind(c.is_event)
-    .bind(c.kickoff_at.map(|t| t.to_rfc3339()))
     .bind(c.enabled)
     .bind(&ts)
     .bind(&ts)
@@ -1143,7 +1118,6 @@ async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result
                 .ok_or_else(|| Error::Internal(format!("channel {id} has a missing route {route_id}")))?;
             let source: String = r.try_get("source")?;
             let play: Option<String> = r.try_get("play")?;
-            let kickoff: Option<String> = r.try_get("kickoff_at")?;
             Ok(Channel {
                 id,
                 name: r.try_get("name")?,
@@ -1156,8 +1130,6 @@ async fn load_channels(conn: &mut SqliteConnection, only: Option<i64>) -> Result
                 play_url: channel_play_url(&route.config, &source, play.as_deref()),
                 source,
                 identity: r.try_get("identity")?,
-                is_event: r.try_get("is_event")?,
-                kickoff_at: kickoff.as_deref().map(parse_ts).transpose()?,
                 enabled: r.try_get("enabled")?,
                 playlists: by_channel.remove(&id).unwrap_or_default(),
                 health: health.remove(&id),
