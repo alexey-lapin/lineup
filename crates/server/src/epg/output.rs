@@ -269,10 +269,15 @@ pub fn event_blocks(name: &str, kickoff: Option<i64>, hour: i64) -> Vec<(i64, i6
 /// Longest synthetic programme.
 const BLOCK: i64 = 2 * HOUR;
 
-/// Split each block at multiples of [`BLOCK`] (even UTC hours); its own boundaries stay.
+/// Split each block longer than [`BLOCK`] at multiples of it (even UTC hours); its own boundaries
+/// stay, and blocks of at most [`BLOCK`] (such as a match) are kept whole.
 fn split(blocks: Vec<(i64, i64, String, Option<String>)>) -> Vec<(i64, i64, String, Option<String>)> {
     let mut out = Vec::new();
     for (start, stop, title, desc) in blocks {
+        if stop - start <= BLOCK {
+            out.push((start, stop, title, desc));
+            continue;
+        }
         let mut s = start;
         while s < stop {
             let next = (s.div_euclid(BLOCK) + 1).saturating_mul(BLOCK).min(stop);
@@ -342,12 +347,11 @@ mod tests {
             [
                 (0, 2 * HOUR, "Pre-match"),
                 (2 * HOUR, 3 * HOUR, "Pre-match"),
-                (3 * HOUR, 4 * HOUR, "Final"),
-                (4 * HOUR, 5 * HOUR, "Final"),
+                (3 * HOUR, 5 * HOUR, "Final"),
+                (5 * HOUR, 6 * HOUR, "Final (ended)"),
             ]
         );
-        assert_eq!(titled(&b, H)[4], (5 * HOUR, 6 * HOUR, "Final (ended)"));
-        assert!(b.iter().skip(4).all(|x| x.2 == "Final (ended)"));
+        assert!(b.iter().skip(3).all(|x| x.2 == "Final (ended)"));
         // Kickoff 48h away: all pre-match, in 2h blocks.
         let b = event_blocks("Final", Some(H + 48 * HOUR), H);
         assert_bounded(&b, H);
@@ -365,8 +369,13 @@ mod tests {
         let k = H + 3 * HOUR + 17 * 60;
         let b = event_blocks("Final", Some(k), H);
         assert_bounded(&b, H);
-        assert!(b.iter().any(|x| x.0 == k && x.2 == "Final"));
+        // The match stays one two-hour programme, even across an even hour.
+        let matches: Vec<_> = b.iter().filter(|x| x.2 == "Final").map(|x| (x.0, x.1)).collect();
+        assert_eq!(matches, [(k, k + EVENT_LENGTH)]);
         assert!(b.iter().any(|x| x.0 == k + EVENT_LENGTH && x.2 == "Final (ended)"));
+        // A short pre-match crossing an even hour is kept whole too.
+        let b = event_blocks("Final", Some(H + HOUR + 30 * 60), H + HOUR);
+        assert_eq!(titled(&b, H + HOUR)[0], (0, 30 * 60, "Pre-match"));
     }
 
     #[test]
