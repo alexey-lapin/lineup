@@ -161,8 +161,8 @@ Built per request from the per-source caches, for the same eligible channels as 
 - Programmes, relative to `now` truncated to the hour, covering now to +24h:
   - With `kickoff_at`: the logical blocks are "Pre-match" [−∞, kickoff), the title [kickoff, kickoff+2h), and the title marked "(ended)" [kickoff+2h, +∞).
   - Each block is clipped to the window [hour, hour+24h). Empty intersections are dropped.
-  - So a kickoff 48h away gives a single Pre-match block, and an event that already ended gives a single "(ended)" block starting at the current hour.
-  - Without kickoff: the title in a rolling block from now to +24h.
+  - Without kickoff: the title over the whole window.
+  - Every block longer than 2h is then split at even UTC hours (multiples of 2h since the epoch); the kickoff and kickoff+2h boundaries stay exact. Players therefore never show a day-long programme: a kickoff 48h away gives twelve Pre-match blocks, an event without kickoff gives 2h blocks of its title.
 - These blocks are a guide placeholder, not the broadcast's actual state (checks report that, §9).
 
 **Caching**

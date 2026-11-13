@@ -260,8 +260,30 @@ fn xmltv_time(ts: i64) -> String {
 
 /// Placeholder programmes for an event channel over `[hour, hour + 24h)`: "Pre-match" until
 /// kickoff, the name for two hours, then "<name> (ended)". Without a kickoff, the name for the whole
-/// window. Returns `(start, stop, title, desc)`.
+/// window. No block is longer than [`BLOCK`]: longer ones are split at even UTC hours, so players
+/// never show a day-long programme. Returns `(start, stop, title, desc)`.
 pub fn event_blocks(name: &str, kickoff: Option<i64>, hour: i64) -> Vec<(i64, i64, String, Option<String>)> {
+    split(spans(name, kickoff, hour))
+}
+
+/// Longest synthetic programme.
+const BLOCK: i64 = 2 * HOUR;
+
+/// Split each block at multiples of [`BLOCK`] (even UTC hours); its own boundaries stay.
+fn split(blocks: Vec<(i64, i64, String, Option<String>)>) -> Vec<(i64, i64, String, Option<String>)> {
+    let mut out = Vec::new();
+    for (start, stop, title, desc) in blocks {
+        let mut s = start;
+        while s < stop {
+            let next = (s.div_euclid(BLOCK) + 1).saturating_mul(BLOCK).min(stop);
+            out.push((s, next, title.clone(), desc.clone()));
+            s = next;
+        }
+    }
+    out
+}
+
+fn spans(name: &str, kickoff: Option<i64>, hour: i64) -> Vec<(i64, i64, String, Option<String>)> {
     let (lo, hi) = (hour, hour + WINDOW);
     let Some(k) = kickoff else {
         return vec![(lo, hi, name.to_string(), None)];
@@ -270,8 +292,13 @@ pub fn event_blocks(name: &str, kickoff: Option<i64>, hour: i64) -> Vec<(i64, i6
         DateTime::<Utc>::from_timestamp(k, 0).map(|t| format!("{name}, kickoff {} UTC", t.format("%Y-%m-%d %H:%M")));
     let blocks = [
         (i64::MIN, k, "Pre-match".to_string(), kickoff_desc),
-        (k, k + EVENT_LENGTH, name.to_string(), None),
-        (k + EVENT_LENGTH, i64::MAX, format!("{name} (ended)"), None),
+        (k, k.saturating_add(EVENT_LENGTH), name.to_string(), None),
+        (
+            k.saturating_add(EVENT_LENGTH),
+            i64::MAX,
+            format!("{name} (ended)"),
+            None,
+        ),
     ];
     blocks
         .into_iter()
@@ -288,33 +315,86 @@ mod tests {
 
     const H: i64 = 1_800_000_000 / HOUR * HOUR;
 
+    /// Contiguous, non-overlapping, at most [`BLOCK`] each, covering exactly the window.
+    fn assert_bounded(b: &[(i64, i64, String, Option<String>)], hour: i64) {
+        assert_eq!(b.first().unwrap().0, hour);
+        assert_eq!(b.last().unwrap().1, hour + WINDOW);
+        for w in b.windows(2) {
+            assert_eq!(w[0].1, w[1].0, "contiguous");
+        }
+        for (s, e, _, _) in b {
+            assert!(s < e && e - s <= BLOCK, "{s}..{e}");
+        }
+    }
+
+    fn titled(b: &[(i64, i64, String, Option<String>)], hour: i64) -> Vec<(i64, i64, &str)> {
+        b.iter().map(|(s, e, t, _)| (s - hour, e - hour, t.as_str())).collect()
+    }
+
     #[test]
     fn event_blocks_follow_kickoff() {
-        // Kickoff in 3h: pre-match, match, ended (clipped at the window end).
+        // H is an even hour. Kickoff in 3h: pre-match, match, ended; boundaries kept, long ones split.
+        assert_eq!(H % BLOCK, 0);
         let b = event_blocks("Final", Some(H + 3 * HOUR), H);
-        let spans: Vec<_> = b.iter().map(|(s, e, t, _)| (s - H, e - H, t.as_str())).collect();
+        assert_bounded(&b, H);
         assert_eq!(
-            spans,
+            titled(&b, H)[..4],
             [
-                (0, 3 * HOUR, "Pre-match"),
-                (3 * HOUR, 5 * HOUR, "Final"),
-                (5 * HOUR, WINDOW, "Final (ended)")
+                (0, 2 * HOUR, "Pre-match"),
+                (2 * HOUR, 3 * HOUR, "Pre-match"),
+                (3 * HOUR, 4 * HOUR, "Final"),
+                (4 * HOUR, 5 * HOUR, "Final"),
             ]
         );
-        // Kickoff 48h away: one pre-match block.
+        assert_eq!(titled(&b, H)[4], (5 * HOUR, 6 * HOUR, "Final (ended)"));
+        assert!(b.iter().skip(4).all(|x| x.2 == "Final (ended)"));
+        // Kickoff 48h away: all pre-match, in 2h blocks.
         let b = event_blocks("Final", Some(H + 48 * HOUR), H);
-        assert_eq!(b.len(), 1);
-        assert_eq!((b[0].0, b[0].1, b[0].2.as_str()), (H, H + WINDOW, "Pre-match"));
-        // Already over: one ended block from the current hour.
+        assert_bounded(&b, H);
+        assert_eq!(b.len(), 12);
+        assert!(b.iter().all(|x| x.2 == "Pre-match"));
+        // Already over: all ended.
         let b = event_blocks("Final", Some(H - 10 * HOUR), H);
-        assert_eq!(b.len(), 1);
-        assert_eq!((b[0].0, b[0].2.as_str()), (H, "Final (ended)"));
-        // Live now: the match block starts at the hour.
+        assert_bounded(&b, H);
+        assert!(b.iter().all(|x| x.2 == "Final (ended)"));
+        // Live now (kicked off an hour ago): the match until kickoff + 2h.
         let b = event_blocks("Final", Some(H - HOUR), H);
-        assert_eq!((b[0].0, b[0].1, b[0].2.as_str()), (H, H + HOUR, "Final"));
-        // No kickoff: a rolling block.
-        let b = event_blocks("Final", None, H);
-        assert_eq!((b[0].0, b[0].1), (H, H + WINDOW));
+        assert_eq!(titled(&b, H)[0], (0, HOUR, "Final"));
+        assert_eq!(b[1].2, "Final (ended)");
+        // A kickoff at an odd minute keeps its exact boundaries.
+        let k = H + 3 * HOUR + 17 * 60;
+        let b = event_blocks("Final", Some(k), H);
+        assert_bounded(&b, H);
+        assert!(b.iter().any(|x| x.0 == k && x.2 == "Final"));
+        assert!(b.iter().any(|x| x.0 == k + EVENT_LENGTH && x.2 == "Final (ended)"));
+    }
+
+    #[test]
+    fn event_blocks_without_kickoff_are_two_hours_on_even_hours() {
+        // Window starting on an odd hour: a 1h block first, then 2h blocks, the last one clipped.
+        let odd = H + HOUR;
+        let b = event_blocks("Match", None, odd);
+        assert_bounded(&b, odd);
+        assert_eq!(titled(&b, odd)[..2], [(0, HOUR, "Match"), (HOUR, 3 * HOUR, "Match")]);
+        assert_eq!(b.last().unwrap().1 - b.last().unwrap().0, HOUR);
+        // On an even hour: twelve 2h blocks.
+        let b = event_blocks("Match", None, H);
+        assert_eq!(b.len(), 12);
+        // Every hour of several days, with and without kickoffs around it.
+        for h in 0..72 {
+            let hour = H + h * HOUR;
+            for kickoff in [
+                None,
+                Some(H + 30 * HOUR),
+                Some(H + 30 * HOUR + 45 * 60),
+                Some(H - 100 * HOUR),
+            ] {
+                assert_bounded(&event_blocks("Match", kickoff, hour), hour);
+            }
+        }
+        // Extreme kickoffs don't overflow.
+        assert_bounded(&event_blocks("Match", Some(i64::MAX - 1), H), H);
+        assert_bounded(&event_blocks("Match", Some(i64::MIN + 1), H), H);
     }
 
     #[test]
