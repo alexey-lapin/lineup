@@ -170,7 +170,6 @@ fn hints(h: gateway_contract::Hints) -> Hints {
         title: clean(h.title),
         region: clean(h.region).map(|r| r.to_ascii_lowercase()),
         group: clean(h.group),
-        event: h.event,
     }
 }
 

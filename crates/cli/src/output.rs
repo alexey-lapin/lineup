@@ -61,7 +61,6 @@ pub fn channels(list: &[Channel]) {
                 } else {
                     format!("{} (disabled)", c.name)
                 };
-                let name = if c.is_event { format!("{name} [event]") } else { name };
                 vec![
                     c.id.to_string(),
                     name,
@@ -148,12 +147,6 @@ pub fn channel(c: &Channel) {
     println!("identity:   {}", c.identity);
     println!("play url:   {}", c.play_url);
     println!("enabled:    {}", c.enabled);
-    if c.is_event {
-        println!(
-            "event:      yes, kickoff {}",
-            c.kickoff_at.map(|k| k.to_rfc3339()).unwrap_or_else(|| "-".into())
-        );
-    }
     println!(
         "playlists:  {}",
         if c.playlists.is_empty() {
@@ -474,9 +467,6 @@ pub fn suggestion(r: &ResolveResponse) {
     }
     if let Some(l) = &s.tvg_logo {
         println!("  logo:     {l}");
-    }
-    if s.is_event {
-        println!("  event:    yes");
     }
     let others: Vec<String> = r
         .matches

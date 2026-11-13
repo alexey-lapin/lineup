@@ -58,7 +58,6 @@ pub fn match_inputs(inputs: &[String]) -> Vec<MatchResult> {
                     title: None,
                     region: None,
                     group: Some("VK".into()),
-                    event: Some(true),
                 },
                 warnings: vec![],
             }),

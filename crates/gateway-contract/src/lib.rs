@@ -126,9 +126,6 @@ pub struct Hints {
     pub region: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
-    /// The item is usually a one-off event.
-    #[serde(default)]
-    pub event: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

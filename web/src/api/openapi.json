@@ -1779,7 +1779,6 @@
           "source",
           "identity",
           "play_url",
-          "is_event",
           "enabled",
           "playlists",
           "created_at",
@@ -1817,16 +1816,6 @@
           "identity": {
             "type": "string",
             "description": "De-duplication key (unique per route)."
-          },
-          "is_event": {
-            "type": "boolean"
-          },
-          "kickoff_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
           },
           "name": {
             "type": "string"
@@ -1895,16 +1884,6 @@
           "input": {
             "type": "string",
             "description": "What to play, in a form the route accepts (a URL for Direct; the gateway rule's input)."
-          },
-          "is_event": {
-            "type": "boolean"
-          },
-          "kickoff_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
           },
           "name": {
             "type": "string"
@@ -2066,19 +2045,6 @@
               "string",
               "null"
             ]
-          },
-          "is_event": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "kickoff_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
           },
           "name": {
             "type": [
@@ -2537,13 +2503,6 @@
         "type": "object",
         "description": "Suggestions a gateway gives for a source.",
         "properties": {
-          "event": {
-            "type": [
-              "boolean",
-              "null"
-            ],
-            "description": "Usually a one-off event."
-          },
           "group": {
             "type": [
               "string",
@@ -3698,8 +3657,7 @@
       "Suggestion": {
         "type": "object",
         "required": [
-          "name",
-          "is_event"
+          "name"
         ],
         "properties": {
           "group_title": {
@@ -3707,9 +3665,6 @@
               "string",
               "null"
             ]
-          },
-          "is_event": {
-            "type": "boolean"
           },
           "name": {
             "type": "string"

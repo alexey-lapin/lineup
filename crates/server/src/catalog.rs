@@ -49,8 +49,6 @@ impl Catalog {
                 route_id: route.id,
                 route_revision: route.revision,
                 validated,
-                is_event: req.is_event,
-                kickoff_at: req.kickoff_at,
                 enabled: req.enabled,
                 playlists: req.playlists,
             })
@@ -80,8 +78,6 @@ impl Catalog {
                     group_title: patch.group_title,
                     tvg_id: patch.tvg_id,
                     tvg_logo: patch.tvg_logo,
-                    is_event: patch.is_event,
-                    kickoff_at: patch.kickoff_at,
                     enabled: patch.enabled,
                     source,
                 },
@@ -97,7 +93,6 @@ impl Catalog {
         let mut suggestion = Suggestion {
             name: routes::default_name(&route.config, &v),
             group_title: v.hints.group.clone(),
-            is_event: v.hints.event.unwrap_or(false),
             ..Default::default()
         };
         // A placeholder name matches nothing useful: rank guide channels only for a real title.

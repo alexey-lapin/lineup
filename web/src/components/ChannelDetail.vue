@@ -71,7 +71,6 @@ const links = computed(() => (props.channel ? playerLinks(props.channel.play_url
       <span v-if="channel" class="flex flex-wrap items-center gap-1.5">
         <span>{{ channel.route_name }}</span>
         <UBadge v-if="!channel.enabled" label="disabled" color="neutral" variant="subtle" size="sm" />
-        <UBadge v-if="channel.is_event" label="event" color="warning" variant="subtle" size="sm" />
         <UBadge v-if="!channel.route_enabled" label="route disabled" color="neutral" variant="outline" size="sm" />
       </span>
     </template>
@@ -116,13 +115,8 @@ const links = computed(() => (props.channel ? playerLinks(props.channel.play_url
             <dt class="text-muted">Guide</dt>
             <dd class="break-all">
               <template v-if="channel.tvg_id">{{ channel.tvg_id }}</template>
-              <span v-else-if="channel.is_event" class="text-muted">Event placeholder (no guide id)</span>
-              <span v-else class="text-muted">No guide id</span>
+              <span v-else class="text-muted">No guide id: its name, hour by hour</span>
             </dd>
-            <template v-if="channel.is_event">
-              <dt class="text-muted">Kickoff</dt>
-              <dd>{{ channel.kickoff_at ? when(channel.kickoff_at) : '—' }}</dd>
-            </template>
           </dl>
           <div v-if="links" class="flex flex-wrap gap-2">
             <UButton

@@ -269,8 +269,6 @@ pub struct Hints {
     /// Two-letter lowercase region, e.g. `de`.
     pub region: Option<String>,
     pub group: Option<String>,
-    /// Usually a one-off event.
-    pub event: Option<bool>,
 }
 
 // -------------------------------------------------------------------- channels
@@ -293,8 +291,6 @@ pub struct Channel {
     pub identity: String,
     /// The URL emitted in playlists.
     pub play_url: String,
-    pub is_event: bool,
-    pub kickoff_at: Option<DateTime<Utc>>,
     pub enabled: bool,
     /// Slugs of playlists containing this channel.
     pub playlists: Vec<String>,
@@ -317,10 +313,6 @@ pub struct ChannelCreate {
     pub route_id: i64,
     /// What to play, in a form the route accepts (a URL for Direct; the gateway rule's input).
     pub input: String,
-    #[serde(default)]
-    pub is_event: bool,
-    #[serde(default)]
-    pub kickoff_at: Option<DateTime<Utc>>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Playlists (by slug) to append the new channel to.
@@ -352,11 +344,6 @@ pub struct ChannelPatch {
     pub route_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_event: Option<bool>,
-    #[serde(default, with = "double_option", skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<DateTime<Utc>>)]
-    pub kickoff_at: Option<Option<DateTime<Utc>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
@@ -542,7 +529,6 @@ pub struct Suggestion {
     pub group_title: Option<String>,
     pub tvg_id: Option<String>,
     pub tvg_logo: Option<String>,
-    pub is_event: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

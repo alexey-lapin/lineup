@@ -105,8 +105,6 @@ async fn make_changes(store: &Arc<Store>) {
             tvg_logo: None,
             route_id: 1,
             input: "http://h/a.m3u8".into(),
-            is_event: false,
-            kickoff_at: None,
             enabled: true,
             playlists: vec!["jf".into()],
         })

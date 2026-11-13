@@ -68,8 +68,6 @@ async fn ch(s: &Store, name: &str, route_id: i64, v: Validated, playlists: &[&st
         route_id,
         route_revision: rev,
         validated: v,
-        is_event: false,
-        kickoff_at: None,
         enabled: true,
         playlists: playlists.iter().map(|s| s.to_string()).collect(),
     })
@@ -132,8 +130,6 @@ async fn create_dedup_and_render() {
         route_id: 2,
         route_revision: s.route_row(2).await.unwrap().revision,
         validated: ace(ACE2),
-        is_event: false,
-        kickoff_at: None,
         enabled: true,
         playlists: vec!["jf".into()],
     };
@@ -306,6 +302,8 @@ async fn events_follow_the_mutation_table() {
             slugs: vec!["jf".into()]
         }
     );
+    // A name can be guide content (channels no source carries show it).
+    assert_eq!(rx.try_recv().unwrap(), Event::EpgUpdated { sources: vec![] });
 
     // no-op patch emits nothing
     s.patch_channel(a.id, rename("A2")).await.unwrap();
@@ -352,8 +350,6 @@ async fn writes_refuse_a_route_that_changed_since_validation() {
             route_id: 2,
             route_revision: stale,
             validated: ace(ACE1),
-            is_event: false,
-            kickoff_at: None,
             enabled: true,
             playlists: vec![],
         })

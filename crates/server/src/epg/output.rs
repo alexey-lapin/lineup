@@ -2,9 +2,9 @@
 //!
 //! Channels come first, then programmes, as the XMLTV DTD requires. For each enabled non-event
 //! channel, the highest-priority enabled source carrying its effective tvg-id supplies the
-//! `<channel>` element and all of that source's programmes for it. Event channels always get a
-//! synthetic channel and placeholder programmes (§5). Responses are cached per playlist and keyed by
-//! the store's output version and the current hour.
+//! `<channel>` element and all of that source's programmes for it. A channel no source carries gets
+//! a synthetic channel and its name as hourly programmes (§5), so it still shows in guides. Responses
+//! are cached per playlist and keyed by the store's output version and the current hour.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -40,7 +40,6 @@ pub(super) struct GenData {
 }
 
 const HOUR: i64 = 3600;
-const EVENT_LENGTH: i64 = 2 * HOUR;
 const WINDOW: i64 = 24 * HOUR;
 
 impl Epg {
@@ -89,26 +88,19 @@ impl Epg {
     }
 
     async fn build(&self, channels: Vec<Channel>, hour: i64) -> Result<Rendered> {
-        // One entry per effective tvg-id, in playlist order. An event channel takes the id over.
+        // One entry per effective tvg-id, in playlist order: the first eligible channel names it.
         let mut order: Vec<String> = Vec::new();
         let mut by_id: HashMap<String, Channel> = HashMap::new();
         for c in channels {
             let id = c.tvg_id.clone().unwrap_or_else(|| format!("lineup.{}", c.id));
-            match by_id.get(&id) {
-                None => {
-                    order.push(id.clone());
-                    by_id.insert(id, c);
-                }
-                Some(prev) if c.is_event && !prev.is_event => {
-                    by_id.insert(id, c);
-                }
-                Some(_) => {}
+            if let std::collections::hash_map::Entry::Vacant(e) = by_id.entry(id.clone()) {
+                order.push(id);
+                e.insert(c);
             }
         }
-        let upstream_ids: Vec<String> = order.iter().filter(|id| !by_id[*id].is_event).cloned().collect();
         // Hold off generation cleanup from before the generations are chosen until the files are read.
         let _files = self.files_lock.read().await;
-        let lookup = self.store.epg_lookup(&upstream_ids).await?;
+        let lookup = self.store.epg_lookup(&order).await?;
         let mut gens: HashMap<(i64, i64), Arc<GenData>> = HashMap::new();
         let wanted: std::collections::BTreeSet<(i64, i64)> = lookup.values().copied().collect();
         for (source, generation) in wanted {
@@ -118,22 +110,23 @@ impl Epg {
         let mut plan = Vec::new();
         for id in &order {
             let ch = &by_id[id];
-            if ch.is_event {
-                plan.push(Planned::Event {
-                    id: id.clone(),
-                    name: ch.name.clone(),
-                    kickoff: ch.kickoff_at.map(|k| k.timestamp()),
-                });
-            } else if let Some(&(source, generation)) = lookup.get(id) {
+            if let Some(&(source, generation)) = lookup.get(id) {
                 plan.push(Planned::Upstream {
                     id: id.clone(),
                     name: ch.name.clone(),
                     data: gens[&(source, generation)].clone(),
                     programmes: self.gen_dir(source, generation).join(xmltv::PROGRAMMES),
                 });
+            } else {
+                // No enabled source carries this id: the channel's name, hour by hour.
+                plan.push(Planned::Fallback {
+                    id: id.clone(),
+                    name: ch.name.clone(),
+                });
             }
         }
-        let body = tokio::task::spawn_blocking(move || render(&plan, hour))
+        let offset = local_offset;
+        let body = tokio::task::spawn_blocking(move || render(&plan, hour, &offset))
             .await
             .map_err(|e| Error::Internal(e.to_string()))??;
         let etag = format!("\"{:016x}\"", crate::http::fnv1a64(body.as_bytes()));
@@ -175,14 +168,13 @@ enum Planned {
         data: Arc<GenData>,
         programmes: PathBuf,
     },
-    Event {
+    Fallback {
         id: String,
         name: String,
-        kickoff: Option<i64>,
     },
 }
 
-fn render(plan: &[Planned], hour: i64) -> Result<String> {
+fn render(plan: &[Planned], hour: i64, offset: &dyn Fn(i64) -> i32) -> Result<String> {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tv generator-info-name=\"lineup\">\n");
     for p in plan {
         match p {
@@ -193,7 +185,7 @@ fn render(plan: &[Planned], hour: i64) -> Result<String> {
                 }
                 None => synthetic_channel(&mut out, id, name),
             },
-            Planned::Event { id, name, .. } => synthetic_channel(&mut out, id, name),
+            Planned::Fallback { id, name } => synthetic_channel(&mut out, id, name),
         }
     }
     let mut files: HashMap<&PathBuf, File> = HashMap::new();
@@ -220,20 +212,17 @@ fn render(plan: &[Planned], hour: i64) -> Result<String> {
                     .map_err(|e| Error::Internal(format!("{}: {e}", programmes.display())))?;
                 out.push_str(std::str::from_utf8(&buf).map_err(|e| Error::Internal(e.to_string()))?);
             }
-            Planned::Event { id, name, kickoff } => {
-                for (start, stop, title, desc) in event_blocks(name, *kickoff, hour) {
-                    let _ = write!(
+            Planned::Fallback { id, name } => {
+                let bounds = hour_boundaries(hour, hour + WINDOW, offset);
+                for w in bounds.windows(2) {
+                    let _ = writeln!(
                         out,
-                        "<programme start=\"{}\" stop=\"{}\" channel=\"{}\"><title>{}</title>",
-                        xmltv_time(start),
-                        xmltv_time(stop),
+                        "<programme start=\"{}\" stop=\"{}\" channel=\"{}\"><title>{}</title></programme>",
+                        xmltv_time(w[0]),
+                        xmltv_time(w[1]),
                         escape(id.as_str()),
-                        escape(title.as_str())
+                        escape(name.as_str())
                     );
-                    if let Some(d) = desc {
-                        let _ = write!(out, "<desc>{}</desc>", escape(d.as_str()));
-                    }
-                    out.push_str("</programme>\n");
                 }
             }
         }
@@ -258,152 +247,113 @@ fn xmltv_time(ts: i64) -> String {
         .to_string()
 }
 
-/// Placeholder programmes for an event channel over `[hour, hour + 24h)`: "Pre-match" until
-/// kickoff, the name for two hours, then "<name> (ended)". Without a kickoff, the name for the whole
-/// window. No block is longer than [`BLOCK`]: longer ones are split at even UTC hours, so players
-/// never show a day-long programme. Returns `(start, stop, title, desc)`.
-pub fn event_blocks(name: &str, kickoff: Option<i64>, hour: i64) -> Vec<(i64, i64, String, Option<String>)> {
-    split(spans(name, kickoff, hour))
+/// The server's UTC offset (seconds east) at `ts`, from its timezone (`TZ`, read at start).
+fn local_offset(ts: i64) -> i32 {
+    use chrono::{Local, Offset, TimeZone};
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|t| Local.offset_from_utc_datetime(&t.naive_utc()).fix().local_minus_utc())
+        .unwrap_or(0)
 }
 
-/// Longest synthetic programme.
-const BLOCK: i64 = 2 * HOUR;
-
-/// Split each block longer than [`BLOCK`] at multiples of it (even UTC hours); its own boundaries
-/// stay, and blocks of at most [`BLOCK`] (such as a match) are kept whole.
-fn split(blocks: Vec<(i64, i64, String, Option<String>)>) -> Vec<(i64, i64, String, Option<String>)> {
-    let mut out = Vec::new();
-    for (start, stop, title, desc) in blocks {
-        if stop - start <= BLOCK {
-            out.push((start, stop, title, desc));
-            continue;
+/// Programme boundaries over `[from, to)`: `from`, every instant where local wall time is a whole
+/// hour, every instant the UTC offset changes (so a half-hour daylight-saving change still leaves no
+/// block longer than an hour), and `to`. `offset` gives the UTC offset in seconds at an instant.
+fn hour_boundaries(from: i64, to: i64, offset: &dyn Fn(i64) -> i32) -> Vec<i64> {
+    let mut out = vec![from];
+    let mut t = from;
+    while t < to {
+        let o = i64::from(offset(t));
+        // The next whole local hour, assuming the offset holds.
+        let mut next = t + HOUR - (t + o).rem_euclid(HOUR);
+        if i64::from(offset(next)) != o {
+            // The offset changes on the way: the first second with the new offset is a boundary.
+            let (mut lo, mut hi) = (t, next);
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if i64::from(offset(mid)) == o {
+                    lo = mid
+                } else {
+                    hi = mid
+                }
+            }
+            next = hi;
         }
-        let mut s = start;
-        while s < stop {
-            let next = (s.div_euclid(BLOCK) + 1).saturating_mul(BLOCK).min(stop);
-            out.push((s, next, title.clone(), desc.clone()));
-            s = next;
-        }
+        t = next.min(to);
+        out.push(t);
     }
     out
-}
-
-fn spans(name: &str, kickoff: Option<i64>, hour: i64) -> Vec<(i64, i64, String, Option<String>)> {
-    let (lo, hi) = (hour, hour + WINDOW);
-    let Some(k) = kickoff else {
-        return vec![(lo, hi, name.to_string(), None)];
-    };
-    let kickoff_desc =
-        DateTime::<Utc>::from_timestamp(k, 0).map(|t| format!("{name}, kickoff {} UTC", t.format("%Y-%m-%d %H:%M")));
-    let blocks = [
-        (i64::MIN, k, "Pre-match".to_string(), kickoff_desc),
-        (k, k.saturating_add(EVENT_LENGTH), name.to_string(), None),
-        (
-            k.saturating_add(EVENT_LENGTH),
-            i64::MAX,
-            format!("{name} (ended)"),
-            None,
-        ),
-    ];
-    blocks
-        .into_iter()
-        .filter_map(|(s, e, title, desc)| {
-            let (s, e) = (s.max(lo), e.min(hi));
-            (s < e).then_some((s, e, title, desc))
-        })
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// An hour boundary in UTC (2027-01-15 08:00 UTC, a Friday), and day starts around it.
     const H: i64 = 1_800_000_000 / HOUR * HOUR;
 
-    /// Contiguous, non-overlapping, at most [`BLOCK`] each, covering exactly the window.
-    fn assert_bounded(b: &[(i64, i64, String, Option<String>)], hour: i64) {
-        assert_eq!(b.first().unwrap().0, hour);
-        assert_eq!(b.last().unwrap().1, hour + WINDOW);
+    /// Contiguous, at most one hour each, exactly covering the window; every interior boundary is a
+    /// whole local hour or an offset change.
+    fn check(from: i64, offset: &dyn Fn(i64) -> i32) -> Vec<i64> {
+        let b = hour_boundaries(from, from + WINDOW, offset);
+        assert_eq!((b[0], *b.last().unwrap()), (from, from + WINDOW));
         for w in b.windows(2) {
-            assert_eq!(w[0].1, w[1].0, "contiguous");
+            assert!(w[0] < w[1] && w[1] - w[0] <= HOUR, "{}..{}", w[0], w[1]);
         }
-        for (s, e, _, _) in b {
-            assert!(s < e && e - s <= BLOCK, "{s}..{e}");
+        for &t in &b[1..b.len() - 1] {
+            let whole = (t + i64::from(offset(t))).rem_euclid(HOUR) == 0;
+            let change = offset(t - 1) != offset(t);
+            assert!(
+                whole || change,
+                "{t} is neither a whole local hour nor an offset change"
+            );
         }
+        b
     }
 
-    fn titled(b: &[(i64, i64, String, Option<String>)], hour: i64) -> Vec<(i64, i64, &str)> {
-        b.iter().map(|(s, e, t, _)| (s - hour, e - hour, t.as_str())).collect()
-    }
-
-    #[test]
-    fn event_blocks_follow_kickoff() {
-        // H is an even hour. Kickoff in 3h: pre-match, match, ended; boundaries kept, long ones split.
-        assert_eq!(H % BLOCK, 0);
-        let b = event_blocks("Final", Some(H + 3 * HOUR), H);
-        assert_bounded(&b, H);
-        assert_eq!(
-            titled(&b, H)[..4],
-            [
-                (0, 2 * HOUR, "Pre-match"),
-                (2 * HOUR, 3 * HOUR, "Pre-match"),
-                (3 * HOUR, 5 * HOUR, "Final"),
-                (5 * HOUR, 6 * HOUR, "Final (ended)"),
-            ]
-        );
-        assert!(b.iter().skip(3).all(|x| x.2 == "Final (ended)"));
-        // Kickoff 48h away: all pre-match, in 2h blocks.
-        let b = event_blocks("Final", Some(H + 48 * HOUR), H);
-        assert_bounded(&b, H);
-        assert_eq!(b.len(), 12);
-        assert!(b.iter().all(|x| x.2 == "Pre-match"));
-        // Already over: all ended.
-        let b = event_blocks("Final", Some(H - 10 * HOUR), H);
-        assert_bounded(&b, H);
-        assert!(b.iter().all(|x| x.2 == "Final (ended)"));
-        // Live now (kicked off an hour ago): the match until kickoff + 2h.
-        let b = event_blocks("Final", Some(H - HOUR), H);
-        assert_eq!(titled(&b, H)[0], (0, HOUR, "Final"));
-        assert_eq!(b[1].2, "Final (ended)");
-        // A kickoff at an odd minute keeps its exact boundaries.
-        let k = H + 3 * HOUR + 17 * 60;
-        let b = event_blocks("Final", Some(k), H);
-        assert_bounded(&b, H);
-        // The match stays one two-hour programme, even across an even hour.
-        let matches: Vec<_> = b.iter().filter(|x| x.2 == "Final").map(|x| (x.0, x.1)).collect();
-        assert_eq!(matches, [(k, k + EVENT_LENGTH)]);
-        assert!(b.iter().any(|x| x.0 == k + EVENT_LENGTH && x.2 == "Final (ended)"));
-        // A short pre-match crossing an even hour is kept whole too.
-        let b = event_blocks("Final", Some(H + HOUR + 30 * 60), H + HOUR);
-        assert_eq!(titled(&b, H + HOUR)[0], (0, 30 * 60, "Pre-match"));
+    /// An offset that is `before` until `at` and `after` from then on.
+    fn switch(at: i64, before: i32, after: i32) -> impl Fn(i64) -> i32 {
+        move |t| if t < at { before } else { after }
     }
 
     #[test]
-    fn event_blocks_without_kickoff_are_two_hours_on_even_hours() {
-        // Window starting on an odd hour: a 1h block first, then 2h blocks, the last one clipped.
-        let odd = H + HOUR;
-        let b = event_blocks("Match", None, odd);
-        assert_bounded(&b, odd);
-        assert_eq!(titled(&b, odd)[..2], [(0, HOUR, "Match"), (HOUR, 3 * HOUR, "Match")]);
-        assert_eq!(b.last().unwrap().1 - b.last().unwrap().0, HOUR);
-        // On an even hour: twelve 2h blocks.
-        let b = event_blocks("Match", None, H);
-        assert_eq!(b.len(), 12);
-        // Every hour of several days, with and without kickoffs around it.
-        for h in 0..72 {
-            let hour = H + h * HOUR;
-            for kickoff in [
-                None,
-                Some(H + 30 * HOUR),
-                Some(H + 30 * HOUR + 45 * 60),
-                Some(H - 100 * HOUR),
-            ] {
-                assert_bounded(&event_blocks("Match", kickoff, hour), hour);
-            }
-        }
-        // Extreme kickoffs don't overflow.
-        assert_bounded(&event_blocks("Match", Some(i64::MAX - 1), H), H);
-        assert_bounded(&event_blocks("Match", Some(i64::MIN + 1), H), H);
+    fn utc_gives_24_hourly_blocks() {
+        assert_eq!(check(H, &|_| 0).len(), 25);
+        // A window starting mid-hour: a short first block, then whole hours.
+        let b = check(H + 1200, &|_| 0);
+        assert_eq!(b[1], H + HOUR);
+    }
+
+    #[test]
+    fn new_york_across_both_changes() {
+        // Spring forward 02:00 EST -> 03:00 EDT (07:00 UTC); fall back 02:00 EDT -> 01:00 EST (06:00 UTC).
+        let spring = H + 3 * HOUR;
+        let b = check(H, &switch(spring, -5 * 3600, -4 * 3600));
+        assert!(b.contains(&spring));
+        assert_eq!(b.len(), 25, "whole-hour offsets: still hourly");
+        let fall = H + 3 * HOUR;
+        let b = check(H, &switch(fall, -4 * 3600, -5 * 3600));
+        assert_eq!(b.len(), 25);
+        // 01:00 EDT and 01:00 EST are distinct instants an hour apart.
+        assert!(b.contains(&(fall - HOUR)) && b.contains(&fall));
+    }
+
+    #[test]
+    fn kolkata_has_half_hour_boundaries() {
+        let b = check(H, &|_| 19_800);
+        assert_eq!(b[1], H + 1800, "first block to the next whole local hour");
+        assert_eq!(b.len(), 26, "25 blocks, first and last clipped");
+    }
+
+    #[test]
+    fn lord_howe_half_hour_changes_keep_blocks_at_most_an_hour() {
+        // Back: 02:00 +11:00 -> 01:30 +10:30 at 15:00 UTC; the next whole hour 02:00 +10:30 is 15:30 UTC.
+        let back = H + 2 * HOUR;
+        let b = check(H, &switch(back, 39_600, 37_800));
+        assert!(b.contains(&back) && b.contains(&(back + 1800)));
+        // Forward: 02:00 +10:30 -> 02:30 +11:00.
+        let fwd = H + 2 * HOUR + 1800;
+        let b = check(H, &switch(fwd, 37_800, 39_600));
+        assert!(b.contains(&fwd));
     }
 
     #[test]
