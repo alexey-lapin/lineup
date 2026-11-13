@@ -1,6 +1,6 @@
 //! `/p/<slug>/epg.xml`: the guide for one playlist, built from the published generations.
 //!
-//! Channels come first, then programmes, as the XMLTV DTD requires. For each enabled non-event
+//! Channels come first, then programmes, as the XMLTV DTD requires. For each enabled
 //! channel, the highest-priority enabled source carrying its effective tvg-id supplies the
 //! `<channel>` element and all of that source's programmes for it. A channel no source carries gets
 //! a synthetic channel and its name as hourly programmes (§5), so it still shows in guides. Responses
