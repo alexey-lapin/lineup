@@ -218,7 +218,7 @@ Site- or protocol-specific suggestion logic (cleaning engine names, region tags,
 
 **Events**
 - `playlist.changed {slugs}`
-- `epg.updated {sources?}`: guide content may have changed. Emitted by source publishes, source config changes, and event-channel guide changes.
+- `epg.updated {sources?}`: guide content may have changed. Emitted by source publishes, source config changes, and channel changes that affect the guide (tvg-id or name).
 - `channel.unhealthy {channel_id, name, detail}`
 - `channel.recovered {channel_id, name}`
 - UI-only (SSE, not hook event types): `channel.checked {channel_id}`, `settings.changed {keys, revision}`, `route.changed {route_id, revision}`.

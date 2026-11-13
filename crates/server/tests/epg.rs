@@ -308,6 +308,10 @@ mod output {
             .create_channel(ch("Shared", streams, &url(&"b".repeat(40)), Some("Shared.xx")))
             .await
             .unwrap();
+        let shared2 = catalog
+            .create_channel(ch("Shared Two", streams, &url(&"c".repeat(40)), Some("Shared.xx")))
+            .await
+            .unwrap();
         catalog
             .create_channel(ch("Unknown", streams, &url(ACE3), Some("Nope.xx")))
             .await
@@ -323,7 +327,7 @@ mod output {
             "{xml}"
         );
 
-        store
+        let source = store
             .create_epg_source(EpgSourceCreate {
                 url: format!("{base}/guide.xml.gz"),
                 name: None,
@@ -391,6 +395,52 @@ mod output {
             .unwrap();
         let xml = std::str::from_utf8(&r.body).unwrap();
         assert!(xml.contains("SportsOne.uk") && !xml.contains("Arena1.de"), "{xml}");
+        // A source owns the id even without programmes in the window: no fallback is mixed in.
+        assert!(!xml.contains("channel=\"SportsOne.uk\"><title>"), "{xml}");
+
+        // Turning the source off hands the id to the fallback; turning it on takes it back.
+        let toggle = |on: bool| {
+            store.patch_epg_source(
+                source.id,
+                api_types::EpgSourcePatch {
+                    enabled: Some(on),
+                    ..Default::default()
+                },
+            )
+        };
+        toggle(false).await.unwrap();
+        let off = epg
+            .playlist_xml_at("jf", now + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        let off = std::str::from_utf8(&off.body).unwrap();
+        assert!(
+            off.contains("channel=\"SportsOne.uk\"><title>Arena</title>") && !off.contains("Sports One"),
+            "{off}"
+        );
+        toggle(true).await.unwrap();
+        let on = epg
+            .playlist_xml_at("jf", now + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        let on = std::str::from_utf8(&on.body).unwrap();
+        assert!(
+            on.contains("Sports One") && !on.contains("channel=\"SportsOne.uk\"><title>"),
+            "{on}"
+        );
+
+        // Of two enabled channels sharing an id, the first in playlist order names it.
+        assert!(
+            on.contains("<display-name>Shared</display-name>") && !on.contains("Shared Two"),
+            "{on}"
+        );
+        store.move_item("jf", shared2.id, 1).await.unwrap();
+        let moved = epg
+            .playlist_xml_at("jf", now + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        let moved = std::str::from_utf8(&moved.body).unwrap();
+        assert!(moved.contains("<display-name>Shared Two</display-name>"), "{moved}");
 
         // Turning the streams' route off removes its channels from the guide too, and turning it on
         // again brings them back.
