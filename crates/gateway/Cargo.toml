@@ -26,7 +26,7 @@ axum = "0.8"
 reqwest = { version = "0.13", features = ["json", "query", "stream"] }
 futures-util = "0.3"
 bytes = "1"
-toml = "0.9"
+toml = "1.0"
 
 [dev-dependencies]
 tempfile = "3"
