@@ -2,7 +2,7 @@
 # Build: docker build -f Dockerfile.gateway -t lineup-gateway .
 
 # ---- gateway ---------------------------------------------------------------
-FROM rust:1.97-alpine AS rust
+FROM rust:1.100-alpine AS rust
 RUN apk add --no-cache musl-dev build-base
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
@@ -10,13 +10,13 @@ COPY crates ./crates
 RUN cargo build --release --locked -p lineup-gateway && cp target/release/lineup-gateway /lineup-gateway && rm -rf target
 
 # ---- extractors ------------------------------------------------------------
-FROM python:3.12-alpine AS tools
+FROM python:3.15-alpine AS tools
 # Pinned: update both together and run the gateway's smoke test (docs/gateway.md).
 RUN python -m venv /opt/tools \
     && /opt/tools/bin/pip install --no-cache-dir 'yt-dlp==2026.10.26' 'streamlink==8.6.0'
 
 # ---- runtime ---------------------------------------------------------------
-FROM python:3.12-alpine
+FROM python:3.15-alpine
 RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -H -u 10002 gateway
 COPY --from=tools /opt/tools /opt/tools

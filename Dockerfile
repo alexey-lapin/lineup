@@ -8,7 +8,7 @@ COPY web/ ./
 RUN pnpm build
 
 # ---- server + CLI ----------------------------------------------------------
-FROM rust:1.97-alpine AS rust
+FROM rust:1.100-alpine AS rust
 RUN apk add --no-cache musl-dev build-base cmake perl
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
@@ -18,7 +18,7 @@ COPY --from=web /src/web/dist ./web/dist
 RUN cargo build --release --locked -p lineup && cp target/release/lineup /lineup && rm -rf target
 
 # ---- runtime ---------------------------------------------------------------
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -H -u 10001 lineup \
     && mkdir -p /data && chown lineup /data
