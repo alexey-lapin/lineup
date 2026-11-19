@@ -14,21 +14,21 @@ Open `http://<host>:9300`. On a phone, add the page to the home screen to use it
 
 ## Set up routes
 
-A route is how channels are played, set up under **Routes** (or with `lineup route`). A new installation has one route, **Direct**, for stream URLs that are put in playlists as they are. Anything that needs work before it plays (an Acestream id, a video page) goes through a **gateway**: a separate service that speaks lineup's gateway contract, such as lineup-gateway. Add a gateway route for each of the gateway's rules you use:
+A route is how channels are played, set up under **Routes** (or with `lineup route`). A new installation has one route, **Direct**, for stream URLs that are put in playlists as they are. Anything that needs work before it plays (an id, a page that has to be looked up) goes through a **gateway**: a separate service that speaks lineup's gateway contract, such as [lineup-gateway](gateway.md). Add a gateway route for each of the gateway's rules you use:
 
 ```sh
-lineup route test --gateway http://media-host:8099              # lists the gateway's rules
-lineup route add Acestream --gateway http://media-host:8099 --rule acestream
-lineup route add VK --gateway http://media-host:8099 --rule vk
-lineup route test VK --input "https://vk.com/video-1_2"          # try an input without saving
+lineup route test --gateway http://gateway-host:8099             # lists the gateway's rules
+lineup route add Streams --gateway http://gateway-host:8099 --rule <rule>
+lineup route add Pages --gateway http://gateway-host:8099 --rule <another rule>
+lineup route test Pages --input "<a link>"                       # try an input without saving
 lineup route ls
 ```
 
-Playlists send players to the gateway (or to the service it points at, such as acexy for Acestream), so use addresses that your players and media server can reach, not `localhost`. Where the gateway points players is the gateway's configuration, not lineup's.
+Playlists send players to the gateway (or to the service it points at), so use addresses that your players and media server can reach, not `localhost`. Where the gateway points players is the gateway's configuration, not lineup's.
 
 When you add a channel you pick its route, and the input is validated with that route only: the gateway answers with the canonical source, a play URL and suggestions (a title, a group). If the gateway is down, adding, editing and importing channels of its routes fail with a gateway error (CLI exit code 6); existing playlists and guides keep working, because lineup never calls a gateway to serve them.
 
-A route can be disabled: its channels keep their playlists and positions but are left out of playlists and guides until it is enabled again. Its kind and rule never change; create another route and move the channels (`lineup edit <channel> --route <route>`). Changing a gateway route's address (`lineup route edit VK --base-url …`) revalidates every channel with the new address first, and changes nothing if any fails. `lineup route resync <route>` revalidates every channel with the gateway now; lineup also does that on its own when the gateway reports that its rule changed.
+A route can be disabled: its channels keep their playlists and positions but are left out of playlists and guides until it is enabled again. Its kind and rule never change; create another route and move the channels (`lineup edit <channel> --route <route>`). Changing a gateway route's address (`lineup route edit Pages --base-url …`) revalidates every channel with the new address first, and changes nothing if any fails. `lineup route resync <route>` revalidates every channel with the gateway now; lineup also does that on its own when the gateway reports that its rule changed.
 
 ## Point the CLI at it
 
@@ -54,13 +54,13 @@ CLI binaries for macOS and Linux (x86_64 and arm64) are attached to each GitHub 
 If you already have an M3U file, import it. Every entry is validated with the route you give; entries that route does not accept are skipped and listed, so a file with several kinds of channels is imported once per route. Preview first; nothing is written until the command without `--dry-run`.
 
 ```sh
-lineup import ./channels.m3u -p tv -r Acestream --dry-run
-lineup import ./channels.m3u -p tv -r Acestream
-lineup import ./channels.m3u -p tv -r VK
+lineup import ./channels.m3u -p tv -r Streams --dry-run
+lineup import ./channels.m3u -p tv -r Streams
+lineup import ./channels.m3u -p tv -r Pages
 lineup import ./channels.m3u -p tv -r Direct --dry-run   # check what is left before importing the rest as direct
 ```
 
-Gateway rules recognise their inputs in their usual forms (for Acestream: acexy or engine URLs, also behind a path prefix, `acestream://` ids). If the gateway fails during an import, nothing is written. Re-importing is safe: channels that already exist on the route are reused and their details are kept, and the report shows where the file differs (including a different source for the same channel).
+Gateway rules recognise their inputs in their usual forms, which can include play URLs of other services already in your file. If the gateway fails during an import, nothing is written. Re-importing is safe: channels that already exist on the route are reused and their details are kept, and the report shows where the file differs (including a different source for the same channel).
 
 ## Use the playlist
 
@@ -145,7 +145,7 @@ If the task id ever changes (a 404 in `lineup hook deliveries`), look it up agai
 
 ## Upgrading from 0.4
 
-lineup 0.5 starts from a new database and cannot open a 0.4 one: it refuses to start and leaves the old file untouched. Integrations are replaced by routes, and Acestream and VK support moved out of lineup into a gateway. To move over:
+lineup 0.5 starts from a new database and cannot open a 0.4 one: it refuses to start and leaves the old file untouched. Integrations are replaced by routes, and the protocol support they had moved out of lineup into a gateway. To move over:
 
 1. Before upgrading, while 0.4 is still running, save what you will need (into an empty folder):
 
@@ -161,19 +161,19 @@ lineup 0.5 starts from a new database and cannot open a 0.4 one: it refuses to s
    lineup --json integration ls > integrations.json
    ```
 
-2. Run a gateway that has the rules you need (for example lineup-gateway with its `acestream` and `vk` rules), configured with the engine and acexy addresses from `integrations.json`.
+2. Run a gateway that has rules for what your integrations covered (for example [lineup-gateway](gateway.md)), configured with the addresses from `integrations.json`.
 3. Stop and remove the 0.4 container, and keep its volume as the backup, with the 0.4 image tag in case you roll back.
 4. Start 0.5 on a new, empty volume (change the volume's `name:` in the compose file, for example to `lineup-data-0.5`, and the image tag).
-5. Add the gateway routes (above), then import each playlist once per route, previewing first. The gateway recognises its own and acexy's stream URLs; old VK proxy URLs (`/vk/<owner>_<video>`) are recognised if the gateway's VK rule accepts them, otherwise add those channels again from their vk.com links.
+5. Add the gateway routes (above), then import each playlist once per route, previewing first. Entries whose 0.4 play URLs no rule accepts are skipped and listed; add those channels again from their original links.
 6. From the JSON records, add back the channels in no playlist and disable the ones that were disabled. Event flags and kickoff times no longer exist in 0.5. Then add the guide sources and hooks again, and set the check schedule under Settings if you used one.
 
 Imported channels take their name, group, tvg-id and logo from the M3U.
 
 ## Health checks
 
-lineup checks channels through their route's gateway, when the gateway's rule supports checks; how a check is done is up to the gateway. For Acestream, lineup-gateway starts a short engine session, reads its statistics and stops it again, and first asks acexy whether anyone is watching, skipping the channel if so. A check may also report what the source is now: live, ended with the recording not ready yet, or a recording.
+lineup checks channels through their route's gateway, when the gateway's rule supports checks; how a check is done is up to the gateway (for example, it may skip a stream someone is watching and report it as skipped). A check may also report what the source is now: live, ended with the recording not ready yet, or a recording.
 
-Clicking a channel opens its details: what the gateway observes now (for Acestream, while someone watches through acexy: peers, speeds and players; opening it never starts a stream), plus the latest check and **Check now**. `lineup info <channel>` prints the same.
+Clicking a channel opens its details: what the gateway observes now (whatever facts its rule reports, such as whether someone is watching; opening it never starts a stream), plus the latest check and **Check now**. `lineup info <channel>` prints the same.
 
 ```sh
 lineup check "Sports One"   # one channel, waits for the result

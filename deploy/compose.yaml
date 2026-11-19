@@ -2,7 +2,7 @@
 #
 #   docker compose up -d
 #
-# Then open http://<host>:9300 and set up Acestream and the VK proxy under Integrations.
+# Then open http://<host>:9300 and add routes under Routes (gateways run as their own services).
 name: lineup
 
 services:

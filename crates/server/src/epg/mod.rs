@@ -62,7 +62,7 @@ impl Epg {
         &self.store
     }
 
-    /// The outgoing HTTP client (also used for engine lookups).
+    /// The outgoing HTTP client.
     pub fn client(&self) -> &reqwest::Client {
         &self.client
     }

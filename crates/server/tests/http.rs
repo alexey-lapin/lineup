@@ -8,8 +8,8 @@ use lineup_server::{Store, http::router};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const ACE: &str = "41169a3f280a5537b0611b775e926852d372743d";
-const ACE2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
+const ID: &str = "41169a3f280a5537b0611b775e926852d372743d";
+const ID2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
 const DIRECT: i64 = 1;
 
 async fn app() -> axum::Router {
@@ -69,7 +69,7 @@ async fn m3u(app: &axum::Router, slug: &str) -> String {
 async fn crud_and_errors() {
     let gw = StubGateway::start().await;
     let app = app().await;
-    let ace = gateway_route(&app, &gw, "Acestream", "acestream").await;
+    let ids = gateway_route(&app, &gw, "Ids", "ids").await;
     let (s, _, _) = call(&app, "POST", "/api/v1/playlists", Some(json!({"slug": "jf"}))).await;
     assert_eq!(s, StatusCode::CREATED);
 
@@ -77,16 +77,16 @@ async fn crud_and_errors() {
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Alpha", "route_id": ace, "input": format!("acestream://{ACE}"), "playlists": ["jf"]})),
+        Some(json!({"name": "Alpha", "route_id": ids, "input": format!("id://{ID}"), "playlists": ["jf"]})),
     )
     .await;
     assert_eq!(s, StatusCode::CREATED, "{ch}");
-    assert_eq!(ch["source"], format!("acestream://{ACE}"));
-    assert_eq!(ch["identity"], format!("ace:{ACE}"));
-    assert_eq!(ch["play_url"], format!("http://acexy:8080/ace/getstream?id={ACE}"));
+    assert_eq!(ch["source"], format!("id://{ID}"));
+    assert_eq!(ch["identity"], format!("id:{ID}"));
+    assert_eq!(ch["play_url"], format!("http://upstream:8080/stream?id={ID}"));
     assert_eq!(
         (ch["route_id"].as_i64(), ch["route_name"].as_str()),
-        (Some(ace), Some("Acestream"))
+        (Some(ids), Some("Ids"))
     );
 
     // Another input form of the same identity is a duplicate.
@@ -94,7 +94,7 @@ async fn crud_and_errors() {
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Dup", "route_id": ace, "input": ACE.to_uppercase()})),
+        Some(json!({"name": "Dup", "route_id": ids, "input": ID.to_uppercase()})),
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "{e}");
@@ -105,14 +105,11 @@ async fn crud_and_errors() {
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "X", "route_id": ace, "input": "https://example.com/live.m3u8"})),
+        Some(json!({"name": "X", "route_id": ids, "input": "https://example.com/live.m3u8"})),
     )
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{e}");
-    assert!(
-        e["error"]["message"].as_str().unwrap().contains("not an Acestream"),
-        "{e}"
-    );
+    assert!(e["error"]["message"].as_str().unwrap().contains("not an id"), "{e}");
     // The same URL on the direct route is fine.
     let (s, _, d) = call(
         &app,
@@ -157,14 +154,14 @@ async fn crud_and_errors() {
         &app,
         "PATCH",
         &format!("/api/v1/channels/{id}"),
-        Some(json!({"input": ACE2})),
+        Some(json!({"input": ID2})),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{c}");
-    assert_eq!(c["identity"], format!("ace:{ACE2}"));
+    assert_eq!(c["identity"], format!("id:{ID2}"));
 
     // Channels filter by route.
-    let (_, _, l) = call(&app, "GET", &format!("/api/v1/channels?route_id={ace}"), None).await;
+    let (_, _, l) = call(&app, "GET", &format!("/api/v1/channels?route_id={ids}"), None).await;
     assert_eq!(l.as_array().unwrap().len(), 1);
 
     let (s, _, _) = call(&app, "DELETE", &format!("/api/v1/channels/{id}"), None).await;
@@ -175,13 +172,13 @@ async fn crud_and_errors() {
 async fn gateway_failures_fail_writes_and_keep_output() {
     let gw = StubGateway::start().await;
     let app = app().await;
-    let ace = gateway_route(&app, &gw, "Acestream", "acestream").await;
+    let ids = gateway_route(&app, &gw, "Ids", "ids").await;
     call(&app, "POST", "/api/v1/playlists", Some(json!({"slug": "jf"}))).await;
     let (s, _, _) = call(
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Alpha", "route_id": ace, "input": ACE, "playlists": ["jf"]})),
+        Some(json!({"name": "Alpha", "route_id": ids, "input": ID, "playlists": ["jf"]})),
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
@@ -192,17 +189,17 @@ async fn gateway_failures_fail_writes_and_keep_output() {
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Beta", "route_id": ace, "input": ACE2})),
+        Some(json!({"name": "Beta", "route_id": ids, "input": ID2})),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_GATEWAY, "{e}");
     assert_eq!(e["error"]["code"], "gateway_error");
-    let text = format!("#EXTM3U\n#EXTINF:-1,Beta\n{ACE2}\n");
+    let text = format!("#EXTM3U\n#EXTINF:-1,Beta\n{ID2}\n");
     let (s, _, e) = call(
         &app,
         "POST",
         "/api/v1/import",
-        Some(json!({"m3u_text": text, "playlist_slug": "new", "route_id": ace})),
+        Some(json!({"m3u_text": text, "playlist_slug": "new", "route_id": ids})),
     )
     .await;
     assert_eq!(s, StatusCode::BAD_GATEWAY, "{e}");
@@ -216,7 +213,7 @@ async fn gateway_failures_fail_writes_and_keep_output() {
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Beta", "route_id": ace, "input": ACE2})),
+        Some(json!({"name": "Beta", "route_id": ids, "input": ID2})),
     )
     .await;
     assert_eq!(
@@ -229,7 +226,7 @@ async fn gateway_failures_fail_writes_and_keep_output() {
         &app,
         "POST",
         "/api/v1/import",
-        Some(json!({"m3u_text": format!("#EXTM3U\n#EXTINF:-1,B\n{ACE2}\n"), "playlist_slug": "x", "route_id": ace, "dry_run": true})),
+        Some(json!({"m3u_text": format!("#EXTM3U\n#EXTINF:-1,B\n{ID2}\n"), "playlist_slug": "x", "route_id": ids, "dry_run": true})),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{r}");
@@ -240,12 +237,12 @@ async fn gateway_failures_fail_writes_and_keep_output() {
 
     // Answers in another order than asked are refused, never assigned by position.
     gw.fail(Failure::ReorderMatch);
-    let text = format!("#EXTM3U\n#EXTINF:-1,A\n{ACE}\n#EXTINF:-1,B\n{ACE2}\n");
+    let text = format!("#EXTM3U\n#EXTINF:-1,A\n{ID}\n#EXTINF:-1,B\n{ID2}\n");
     let (s, _, e) = call(
         &app,
         "POST",
         "/api/v1/import",
-        Some(json!({"m3u_text": text, "playlist_slug": "new", "route_id": ace})),
+        Some(json!({"m3u_text": text, "playlist_slug": "new", "route_id": ids})),
     )
     .await;
     assert_eq!(
@@ -259,7 +256,7 @@ async fn gateway_failures_fail_writes_and_keep_output() {
         &app,
         "POST",
         "/api/v1/resolve",
-        Some(json!({"route_id": ace, "input": ACE2})),
+        Some(json!({"route_id": ids, "input": ID2})),
     )
     .await;
     assert_eq!(
@@ -272,14 +269,14 @@ async fn gateway_failures_fail_writes_and_keep_output() {
         &app,
         "POST",
         "/api/v1/routes",
-        Some(json!({"name": "Dead", "config": {"kind": "gateway", "base_url": "http://127.0.0.1:1", "rule": "acestream"}})),
+        Some(json!({"name": "Dead", "config": {"kind": "gateway", "base_url": "http://127.0.0.1:1", "rule": "ids"}})),
     )
     .await;
     let (s, _, e) = call(
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Beta", "route_id": dead["id"], "input": ACE2})),
+        Some(json!({"name": "Beta", "route_id": dead["id"], "input": ID2})),
     )
     .await;
     assert_eq!(
@@ -291,16 +288,16 @@ async fn gateway_failures_fail_writes_and_keep_output() {
 #[tokio::test]
 async fn resolve_suggests_and_reports_duplicates() {
     let gw = StubGateway::start().await;
-    gw.set_title(ACE, "Arena 1");
+    gw.set_title(ID, "Arena 1");
     let app = app().await;
-    let ace = gateway_route(&app, &gw, "Acestream", "acestream").await;
-    let vk = gateway_route(&app, &gw, "VK", "vk").await;
+    let ids = gateway_route(&app, &gw, "Ids", "ids").await;
+    let pages = gateway_route(&app, &gw, "Pages", "pages").await;
 
     let (s, _, r) = call(
         &app,
         "POST",
         "/api/v1/resolve",
-        Some(json!({"route_id": ace, "input": ACE})),
+        Some(json!({"route_id": ids, "input": ID})),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{r}");
@@ -312,21 +309,21 @@ async fn resolve_suggests_and_reports_duplicates() {
         &app,
         "POST",
         "/api/v1/resolve",
-        Some(json!({"route_id": vk, "input": "https://vkvideo.ru/video-1_2?list=a"})),
+        Some(json!({"route_id": pages, "input": "https://m.video.example/v/12?key=a"})),
     )
     .await;
-    assert_eq!(r["source"], "https://vk.com/video-1_2?list=a");
+    assert_eq!(r["source"], "https://video.example/v/12?key=a");
     assert_eq!(
-        r["suggestion"]["name"], "vk:-1_2",
+        r["suggestion"]["name"], "page:12",
         "no title: the identity is the placeholder"
     );
-    assert_eq!(r["suggestion"]["group_title"].as_str(), Some("VK"));
+    assert_eq!(r["suggestion"]["group_title"].as_str(), Some("Video"));
     assert!(r["suggestion"].get("is_event").is_none(), "no event flag any more");
     assert!(
         r["play_url"]
             .as_str()
             .unwrap()
-            .starts_with(&format!("{}/play/vk.m3u8?ref=", gw.url)),
+            .starts_with(&format!("{}/play/pages.m3u8?ref=", gw.url)),
         "{r}"
     );
 
@@ -334,7 +331,7 @@ async fn resolve_suggests_and_reports_duplicates() {
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Match", "route_id": vk, "input": "https://vk.com/video-1_2?list=a"})),
+        Some(json!({"name": "Match", "route_id": pages, "input": "https://video.example/v/12?key=a"})),
     )
     .await;
     // The same video with a new list token: a duplicate whose stored source differs.
@@ -342,20 +339,20 @@ async fn resolve_suggests_and_reports_duplicates() {
         &app,
         "POST",
         "/api/v1/resolve",
-        Some(json!({"route_id": vk, "input": "https://vk.com/video-1_2?list=b"})),
+        Some(json!({"route_id": pages, "input": "https://video.example/v/12?key=b"})),
     )
     .await;
     assert_eq!(r["duplicate_of"], c["id"]);
-    assert_eq!(r["duplicate_source"], "https://vk.com/video-1_2?list=a");
+    assert_eq!(r["duplicate_source"], "https://video.example/v/12?key=a");
     // Updating it is a channel edit with the new input.
     let (_, _, c2) = call(
         &app,
         "PATCH",
         &format!("/api/v1/channels/{}", c["id"]),
-        Some(json!({"input": "https://vk.com/video-1_2?list=b"})),
+        Some(json!({"input": "https://video.example/v/12?key=b"})),
     )
     .await;
-    assert_eq!(c2["source"], "https://vk.com/video-1_2?list=b");
+    assert_eq!(c2["source"], "https://video.example/v/12?key=b");
 }
 
 #[tokio::test]
@@ -371,13 +368,13 @@ async fn routes_api() {
         &app,
         "POST",
         "/api/v1/routes/test",
-        Some(json!({"config": {"kind": "gateway", "base_url": gw.url, "rule": "vk"}, "input": "https://vk.com/video1_2"})),
+        Some(json!({"config": {"kind": "gateway", "base_url": gw.url, "rule": "pages"}, "input": "https://video.example/v/12"})),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(t["ok"], true, "{t}");
     assert_eq!(t["gateway"]["rules"].as_array().unwrap().len(), 2);
-    assert_eq!(t["sample"]["identity"], "vk:1_2");
+    assert_eq!(t["sample"]["identity"], "page:12");
     let (_, _, t) = call(
         &app,
         "POST",
@@ -391,7 +388,7 @@ async fn routes_api() {
         &app,
         "POST",
         "/api/v1/routes/test",
-        Some(json!({"config": {"kind": "gateway", "base_url": "http://127.0.0.1:1", "rule": "vk"}})),
+        Some(json!({"config": {"kind": "gateway", "base_url": "http://127.0.0.1:1", "rule": "pages"}})),
     )
     .await;
     assert_eq!(t["ok"], false);
@@ -399,12 +396,12 @@ async fn routes_api() {
         &app,
         "POST",
         "/api/v1/routes/test",
-        Some(json!({"config": {"kind": "gateway", "base_url": "ftp://x", "rule": "vk"}})),
+        Some(json!({"config": {"kind": "gateway", "base_url": "ftp://x", "rule": "pages"}})),
     )
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let id = gateway_route(&app, &gw, "Acestream", "acestream").await;
+    let id = gateway_route(&app, &gw, "Ids", "ids").await;
     let (_, _, st) = call(&app, "GET", &format!("/api/v1/routes/{id}/status"), None).await;
     assert_eq!(
         (st["ok"].as_bool(), st["pending_channels"].as_i64()),
@@ -418,11 +415,14 @@ async fn routes_api() {
         &app,
         "PATCH",
         &format!("/api/v1/routes/{id}"),
-        Some(json!({"name": "Ace", "enabled": false})),
+        Some(json!({"name": "Main", "enabled": false})),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{r}");
-    assert_eq!((r["name"].as_str(), r["enabled"].as_bool()), (Some("Ace"), Some(false)));
+    assert_eq!(
+        (r["name"].as_str(), r["enabled"].as_bool()),
+        (Some("Main"), Some(false))
+    );
     let (s, _, _) = call(&app, "PATCH", "/api/v1/routes/1", Some(json!({"base_url": "http://x"}))).await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "direct routes have no base URL");
 
@@ -440,13 +440,13 @@ async fn routes_api() {
 async fn m3u_output_and_etag_follow_route_changes() {
     let gw = StubGateway::start().await;
     let app = app().await;
-    let ace = gateway_route(&app, &gw, "Acestream", "acestream").await;
+    let ids = gateway_route(&app, &gw, "Ids", "ids").await;
     call(&app, "POST", "/api/v1/playlists", Some(json!({"slug": "jf"}))).await;
     call(
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "Alpha", "route_id": ace, "input": ACE, "playlists": ["jf"]})),
+        Some(json!({"name": "Alpha", "route_id": ids, "input": ID, "playlists": ["jf"]})),
     )
     .await;
 
@@ -459,7 +459,7 @@ async fn m3u_output_and_etag_follow_route_changes() {
     assert_eq!(res.headers()[header::CONTENT_TYPE], "audio/x-mpegurl; charset=utf-8");
     let etag = res.headers()[header::ETAG].clone();
     let body = res.into_body().collect().await.unwrap().to_bytes();
-    assert!(String::from_utf8_lossy(&body).contains(&format!("http://acexy:8080/ace/getstream?id={ACE}")));
+    assert!(String::from_utf8_lossy(&body).contains(&format!("http://upstream:8080/stream?id={ID}")));
 
     let res = app
         .clone()
@@ -473,10 +473,10 @@ async fn m3u_output_and_etag_follow_route_changes() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
 
-    // The gateway now plays from another acexy: a resync updates the stored play URL, which
+    // The gateway now plays from another upstream: a resync updates the stored play URL, which
     // changes the body, so the old ETag no longer matches.
-    gw.set_acexy("http://acexy-new:8080", "2");
-    let (_, _, rep) = call(&app, "POST", &format!("/api/v1/routes/{ace}/resync"), None).await;
+    gw.set_upstream("http://upstream-new:8080", "2");
+    let (_, _, rep) = call(&app, "POST", &format!("/api/v1/routes/{ids}/resync"), None).await;
     assert_eq!(rep["updated"], 1, "{rep}");
     let res = app
         .clone()
@@ -489,7 +489,7 @@ async fn m3u_output_and_etag_follow_route_changes() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    assert!(m3u(&app, "jf").await.contains("acexy-new"));
+    assert!(m3u(&app, "jf").await.contains("upstream-new"));
 
     let (s, _, _) = call(&app, "GET", "/p/missing.m3u", None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -502,22 +502,22 @@ async fn base_url_changes_revalidate_every_channel() {
     let gw = StubGateway::start().await;
     let other = StubGateway::start().await;
     let app = app().await;
-    let vk = gateway_route(&app, &gw, "VK", "vk").await;
+    let pages = gateway_route(&app, &gw, "Pages", "pages").await;
     call(&app, "POST", "/api/v1/playlists", Some(json!({"slug": "jf"}))).await;
     call(
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "M", "route_id": vk, "input": "https://vk.com/video-1_2", "playlists": ["jf"]})),
+        Some(json!({"name": "M", "route_id": pages, "input": "https://video.example/v/12", "playlists": ["jf"]})),
     )
     .await;
-    assert!(m3u(&app, "jf").await.contains(&format!("{}/play/vk.m3u8", gw.url)));
+    assert!(m3u(&app, "jf").await.contains(&format!("{}/play/pages.m3u8", gw.url)));
 
     // An unreachable new base is refused; nothing changes.
     let (s, _, e) = call(
         &app,
         "PATCH",
-        &format!("/api/v1/routes/{vk}"),
+        &format!("/api/v1/routes/{pages}"),
         Some(json!({"base_url": "http://127.0.0.1:1"})),
     )
     .await;
@@ -528,14 +528,18 @@ async fn base_url_changes_revalidate_every_channel() {
     let (s, _, r) = call(
         &app,
         "PATCH",
-        &format!("/api/v1/routes/{vk}"),
+        &format!("/api/v1/routes/{pages}"),
         Some(json!({"base_url": format!("{}/", other.url)})),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{r}");
     assert_eq!(r["config"]["base_url"], other.url);
     assert_eq!(r["last_resync"]["trigger"], "base_url_change");
-    assert!(m3u(&app, "jf").await.contains(&format!("{}/play/vk.m3u8", other.url)));
+    assert!(
+        m3u(&app, "jf")
+            .await
+            .contains(&format!("{}/play/pages.m3u8", other.url))
+    );
 }
 
 #[tokio::test]
@@ -546,20 +550,20 @@ async fn channel_info_observes_and_checks_record() {
         Some(gateway_contract::ContentState::Recording),
     );
     let app = app().await;
-    let ace = gateway_route(&app, &gw, "Acestream", "acestream").await;
-    let vk = gateway_route(&app, &gw, "VK", "vk").await;
+    let ids = gateway_route(&app, &gw, "Ids", "ids").await;
+    let pages = gateway_route(&app, &gw, "Pages", "pages").await;
     let (_, _, a) = call(
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "A", "route_id": ace, "input": ACE})),
+        Some(json!({"name": "A", "route_id": ids, "input": ID})),
     )
     .await;
     let (_, _, v) = call(
         &app,
         "POST",
         "/api/v1/channels",
-        Some(json!({"name": "V", "route_id": vk, "input": "https://vk.com/video-1_2"})),
+        Some(json!({"name": "V", "route_id": pages, "input": "https://video.example/v/12"})),
     )
     .await;
     let (_, _, d) = call(
@@ -591,7 +595,7 @@ async fn channel_info_observes_and_checks_record() {
     let (_, _, l) = call(&app, "GET", "/api/v1/channels?health=ok", None).await;
     assert_eq!(l.as_array().unwrap().len(), 1);
 
-    // The vk rule has no checks; direct routes neither.
+    // The pages rule has no checks; direct routes neither.
     for id in [&v["id"], &d["id"]] {
         let (s, _, _) = call(&app, "POST", "/api/v1/checks", Some(json!({"ids": [id]}))).await;
         assert_eq!(s, StatusCode::CONFLICT);
@@ -604,20 +608,20 @@ async fn channel_info_observes_and_checks_record() {
 async fn import_endpoint_and_routing() {
     let gw = StubGateway::start().await;
     let app = app().await;
-    let ace = gateway_route(&app, &gw, "Acestream", "acestream").await;
+    let ids = gateway_route(&app, &gw, "Ids", "ids").await;
     let text = format!(
-        "#EXTM3U\n#EXTINF:-1 group-title=\"Sports\",Alpha\nhttp://h:8080/ace/getstream?id={ACE}\n#EXTINF:-1,Web\nhttps://x/y.m3u8\n"
+        "#EXTM3U\n#EXTINF:-1 group-title=\"Sports\",Alpha\nhttp://h:8080/stream?id={ID}\n#EXTINF:-1,Web\nhttps://x/y.m3u8\n"
     );
     let (s, _, r) = call(
         &app,
         "POST",
         "/api/v1/import",
-        Some(json!({"m3u_text": text, "playlist_slug": "jf", "route_id": ace, "dry_run": true})),
+        Some(json!({"m3u_text": text, "playlist_slug": "jf", "route_id": ids, "dry_run": true})),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{r}");
     assert_eq!(r["entries"][0]["action"], "create");
-    assert_eq!(r["entries"][0]["identity"], format!("ace:{ACE}"));
+    assert_eq!(r["entries"][0]["identity"], format!("id:{ID}"));
     assert_eq!(r["entries"].as_array().unwrap().len(), 1);
     assert!(r["skipped_lines"][0].as_str().unwrap().contains("Web"), "{r}");
     let (_, _, l) = call(&app, "GET", "/api/v1/playlists", None).await;
@@ -627,7 +631,7 @@ async fn import_endpoint_and_routing() {
         &app,
         "POST",
         "/api/v1/import",
-        Some(json!({"playlist_slug": "jf", "route_id": ace})),
+        Some(json!({"playlist_slug": "jf", "route_id": ids})),
     )
     .await;
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);

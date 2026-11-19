@@ -1,6 +1,6 @@
 # lineup
 
-lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. It serves each playlist as M3U and its guide as XMLTV over HTTP, for players and media servers that read them from a URL, such as Jellyfin and Emby Live TV, Kodi with IPTV Simple, or IPTV apps like TiviMate. Each channel is played through a route you pick: **direct** (a stream URL, put in playlists as it is) or a **gateway** route, where a separate gateway service turns a reference such as an Acestream id or a video page into a playable URL. lineup itself knows no streaming protocol; gateways speak a small contract (crate `gateway-contract`). One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, calls webhooks (for example Jellyfin's guide refresh) when something changes, and checks channels and shows their live state through gateways that support it. The same binary is also a CLI for people and agents.
+lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. It serves each playlist as M3U and its guide as XMLTV over HTTP, for players and media servers that read them from a URL, such as Jellyfin and Emby Live TV, Kodi with IPTV Simple, or IPTV apps like TiviMate. Each channel is played through a route you pick: **direct** (a stream URL, put in playlists as it is) or a **gateway** route, where a separate gateway service turns a reference (whatever the gateway's rule accepts: an id, a page link) into a playable URL. lineup itself knows no streaming protocol; gateways speak a small contract (crate `gateway-contract`). This repository also contains one such gateway, lineup-gateway ([docs/gateway.md](docs/gateway.md)). One Rust binary serves the web UI (installable on an iPhone home screen), a REST API, the playlists as M3U and a per-playlist XMLTV guide. It downloads guide data itself, suggests names and tvg-ids when you add a channel, calls webhooks (for example Jellyfin's guide refresh) when something changes, and checks channels and shows their live state through gateways that support it. The same binary is also a CLI for people and agents.
 
 - Spec and roadmap: [docs/spec.md](docs/spec.md)
 - Deploying: [docs/deploy.md](docs/deploy.md)
@@ -19,11 +19,11 @@ lineup manages IPTV channels and playlists, instead of a hand-edited M3U file. I
 ## CLI
 
 ```sh
-lineup route add Acestream --gateway http://media-host:8099 --rule acestream   # see: route test --gateway URL
+lineup route test --gateway http://gateway-host:8099                 # lists the gateway's rules
+lineup route add Streams --gateway http://gateway-host:8099 --rule <rule>
 lineup route ls | show <route> | edit <route> [--name --base-url --enable|--disable] | rm <route> | resync <route>
-lineup add -r Acestream acestream://<id> -p tv --yes   # name, group, tvg-id and logo suggested from the gateway and guide
-lineup add -r Acestream <id> --name "Arena 1" --group Sports --tvg-id Arena.1.de -p tv
-lineup add -r VK "https://vk.com/video-1_2?list=..." --name "A vs B" -p tv
+lineup add -r Streams <ref> -p tv --yes          # name, group, tvg-id and logo suggested from the gateway and guide
+lineup add -r Streams <ref> --name "Arena 1" --group Sports --tvg-id Arena.1.de -p tv
 lineup add -r Direct https://example.com/live.m3u8 -p tv
 lineup ls [query] [--group G] [--playlist P] [--route R] [--health ok|dead]
 lineup show|edit|rm|enable|disable <channel>   # channel = id, exact name, or its stored source/identity

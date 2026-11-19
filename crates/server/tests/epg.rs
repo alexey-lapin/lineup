@@ -246,9 +246,9 @@ mod output {
     use lineup_server::http::{App, router_for};
     use tower::ServiceExt;
 
-    const ACE1: &str = "41169a3f280a5537b0611b775e926852d372743d";
-    const ACE2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
-    const ACE3: &str = "914c3344a2cb94beeb26c187ca10e5c862090dba";
+    const ID1: &str = "41169a3f280a5537b0611b775e926852d372743d";
+    const ID2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
+    const ID3: &str = "914c3344a2cb94beeb26c187ca10e5c862090dba";
 
     /// A channel on `route_id` (direct routes take any URL).
     fn ch(name: &str, route_id: i64, url: &str, tvg_id: Option<&str>) -> ChannelCreate {
@@ -287,17 +287,17 @@ mod output {
             })
             .await
             .unwrap();
-        let url = |id: &str| format!("http://h/ace/getstream?id={id}");
+        let url = |id: &str| format!("http://h/stream?id={id}");
         let arena = catalog
-            .create_channel(ch("Arena", streams, &url(ACE1), Some("Arena1.de")))
+            .create_channel(ch("Arena", streams, &url(ID1), Some("Arena1.de")))
             .await
             .unwrap();
-        let mut sports = ch("Sports", streams, &url(ACE2), Some("SportsOne.uk"));
+        let mut sports = ch("Sports", streams, &url(ID2), Some("SportsOne.uk"));
         sports.enabled = false;
         catalog.create_channel(sports).await.unwrap();
         // No guide id at all: its name fills the guide.
         let event = catalog
-            .create_channel(ch("Cup <Final>", 1, "https://vk.com/video-1_2", None))
+            .create_channel(ch("Cup <Final>", 1, "https://video.example/v/12", None))
             .await
             .unwrap();
         // A disabled first channel with a shared id does not name it; the enabled second one does.
@@ -313,7 +313,7 @@ mod output {
             .await
             .unwrap();
         catalog
-            .create_channel(ch("Unknown", streams, &url(ACE3), Some("Nope.xx")))
+            .create_channel(ch("Unknown", streams, &url(ID3), Some("Nope.xx")))
             .await
             .unwrap();
 
@@ -518,9 +518,9 @@ mod resolve {
     async fn suggestions_from_gateway_hints_and_guide() {
         let (base, _up) = upstream().await;
         let gw = lineup_server::testing::StubGateway::start().await;
-        let ace = "41169a3f280a5537b0611b775e926852d372743d";
+        let id = "41169a3f280a5537b0611b775e926852d372743d";
         gw.set_hints(
-            ace,
+            id,
             gateway_contract::Hints {
                 title: Some("Arena 1".into()),
                 region: Some("de".into()),
@@ -535,12 +535,8 @@ mod resolve {
             base_url: gw.url.clone(),
             rule: rule.into(),
         };
-        let ace_route = store
-            .create_route("Acestream", route("acestream"), true)
-            .await
-            .unwrap()
-            .id;
-        let vk_route = store.create_route("VK", route("vk"), true).await.unwrap().id;
+        let ids_route = store.create_route("Ids", route("ids"), true).await.unwrap().id;
+        let pages_route = store.create_route("Pages", route("pages"), true).await.unwrap().id;
         store
             .create_epg_source(EpgSourceCreate {
                 url: format!("{base}/guide.xml.gz"),
@@ -552,26 +548,26 @@ mod resolve {
             .unwrap();
         app.epg.fetch(&[]).await.unwrap();
 
-        let r = app
-            .catalog
-            .resolve(ace_route, &format!("acestream://{ace}"))
-            .await
-            .unwrap();
+        let r = app.catalog.resolve(ids_route, &format!("id://{id}")).await.unwrap();
         assert_eq!(r.suggestion.name, "Arena 1");
         assert_eq!(r.suggestion.tvg_id.as_deref(), Some("Arena1.de"));
         assert_eq!(r.suggestion.group_title.as_deref(), Some("Sports"));
         assert_eq!(r.matches[0].xmltv_id, "Arena1.de");
         assert!(r.validated.warnings.is_empty());
 
-        // VK: group from the hints; no title, so no guide matching.
-        let r = app.catalog.resolve(vk_route, "https://vk.com/video-1_2").await.unwrap();
-        assert_eq!(r.suggestion.group_title.as_deref(), Some("VK"));
+        // A page: group from the hints; no title, so no guide matching.
+        let r = app
+            .catalog
+            .resolve(pages_route, "https://video.example/v/12")
+            .await
+            .unwrap();
+        assert_eq!(r.suggestion.group_title.as_deref(), Some("Video"));
         assert!(r.matches.is_empty());
 
         // An id without hints: the identity is the placeholder name.
         let other = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
-        let r = app.catalog.resolve(ace_route, other).await.unwrap();
-        assert_eq!(r.suggestion.name, format!("ace:{other}"));
+        let r = app.catalog.resolve(ids_route, other).await.unwrap();
+        assert_eq!(r.suggestion.name, format!("id:{other}"));
     }
 }
 
