@@ -394,12 +394,18 @@ impl Inner {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = run(tool, &args, &self.proxy).await?;
         let parsed: Option<Value> = serde_json::from_slice(&out.stdout).ok();
-        // descriptor-json may explain a failure on stdout, whatever the exit status.
-        if tool.output == OutputFormat::DescriptorJson
-            && let Some(v) = &parsed
-            && v.get("error").is_some()
-        {
-            return Err(descriptor_error(&tool.name, v));
+        if tool.output == OutputFormat::DescriptorJson {
+            // Only the tool's own, well-formed envelope says anything about the page; anything else
+            // (bad JSON, a failed exit without an envelope) is a tool failure, never "not found".
+            if let Some(v) = parsed.as_ref().filter(|v| v.get("error").is_some()) {
+                return Err(descriptor_error(&tool.name, v));
+            }
+            if !out.success {
+                return Err(ExtractError::Failed(format!(
+                    "{} failed without a descriptor: {}",
+                    tool.name, out.error_line
+                )));
+            }
         }
         if !out.success {
             return Err(classify(&tool.name, &out.error_line, &tool.phrases));
@@ -409,7 +415,7 @@ impl Inner {
         let d = match tool.output {
             OutputFormat::YtDlpJson => descriptor_from_yt_dlp(&v, expires_param),
             OutputFormat::StreamlinkJson => descriptor_from_streamlink(&v, expires_param, &tool.phrases),
-            OutputFormat::DescriptorJson => descriptor_from_json(&v),
+            OutputFormat::DescriptorJson => descriptor_from_json(&v, expires_param),
         };
         d.map_err(|e| rename_error(e, &tool.name, tool.output))
             .and_then(|d| validate(d, &tool.name))
@@ -718,27 +724,26 @@ pub fn descriptor_from_streamlink(v: &Value, expires_param: &str, extra: &Phrase
     })
 }
 
-/// A descriptor-json tool's own error: `{"error": "...", "kind": "not_found" | "no_stream" | "failed"}`.
+/// A descriptor-json tool's own error: `{"error": "...", "kind": "not_found" | "no_stream" |
+/// "failed"}`. Only a well-formed envelope (a string `error`, a known `kind`) may say the page is
+/// gone or not playable yet; anything else is a tool failure.
 fn descriptor_error(tool: &str, v: &Value) -> ExtractError {
-    let msg = format!(
-        "{tool}: {}",
-        v.get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("failed")
-            .chars()
-            .take(500)
-            .collect::<String>()
-    );
+    let Some(error) = v.get("error").and_then(Value::as_str) else {
+        return ExtractError::Failed(format!("{tool}: an error envelope without a string error"));
+    };
+    let msg = format!("{tool}: {}", error.chars().take(500).collect::<String>());
     match v.get("kind").and_then(Value::as_str) {
         Some("not_found") => ExtractError::NotFound(msg),
         Some("no_stream") => ExtractError::NoStream(msg),
-        _ => ExtractError::Failed(msg),
+        Some("failed") | None => ExtractError::Failed(msg),
+        Some(other) => ExtractError::Failed(format!("{msg} (unknown kind {other:?})")),
     }
 }
 
 /// The documented plugin format: `{"manifest_url": "...", "headers": {...}, "is_live": bool,
 /// "title": "...", "duration": seconds, "expires": unix time}`, all but `manifest_url` optional.
-pub fn descriptor_from_json(v: &Value) -> Result<Descriptor, ExtractError> {
+/// Without `expires`, the rule's `expires_param` in the manifest URL counts, as for other formats.
+pub fn descriptor_from_json(v: &Value, expires_param: &str) -> Result<Descriptor, ExtractError> {
     let manifest = v
         .get("manifest_url")
         .and_then(Value::as_str)
@@ -750,7 +755,10 @@ pub fn descriptor_from_json(v: &Value) -> Result<Descriptor, ExtractError> {
         is_live: v.get("is_live").and_then(Value::as_bool),
         title: v.get("title").and_then(Value::as_str).map(str::to_string),
         duration: v.get("duration").and_then(Value::as_f64),
-        expires: v.get("expires").and_then(Value::as_i64),
+        expires: v
+            .get("expires")
+            .and_then(Value::as_i64)
+            .or_else(|| expires_of(manifest, expires_param)),
     })
 }
 
@@ -1128,5 +1136,77 @@ sleep 30
             matches!(gone, Err(ExtractError::NotFound(m)) if m.contains("removed")),
             "the error envelope counts on a failed exit too"
         );
+    }
+
+    /// A descriptor-json tool printing `stdout` and `stderr` and exiting with `code`.
+    async fn plugin(stdout: &str, stderr: &str, code: i32, expires_param: &str) -> Result<Descriptor, ExtractError> {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("plugin");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ncat <<'OUT'\n{stdout}\nOUT\necho '{stderr}' >&2\nexit {code}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let tool = Arc::new(Tool {
+            name: "plugin".into(),
+            command: script,
+            args: ["{url}", "{proxy}"].map(String::from).to_vec(),
+            output: OutputFormat::DescriptorJson,
+            timeout: Duration::from_secs(5),
+            phrases: Phrases::default(),
+            version_args: vec![],
+            env: vec![],
+        });
+        let policy = Arc::new(RelayPolicy::new(vec![tool], vec![403], expires_param.into()));
+        Extractor::new("http://127.0.0.1:9".into(), 1)
+            .descriptor(&Lookup::new("https://v.example/1", policy), Priority::Playback)
+            .await
+    }
+
+    #[tokio::test]
+    async fn only_a_well_formed_envelope_says_not_found() {
+        for (stdout, stderr, code) in [
+            ("broken json", "ERROR: video not found", 1),
+            ("{}", "ERROR: video not found", 1),
+            (r#"{"error": false, "kind": "not_found"}"#, "", 1),
+            (r#"{"error": "x", "kind": "gone"}"#, "", 0),
+            (r#"{"manifest_url": 7}"#, "", 0),
+        ] {
+            let r = plugin(stdout, stderr, code, "expires").await;
+            assert!(matches!(r, Err(ExtractError::Failed(_))), "{stdout} / {stderr}: {r:?}");
+        }
+        let r = plugin(r#"{"error": "removed", "kind": "not_found"}"#, "", 0, "expires").await;
+        assert!(matches!(r, Err(ExtractError::NotFound(_))), "{r:?}");
+        let r = plugin(r#"{"error": "later", "kind": "no_stream"}"#, "", 2, "expires").await;
+        assert!(matches!(r, Err(ExtractError::NoStream(_))), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn descriptor_json_expiry_from_the_rules_parameter() {
+        let soon = chrono::Utc::now().timestamp() + 20;
+        let out = format!(r#"{{"manifest_url": "https://cdn.example/p.m3u8?token_until={soon}"}}"#);
+        let d = plugin(&out, "", 0, "token_until").await.unwrap();
+        assert_eq!(d.expires, Some(soon));
+        let explicit = format!(
+            r#"{{"manifest_url": "https://cdn.example/p.m3u8?token_until={soon}", "expires": {}}}"#,
+            soon + 5
+        );
+        assert_eq!(
+            plugin(&explicit, "", 0, "token_until").await.unwrap().expires,
+            Some(soon + 5),
+            "explicit wins"
+        );
+        // The cache never outlives it, also once a recording is seen.
+        let policy = Arc::new(RelayPolicy::new(vec![], vec![403], "token_until".into()));
+        let x = Extractor::new(String::new(), 1);
+        let l = Lookup::new("p", policy);
+        let rec = Descriptor {
+            is_live: Some(false),
+            ..d
+        };
+        x.0.store(&l.key(), &Ok(rec.clone()));
+        x.observed_ended(&l, &rec);
+        assert!(x.0.cache.lock().unwrap()[&l.key()].until <= Instant::now() + Duration::from_secs(20));
     }
 }

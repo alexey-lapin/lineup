@@ -793,6 +793,16 @@ async fn page_rules_keep_their_own_lookups_and_expiry() {
             .status(),
         404
     );
+    // The probe path (observe, check) uses the rule's expired_status too.
+    let detail = |rule: &'static str| {
+        let url = url.clone();
+        async move {
+            let (_, r) = post(&format!("{url}/v1/check"), json!({"rule": rule, "ref": page})).await;
+            r["detail"]["error"].as_str().unwrap_or_default().to_string()
+        }
+    };
+    assert!(detail("good").await.contains("expired"), "403 means expired by default");
+    assert!(detail("strict").await.contains("HTTP 403"), "not for this rule");
 }
 
 #[tokio::test]

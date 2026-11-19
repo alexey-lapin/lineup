@@ -278,7 +278,7 @@ trait Rule: Send + Sync {
 
 | kind | match hints | play | observe | check |
 |---|---|---|---|---|
-| `link` | `title`/`group` from config | `play` template | – | – |
+| `link` | `group` from config (`title` names the rule, it is not a channel title) | `play` template | – | – |
 | `relay` | `group` from config | `play/{name}.m3u8?ref=` through the shared relay | lookup + playlist summary | same, as today |
 | `acestream` | engine name, cleaned (code), region, "Sports" | `play` template | engine title always; watcher numbers when `acexy_control` is set | opt-in, guarded probe (`checks = true` + `acexy_control`) |
 

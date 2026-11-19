@@ -150,10 +150,14 @@ Any program can be an extractor: it gets the page as an argument and prints one 
 
 Only `manifest_url` is required: an http(s) HLS playlist URL with a host and no user info. Headers
 other than User-Agent, Accept, Accept-Language, Referer and Origin are dropped; a duration that is
-not a finite non-negative number and an expiry outside a sane range are ignored. To report a
-failure, print `{"error": "message", "kind": "not_found" | "no_stream" | "failed"}` (any exit
-status); `not_found` makes checks report the channel dead, `no_stream` means "not playable yet",
-`failed` says nothing about the page.
+not a finite non-negative number and an expiry outside a sane range are ignored. Without
+`expires`, the rule's `expires_param` in the manifest URL counts, as for the other formats.
+
+To report a failure, print `{"error": "message", "kind": "not_found" | "no_stream" | "failed"}`
+(any exit status); `not_found` makes checks report the channel dead, `no_stream` means "not
+playable yet", `failed` (or no `kind`) says nothing about the page. Only such an envelope, with a
+string `error` and one of these kinds, counts: anything else (output that is not JSON, a failed
+exit without an envelope, an unknown kind) is a tool failure, never "not found".
 
 The proxy argument and variables make well-behaved tools use the egress proxy, but they are not a
 sandbox: an extractor is code you trust. Keep the host-level egress rules below.
@@ -167,12 +171,15 @@ sandbox: an extractor is code you trust. Keep the host-level egress rules below.
   plays the recording, which is seekable. A session started on the live broadcast stays live until
   the player reopens the channel.
 - Lookups are cached for 60 s; once a media playlist with `#EXT-X-ENDLIST` is seen for a lookup
-  that did not say live, up to 3 h (never past the signed URL's expiry). Failures back off (1, 2,
-  5, 10 min). An empty ENDLIST playlist (recording still processing) keeps the short lifetime.
-  Lookups are cached and coalesced per rule settings (extractors, expiry options) and page, so two
-  rules never share a lookup or its failures. Playback admits 16 lookups and background work
-  (observe, check) 8 more of its own, and background work runs in one slot, so it never refuses or
-  blocks playback.
+  that did not say live, up to 3 h (never past the signed URL's expiry). A page without a video
+  or without a stream yet backs off (1, 2, 5, 10 min); a tool or network failure is retried after
+  15 s. An empty ENDLIST playlist (recording still processing) keeps the short lifetime.
+  Lookups are cached and coalesced per rule settings (extractors, expiry options) and page: rules
+  with different settings never share a lookup or its failures (rules with identical settings may).
+  Playback admits 16 lookups and background work (observe, check) 8 more of its own; background
+  work uses at most one of the `limits.extractions` slots, so it never refuses playback, though a
+  playback request may wait for a running lookup of the same page or, with a single slot, for the
+  background one.
 - An upstream status in the rule's `expired_status` means the signed URLs expired (some CDNs
   answer 400). The lookup is dropped. A media playlist is refreshed once per session (concurrent
   requests share one refresh), and only onto the new master's playlist with exactly the same
