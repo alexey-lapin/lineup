@@ -1,5 +1,6 @@
-//! Page rules: references are pages that extractors look up, played through the shared HLS relay
-//! at `play/<rule>.m3u8?ref=<ref>`.
+//! The `relay` kind: references are pages that extractors look up, played through the shared HLS
+//! relay at `play/<rule>.m3u8?ref=<ref>`. Which pages, and their identities and refs, come from
+//! the rule's patterns and templates.
 //!
 //! - observe: a lookup and the first media playlist (background priority).
 //! - check: the same, as an outcome: live or a recording is ok, a page without a video is dead,
@@ -7,80 +8,59 @@
 
 use std::sync::Arc;
 
+use axum::http::StatusCode;
+use axum::response::Response;
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use gateway_contract::{
     Capability, CheckOutcome, CheckResponse, ContentState, Fact, Hints, MatchResult, Matched, Observation, RuleInfo,
 };
 
-use crate::config::PageConfig;
+use crate::config::{RelayConfig, RuleConfig};
 use crate::extract::{Descriptor, ExtractError, Lookup, Priority, RelayPolicy};
 use crate::hls::Summary;
-use crate::relay::Relay;
-use crate::rules::vk::{self, VkRef};
+use crate::matcher::{Match, Matcher};
+use crate::relay::{Relay, text};
+use crate::rules::Rule;
 
 pub struct PageRule {
-    pub name: String,
+    name: String,
+    config: RuleConfig,
     title: String,
     input_hint: Option<String>,
     group: Option<String>,
-    pub policy: Arc<RelayPolicy>,
+    matcher: Matcher,
+    revisions: (String, String),
+    policy: Arc<RelayPolicy>,
+    relay: Arc<Relay>,
 }
 
 impl PageRule {
-    pub fn new(name: &str, cfg: &PageConfig, policy: Arc<RelayPolicy>) -> Self {
-        PageRule {
+    pub fn new(name: &str, cfg: &RelayConfig, policy: Arc<RelayPolicy>, relay: Arc<Relay>) -> anyhow::Result<Self> {
+        let config = RuleConfig::Relay(cfg.clone());
+        Ok(PageRule {
             name: name.to_string(),
             title: cfg.title.clone().unwrap_or_else(|| name.to_string()),
             input_hint: cfg.input_hint.clone(),
             group: cfg.group.clone(),
+            matcher: config.matcher(name)?,
+            revisions: config.revisions(name),
+            config,
             policy,
-        }
+            relay,
+        })
     }
 
-    pub fn info(&self) -> RuleInfo {
-        RuleInfo {
-            name: self.name.clone(),
-            title: self.title.clone(),
-            input_hint: self.input_hint.clone(),
-            capabilities: vec![Capability::Observe, Capability::Check],
-            match_revision: vk::MATCH_REVISION.into(),
-            play_revision: vk::PLAY_REVISION.into(),
-        }
+    fn parse(&self, input: &str) -> Option<Match> {
+        self.matcher.matches(input)
     }
 
-    pub fn parse(&self, input: &str) -> Option<VkRef> {
-        vk::parse(&self.name, input)
+    /// The lookup of a matched reference under this rule's policy: its canonical ref.
+    fn lookup(&self, m: &Match) -> Lookup {
+        Lookup::new(m.reference.clone(), self.policy.clone())
     }
 
-    /// The lookup of a parsed reference under this rule's policy.
-    pub fn lookup(&self, r: &VkRef) -> Lookup {
-        Lookup::new(r.canonical(), self.policy.clone())
-    }
-
-    pub fn match_inputs(&self, inputs: &[String]) -> Vec<MatchResult> {
-        inputs
-            .iter()
-            .map(|input| match self.parse(input) {
-                Some(r) => MatchResult::Matched(Matched {
-                    input: input.clone(),
-                    identity: r.identity(),
-                    reference: r.canonical(),
-                    play: r.play(&self.name),
-                    hints: Hints {
-                        title: None,
-                        region: None,
-                        group: self.group.clone(),
-                    },
-                    warnings: vec![],
-                }),
-                None => MatchResult::NoMatch {
-                    input: input.clone(),
-                    reason: Some(format!("not a {} link", self.title)),
-                },
-            })
-            .collect()
-    }
-
-    pub async fn observe(&self, relay: &Relay, reference: &str) -> Observation {
+    async fn observe_ref(&self, reference: &str) -> Observation {
         let mut o = Observation {
             reference: reference.to_string(),
             available: false,
@@ -91,11 +71,11 @@ impl PageRule {
             title: None,
             raw: None,
         };
-        let Some(r) = self.parse(reference) else {
+        let Some(m) = self.parse(reference) else {
             o.reason = Some(format!("not a {} reference", self.title));
             return o;
         };
-        match relay.probe(&self.lookup(&r), Priority::Background).await {
+        match self.relay.probe(&self.lookup(&m), Priority::Background).await {
             Ok((d, summary)) => {
                 o.available = true;
                 o.content_state = Some(page_state(&d, &summary));
@@ -121,7 +101,7 @@ impl PageRule {
         o
     }
 
-    pub async fn check(&self, relay: &Relay, reference: &str) -> CheckResponse {
+    async fn check_ref(&self, reference: &str) -> CheckResponse {
         let mut resp = CheckResponse {
             reference: reference.to_string(),
             outcome: CheckOutcome::Unknown,
@@ -130,11 +110,11 @@ impl PageRule {
             detail: None,
             checked_at: chrono::Utc::now().to_rfc3339(),
         };
-        let Some(r) = self.parse(reference) else {
+        let Some(m) = self.parse(reference) else {
             resp.reason = Some("bad_ref".into());
             return resp;
         };
-        match relay.probe(&self.lookup(&r), Priority::Background).await {
+        match self.relay.probe(&self.lookup(&m), Priority::Background).await {
             Ok((d, summary)) => {
                 let state = page_state(&d, &summary);
                 resp.content_state = Some(state);
@@ -162,6 +142,70 @@ impl PageRule {
             }
         }
         resp
+    }
+}
+
+impl Rule for PageRule {
+    fn info(&self) -> RuleInfo {
+        RuleInfo {
+            name: self.name.clone(),
+            title: self.title.clone(),
+            input_hint: self.input_hint.clone(),
+            capabilities: vec![Capability::Observe, Capability::Check],
+            match_revision: self.revisions.0.clone(),
+            play_revision: self.revisions.1.clone(),
+        }
+    }
+
+    fn match_inputs<'a>(&'a self, inputs: &'a [String]) -> BoxFuture<'a, Vec<MatchResult>> {
+        let results = inputs
+            .iter()
+            .map(|input| match self.parse(input) {
+                Some(m) => match self.config.play(&self.name, &m) {
+                    Ok(play) => MatchResult::Matched(Matched {
+                        input: input.clone(),
+                        identity: m.identity,
+                        reference: m.reference,
+                        play,
+                        hints: Hints {
+                            title: None,
+                            region: None,
+                            group: self.group.clone(),
+                        },
+                        warnings: vec![],
+                    }),
+                    Err(e) => MatchResult::NoMatch {
+                        input: input.clone(),
+                        reason: Some(e.to_string()),
+                    },
+                },
+                None => MatchResult::NoMatch {
+                    input: input.clone(),
+                    reason: Some(format!("not a {} link", self.title)),
+                },
+            })
+            .collect();
+        std::future::ready(results).boxed()
+    }
+
+    fn observe<'a>(&'a self, reference: &'a str) -> BoxFuture<'a, Observation> {
+        self.observe_ref(reference).boxed()
+    }
+
+    fn check<'a>(&'a self, reference: &'a str, _force: bool) -> BoxFuture<'a, CheckResponse> {
+        self.check_ref(reference).boxed()
+    }
+
+    fn play<'a>(&'a self, reference: &'a str, head: bool) -> Option<BoxFuture<'a, Response>> {
+        Some(
+            async move {
+                match self.parse(reference) {
+                    Some(m) => self.relay.play(&self.lookup(&m), head).await,
+                    None => text(StatusCode::BAD_REQUEST, "ref is not a reference this rule accepts"),
+                }
+            }
+            .boxed(),
+        )
     }
 }
 

@@ -27,6 +27,7 @@ reqwest = { version = "0.13", features = ["json", "query", "stream"] }
 futures-util = "0.3"
 bytes = "1"
 toml = "1.0"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

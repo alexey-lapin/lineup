@@ -12,14 +12,23 @@
 //! output = "yt-dlp-json"
 //!
 //! [rules.pages]
-//! kind = "vk"
+//! kind = "relay"
 //! extractors = ["yt-dlp"]
+//! identity = "page:{id}"
+//! ref = "https://video.example/v/{id}"
+//! [[rules.pages.match]]
+//! hosts = ["video.example"]
+//! path = '^/v/(?P<id>[0-9]+)'
 //!
 //! [rules.streams]
 //! kind = "acestream"
 //! engine_control = "http://engine:6878"
 //! acexy_control = "http://acexy:8080"
-//! acexy_public = "http://media-host:8080"
+//! play = "http://media-host:8080/ace/getstream?id={id}"
+//! identity = "ace:{id}"
+//! ref = "acestream://{id}"
+//! [[rules.streams.match]]
+//! input = '(?i)^(?P<id>[0-9a-f]{40})$'
 //! ```
 
 use std::collections::BTreeMap;
@@ -28,6 +37,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::matcher::{ExampleConfig, Match, Matcher, PatternConfig, VarType};
+use crate::template::{Template, Use};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,16 +65,141 @@ fn default_listen() -> SocketAddr {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RuleConfig {
     Acestream(AcestreamConfig),
-    Vk(PageConfig),
+    Relay(RelayConfig),
+}
+
+/// How a rule recognises inputs: patterns, typed variables, identity and ref templates, and the
+/// examples checked on load. Shared by every kind.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct MatchSpec {
+    #[serde(rename = "match")]
+    pub patterns: Vec<PatternConfig>,
+    #[serde(default)]
+    pub vars: BTreeMap<String, VarType>,
+    pub identity: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
 }
 
 impl RuleConfig {
     pub fn kind(&self) -> &'static str {
         match self {
             RuleConfig::Acestream(_) => "acestream",
-            RuleConfig::Vk(_) => "vk",
+            RuleConfig::Relay(_) => "relay",
         }
     }
+
+    pub fn spec(&self) -> MatchSpec {
+        let (patterns, vars, identity, reference) = match self {
+            RuleConfig::Acestream(a) => (&a.patterns, &a.vars, &a.identity, &a.reference),
+            RuleConfig::Relay(r) => (&r.patterns, &r.vars, &r.identity, &r.reference),
+        };
+        MatchSpec {
+            patterns: patterns.clone(),
+            vars: vars.clone(),
+            identity: identity.clone(),
+            reference: reference.clone(),
+        }
+    }
+
+    pub fn examples(&self) -> &[ExampleConfig] {
+        match self {
+            RuleConfig::Acestream(a) => &a.examples,
+            RuleConfig::Relay(r) => &r.examples,
+        }
+    }
+
+    /// The rule's matcher. Relay rules also accept their own play URLs (`play/<name>.m3u8`).
+    pub fn matcher(&self, name: &str) -> anyhow::Result<Matcher> {
+        let s = self.spec();
+        let own = matches!(self, RuleConfig::Relay(_)).then(|| relay_play_path(name));
+        Matcher::new(&s.patterns, &s.vars, &s.identity, &s.reference, own)
+    }
+
+    /// The play reference for a match: the acestream `play` template, or the relay path.
+    pub fn play(&self, name: &str, m: &Match) -> anyhow::Result<String> {
+        Ok(match self {
+            RuleConfig::Acestream(a) => Template::parse(&a.play, Use::Play)?.render(&m.vars),
+            RuleConfig::Relay(_) => format!(
+                "{}?ref={}",
+                relay_play_path(name),
+                crate::template::encode(&m.reference)
+            ),
+        })
+    }
+
+    /// `match_revision` and `play_revision` (see `revision`).
+    pub fn revisions(&self, name: &str) -> (String, String) {
+        use crate::revision::{match_revision, play_revision};
+        match self {
+            RuleConfig::Acestream(a) => {
+                // The engine's names, cleaned by code, are hints: version 1 of that cleaning.
+                let m = match_revision("acestream", 1, &self.spec());
+                let p = play_revision("acestream", &a.play, &m);
+                (m, p)
+            }
+            RuleConfig::Relay(r) => {
+                let m = match_revision("relay", 0, &(self.spec(), &r.title, &r.group));
+                let p = play_revision("relay", &relay_play_path(name), &m);
+                (m, p)
+            }
+        }
+    }
+
+    /// Compile the matcher and the play template, and check every example: its expected
+    /// identity, ref and play, and that its ref is accepted again with the same identity and ref.
+    pub fn validate(&self, name: &str) -> anyhow::Result<()> {
+        let m = self.matcher(name)?;
+        if let RuleConfig::Acestream(a) = self {
+            let t = Template::parse(&a.play, Use::Play).map_err(|e| anyhow::anyhow!("play: {e}"))?;
+            if !m.names().contains("id") {
+                anyhow::bail!("an acestream rule's patterns must capture id");
+            }
+            if let Some(n) = t.names().iter().find(|n| !m.names().contains(*n)) {
+                anyhow::bail!("play: {{{n}}} is not captured by any pattern");
+            }
+        }
+        for (i, ex) in self.examples().iter().enumerate() {
+            let at = format!("examples[{i}] ({:?})", ex.input);
+            let got = m.matches(&ex.input);
+            let Some(got) = got else {
+                if ex.matches {
+                    anyhow::bail!("{at}: not accepted");
+                }
+                continue;
+            };
+            if !ex.matches {
+                anyhow::bail!("{at}: accepted as {}, expected no match", got.identity);
+            }
+            let play = self.play(name, &got)?;
+            for (what, want, have) in [
+                ("identity", &ex.identity, &got.identity),
+                ("ref", &ex.reference, &got.reference),
+                ("play", &ex.play, &play),
+            ] {
+                if let Some(w) = want
+                    && w != have
+                {
+                    anyhow::bail!("{at}: {what} is {have:?}, expected {w:?}");
+                }
+            }
+            match m.matches(&got.reference) {
+                Some(again) if again.identity == got.identity && again.reference == got.reference => {}
+                other => anyhow::bail!(
+                    "{at}: its ref {:?} does not match again to the same identity and ref (got {:?})",
+                    got.reference,
+                    other.map(|o| (o.identity, o.reference))
+                ),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A relay rule's play path, relative to the gateway.
+pub fn relay_play_path(name: &str) -> String {
+    format!("play/{name}.m3u8")
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,15 +210,34 @@ pub struct AcestreamConfig {
     pub input_hint: Option<String>,
     pub engine_control: String,
     pub acexy_control: Option<String>,
-    pub acexy_public: String,
+    /// Play URL template, as players reach the stream (acexy, the engine or any proxy).
+    pub play: String,
+    #[serde(rename = "match")]
+    pub patterns: Vec<PatternConfig>,
+    #[serde(default)]
+    pub vars: BTreeMap<String, VarType>,
+    pub identity: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    #[serde(default)]
+    pub examples: Vec<ExampleConfig>,
 }
 
 /// A rule whose pages are looked up by extractors and relayed as HLS.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PageConfig {
+pub struct RelayConfig {
     pub title: Option<String>,
     pub input_hint: Option<String>,
+    #[serde(rename = "match")]
+    pub patterns: Vec<PatternConfig>,
+    #[serde(default)]
+    pub vars: BTreeMap<String, VarType>,
+    pub identity: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    #[serde(default)]
+    pub examples: Vec<ExampleConfig>,
     /// Group suggested for matched channels.
     pub group: Option<String>,
     /// Extractor names, tried in order.
@@ -250,12 +406,11 @@ impl Config {
             match rule {
                 RuleConfig::Acestream(a) => {
                     a.engine_control = base(&a.engine_control, &format!("rules.{name}.engine_control"))?;
-                    a.acexy_public = base(&a.acexy_public, &format!("rules.{name}.acexy_public"))?;
                     if let Some(x) = &a.acexy_control {
                         a.acexy_control = Some(base(x, &format!("rules.{name}.acexy_control"))?);
                     }
                 }
-                RuleConfig::Vk(p) => {
+                RuleConfig::Relay(p) => {
                     if p.extractors.is_empty() {
                         anyhow::bail!("rules.{name}: extractors must name at least one extractor");
                     }
@@ -272,6 +427,7 @@ impl Config {
                     }
                 }
             }
+            rule.validate(name).map_err(|e| anyhow::anyhow!("rules.{name}: {e}"))?;
         }
         Ok(c)
     }
@@ -308,32 +464,72 @@ mod tests {
         output = "yt-dlp-json"
     "#;
 
+    /// A relay rule `a` with one pattern, plus `extra` lines in its block.
+    fn relay(extra: &str) -> String {
+        format!(
+            "[rules.a]\nkind = 'relay'\nextractors = ['yt-dlp']\nidentity = 'p:{{n}}'\n\
+             ref = 'https://v.example/{{n}}'\n{extra}\n[[rules.a.match]]\nhosts = ['v.example']\n\
+             path = '^/(?P<n>[0-9]+)$'\n{X}"
+        )
+    }
+
+    const ACE: &str = "[rules.ace]\nkind = 'acestream'\nengine_control = 'http://e:6878/'\n\
+        play = 'http://a:8080/ace/getstream?id={id}'\nidentity = 'ace:{id}'\nref = 'acestream://{id}'\n\
+        [[rules.ace.match]]\ninput = '^(?P<id>[0-9a-f]{40})$'\n";
+
     #[test]
     fn parses_and_normalises() {
-        let c = Config::parse(&format!(
-            r#"
-            listen = "127.0.0.1:1"
-            [rules.ace]
-            kind = "acestream"
-            engine_control = "http://e:6878/"
-            acexy_public = "http://a:8080/"
-            [rules.pages]
-            kind = "vk"
-            extractors = ["yt-dlp"]
-            {X}
-            "#
-        ))
-        .unwrap();
+        let c = Config::parse(&format!("listen = '127.0.0.1:1'\n{ACE}{}", relay(""))).unwrap();
         let RuleConfig::Acestream(a) = &c.rules["ace"] else {
             panic!("kind")
         };
         assert_eq!(a.engine_control, "http://e:6878");
-        assert_eq!(a.acexy_public, "http://a:8080");
-        let RuleConfig::Vk(p) = &c.rules["pages"] else {
+        let RuleConfig::Relay(p) = &c.rules["a"] else {
             panic!("kind")
         };
         assert_eq!(p.expired_status, [400, 401, 403, 404, 410]);
         assert_eq!(c.extractors["yt-dlp"].output, OutputFormat::YtDlpJson);
+        let (m, play) = c.rules["a"].revisions("a");
+        assert_ne!(m, play);
+    }
+
+    #[test]
+    fn revisions_follow_the_config() {
+        let rev = |extra: &str| {
+            let c = Config::parse(&relay(extra)).unwrap();
+            c.rules["a"].revisions("a")
+        };
+        let base = rev("");
+        assert_eq!(base, rev(""), "stable");
+        assert_eq!(base, rev("expires_param = 'e'"), "relay policy is not part of either");
+        let group = rev("group = 'G'");
+        assert_ne!(base.0, group.0, "hints are part of the match revision");
+        assert_ne!(base.1, group.1, "and so of the play revision");
+    }
+
+    #[test]
+    fn checks_examples() {
+        let ok = [
+            "[[rules.a.examples]]\ninput = 'https://v.example/1'\nidentity = 'p:1'\nref = 'https://v.example/1'\n\
+             play = 'play/a.m3u8?ref=https%3A%2F%2Fv.example%2F1'",
+            "[[rules.a.examples]]\ninput = 'https://v.example/x'\nmatch = false",
+        ];
+        for e in ok {
+            Config::parse(&relay(e)).unwrap();
+        }
+        let bad = [
+            "[[rules.a.examples]]\ninput = 'https://v.example/1'\nidentity = 'p:2'",
+            "[[rules.a.examples]]\ninput = 'https://v.example/x'",
+            "[[rules.a.examples]]\ninput = 'https://v.example/1'\nmatch = false",
+        ];
+        for e in bad {
+            assert!(Config::parse(&relay(e)).is_err(), "{e}");
+        }
+        // A ref that its own patterns do not accept again is refused.
+        let lossy = relay("").replace("ref = 'https://v.example/{n}'", "ref = 'https://v.example/x{n}'")
+            + "[[rules.a.examples]]\ninput = 'https://v.example/1'\n";
+        let e = Config::parse(&lossy).unwrap_err().to_string();
+        assert!(e.contains("does not match again"), "{e}");
     }
 
     #[test]
@@ -343,12 +539,17 @@ mod tests {
             "[vk]\n".into(),
             "[tools]\nyt_dlp = '/x'\n".into(),
             "[rules.a]\nkind = 'nope'\n".into(),
-            "[rules.a]\nkind = 'acestream'\nengine_control='x'\nacexy_public='http://a'\n".into(),
-            "[rules.a]\nkind = 'acestream'\nengine_control='http://e'\nacexy_public='http://a'\nextra = 1\n".into(),
-            "[rules.A]\nkind = 'vk'\nextractors = ['yt-dlp']\n".to_string() + X,
-            "[rules.a]\nkind = 'vk'\nextractors = []\n".to_string() + X,
-            "[rules.a]\nkind = 'vk'\nextractors = ['other']\n".to_string() + X,
-            "[rules.a]\nkind = 'vk'\nextractors = ['yt-dlp']\nexpired_status = [200]\n".to_string() + X,
+            ACE.replace("http://e:6878/", "x"),
+            ACE.replace("kind = 'acestream'", "kind = 'acestream'\nextra = 1"),
+            ACE.replace("{id}'\nidentity", "{other}'\nidentity"),
+            ACE.replace("(?P<id>", "(?P<other>").replace("{id}", "{other}"),
+            ACE.replace("play = 'http://a:8080", "play = 'http://{id}"),
+            relay("").replace("[rules.a]", "[rules.A]"),
+            relay("").replace("['yt-dlp']", "[]"),
+            relay("").replace("['yt-dlp']", "['other']"),
+            relay("expired_status = [200]"),
+            relay("vars = { m = 'int' }"),
+            relay("").replace("ref = 'https://v.example/{n}'", "ref = 'https://{n}.example/'"),
             "[extractors.x]\ncommand = '/x'\nargs = ['{url}']\noutput = 'yt-dlp-json'\n".into(),
             "[extractors.x]\ncommand = '/x'\nargs = ['{url}', '{proxy}']\noutput = 'other'\n".into(),
             "[limits]\nextractions = 0\nextraction_timeout_secs = 1\nmanifest_bytes = 1\nsessions = 1\n\

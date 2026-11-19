@@ -201,6 +201,26 @@ fn fake_yt_dlp(dir: &std::path::Path, cdn: &str, live: bool) -> std::path::PathB
     p
 }
 
+/// The rules of `deploy/gateway.example.toml`, with its commented-out rules turned on.
+fn example_rules() -> toml::Table {
+    let text = include_str!("../../../deploy/gateway.example.toml");
+    let mut uncommented = String::new();
+    let mut block = false;
+    for line in text.lines() {
+        block = line.starts_with("# [rules.") || (block && line.starts_with("# "));
+        uncommented.push_str(if block { &line[2..] } else { line });
+        uncommented.push('\n');
+    }
+    let mut all: toml::Table = uncommented.parse().unwrap();
+    all.remove("rules").unwrap().as_table().unwrap().clone()
+}
+
+fn rules_toml(rules: toml::Table) -> String {
+    let mut t = toml::Table::new();
+    t.insert("rules".into(), rules.into());
+    toml::to_string(&t).unwrap()
+}
+
 /// An `[extractors.yt-dlp]` block for a fake tool.
 fn extractor(path: &std::path::Path) -> String {
     format!(
@@ -229,26 +249,23 @@ async fn fixture_with(live: bool, acexy: bool) -> Fixture {
     let cdn_url = cdn(cdn_state.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let yt = fake_yt_dlp(dir.path(), &cdn_url, live);
-    let cfg = Config::parse(&format!(
-        r#"
-        [rules.acestream]
-        kind = "acestream"
-        engine_control = "{engine_url}"
-        {}
-        acexy_public = "http://192.168.1.50:8080"
-        [rules.vk]
-        kind = "vk"
-        group = "VK"
-        extractors = ["yt-dlp"]
-        {}
-        [egress]
-        allow = ["127.0.0.1"]
-        "#,
+    let mut rules = example_rules();
+    {
+        let ace = rules["acestream"].as_table_mut().unwrap();
+        ace.insert("engine_control".into(), engine_url.clone().into());
         if acexy {
-            format!("acexy_control = \"{engine_url}\"")
+            ace.insert("acexy_control".into(), engine_url.clone().into());
         } else {
-            String::new()
-        },
+            ace.remove("acexy_control");
+        }
+        rules["vk"]
+            .as_table_mut()
+            .unwrap()
+            .insert("extractors".into(), toml::Value::Array(vec!["yt-dlp".into()]));
+    }
+    let cfg = Config::parse(&format!(
+        "{}{}[egress]\nallow = [\"127.0.0.1\"]\n",
+        rules_toml(rules),
         extractor(&yt)
     ))
     .unwrap();
@@ -303,7 +320,7 @@ async fn info_and_acestream_match() {
     let m = &r["results"][0];
     assert_eq!(m["status"], "matched");
     assert_eq!(m["identity"], format!("ace:{ACE}"));
-    assert_eq!(m["play"], format!("http://192.168.1.50:8080/ace/getstream?id={ACE}"));
+    assert_eq!(m["play"], format!("http://media-host:8080/ace/getstream?id={ACE}"));
     assert_eq!(m["hints"]["title"], "Arena 1");
     assert_eq!(m["hints"]["region"], "de");
     assert_eq!(m["hints"]["group"], "Sports");
@@ -480,11 +497,11 @@ async fn public_fetches_refuse_private_addresses() {
     let cdn_url = cdn(cdn_state.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let yt = fake_yt_dlp(dir.path(), &cdn_url, true);
-    let cfg = Config::parse(&format!(
-        "[rules.vk]\nkind = \"vk\"\nextractors = [\"yt-dlp\"]\n{}",
-        extractor(&yt)
-    ))
-    .unwrap();
+    let mut rules = toml::Table::new();
+    let mut vk = example_rules()["vk"].as_table().unwrap().clone();
+    vk.insert("extractors".into(), toml::Value::Array(vec!["yt-dlp".into()]));
+    rules.insert("vk".into(), vk.into());
+    let cfg = Config::parse(&format!("{}{}", rules_toml(rules), extractor(&yt))).unwrap();
     let g = lineup_gateway::Gateway::new(&cfg, ProbeTiming::default())
         .await
         .unwrap();
@@ -669,13 +686,13 @@ async fn gateway(cfg: &str) -> String {
 async fn rules_on_one_engine_share_its_probe_lock() {
     let shared = Shared::default();
     let engine_url = engine(shared.clone()).await;
-    let rule = |name: &str| {
-        format!(
-            "[rules.{name}]\nkind = \"acestream\"\nengine_control = \"{engine_url}\"\nacexy_control = \"{engine_url}\"\n\
-             acexy_public = \"http://192.168.1.50:8080\"\n"
-        )
-    };
-    let url = gateway(&format!("{}{}", rule("one"), rule("two"))).await;
+    let mut ace = example_rules()["acestream"].as_table().unwrap().clone();
+    ace.insert("engine_control".into(), engine_url.clone().into());
+    ace.insert("acexy_control".into(), engine_url.clone().into());
+    let mut rules = toml::Table::new();
+    rules.insert("one".into(), ace.clone().into());
+    rules.insert("two".into(), ace.into());
+    let url = gateway(&rules_toml(rules)).await;
     let check = |rule: &'static str| {
         let url = format!("{url}/v1/check");
         async move { post(&url, json!({"rule": rule, "ref": format!("acestream://{ACE}")})).await }
@@ -711,22 +728,27 @@ async fn page_rules_keep_their_own_lookups_and_expiry() {
     let x = |name: &str, path: &std::path::Path| {
         extractor(path).replace("[extractors.yt-dlp]", &format!("[extractors.{name}]"))
     };
+    let vk = example_rules()["vk"].as_table().unwrap().clone();
+    let mut rules = toml::Table::new();
+    for (name, chain, expired) in [
+        ("good", "good", None),
+        ("broken", "broken", None),
+        ("strict", "good", Some(410)),
+    ] {
+        let mut r = vk.clone();
+        r.remove("examples"); // they name the vk rule's play path
+        r.insert("extractors".into(), toml::Value::Array(vec![chain.into()]));
+        if let Some(s) = expired {
+            r.insert(
+                "expired_status".into(),
+                toml::Value::Array(vec![toml::Value::Integer(s)]),
+            );
+        }
+        rules.insert(name.into(), r.into());
+    }
     let url = gateway(&format!(
-        r#"
-        [rules.good]
-        kind = "vk"
-        extractors = ["good"]
-        [rules.broken]
-        kind = "vk"
-        extractors = ["broken"]
-        [rules.strict]
-        kind = "vk"
-        extractors = ["good"]
-        expired_status = [410]
-        {}{}
-        [egress]
-        allow = ["127.0.0.1"]
-        "#,
+        "{}{}{}[egress]\nallow = [\"127.0.0.1\"]\n",
+        rules_toml(rules),
         x("good", &good),
         x("broken", &bad)
     ))

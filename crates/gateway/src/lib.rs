@@ -1,12 +1,15 @@
 //! lineup-gateway: serves the gateway contract (`/v1/*`) for its configured rules, and relays the
-//! streams of page rules (`/play/*`).
+//! streams of relay rules (`/play/*`).
 
 pub mod config;
 pub mod extract;
 pub mod hls;
+pub mod matcher;
 pub mod net;
 pub mod relay;
+pub mod revision;
 pub mod rules;
+pub mod template;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gateway_contract::{
-    CONTRACT, CheckRequest, ErrorBody, ErrorDetail, Info, MAX_MATCH_INPUTS, MAX_OBSERVE_REFS, MatchRequest,
+    CONTRACT, Capability, CheckRequest, ErrorBody, ErrorDetail, Info, MAX_MATCH_INPUTS, MAX_OBSERVE_REFS, MatchRequest,
     MatchResponse, ObserveRequest, ObserveResponse,
 };
 use serde::Deserialize;
@@ -32,9 +35,9 @@ use crate::rules::page::PageRule;
 
 pub struct Gateway {
     /// Rules by name, in name order.
-    rules: Vec<(String, Rule)>,
-    /// The relay every page rule plays through; present when there is one.
-    relay: Option<Relay>,
+    rules: Vec<(String, Arc<dyn Rule>)>,
+    /// The relay every relay rule plays through; present when there is one.
+    relay: Option<Arc<Relay>>,
     /// Kept alive while the gateway runs.
     _proxy: Option<EgressProxy>,
 }
@@ -45,14 +48,14 @@ impl Gateway {
     /// Build the gateway from its config: start the egress proxy, check the extractors.
     pub async fn new(cfg: &Config, timing: ProbeTiming) -> anyhow::Result<Arc<Self>> {
         let allow = Allow::new(&cfg.egress.allow);
-        let pages = cfg.rules.values().any(|r| matches!(r, RuleConfig::Vk(_)));
-        let (relay, proxy) = if pages {
+        let relays = cfg.rules.values().any(|r| matches!(r, RuleConfig::Relay(_)));
+        let (relay, proxy) = if relays {
             let proxy = EgressProxy::start(allow.clone()).await?;
             tracing::info!("egress proxy for the extractors on {}", proxy.url());
             let extractor = Extractor::new(proxy.url(), cfg.limits.extractions);
             let client = net::public_client(&allow, cfg.limits.upstream_timeout());
             (
-                Some(Relay::new(client, allow.clone(), extractor, &cfg.limits)),
+                Some(Arc::new(Relay::new(client, allow.clone(), extractor, &cfg.limits))),
                 Some(proxy),
             )
         } else {
@@ -61,7 +64,7 @@ impl Gateway {
         // Extractors that some rule uses: checked once, shared by every rule naming them.
         let mut tools: HashMap<&str, Arc<Tool>> = HashMap::new();
         for r in cfg.rules.values() {
-            let RuleConfig::Vk(p) = r else { continue };
+            let RuleConfig::Relay(p) = r else { continue };
             for name in &p.extractors {
                 if tools.contains_key(name.as_str()) {
                     continue;
@@ -78,17 +81,18 @@ impl Gateway {
             }
         }
         let mut engines: HashMap<String, EngineLock> = HashMap::new();
-        let mut rules = Vec::new();
+        let mut rules: Vec<(String, Arc<dyn Rule>)> = Vec::new();
         for (name, r) in &cfg.rules {
-            let rule = match r {
+            let rule: Arc<dyn Rule> = match r {
                 RuleConfig::Acestream(a) => {
                     let lock = engines.entry(Acestream::engine_key(a)).or_default().clone();
-                    Rule::Acestream(Acestream::new(name, a.clone(), timing, lock))
+                    Arc::new(Acestream::new(name, a.clone(), timing, lock)?)
                 }
-                RuleConfig::Vk(p) => {
+                RuleConfig::Relay(p) => {
                     let chain = p.extractors.iter().map(|x| tools[x.as_str()].clone()).collect();
                     let policy = RelayPolicy::new(chain, p.expired_status.clone(), p.expires_param.clone());
-                    Rule::Page(PageRule::new(name, p, Arc::new(policy)))
+                    let relay = relay.clone().expect("a relay rule starts the relay");
+                    Arc::new(PageRule::new(name, p, Arc::new(policy), relay)?)
                 }
             };
             rules.push((name.clone(), rule));
@@ -109,15 +113,8 @@ impl Gateway {
         }
     }
 
-    fn rule(&self, name: &str) -> Option<&Rule> {
+    fn rule(&self, name: &str) -> Option<&Arc<dyn Rule>> {
         self.rules.iter().find(|(n, _)| n == name).map(|(_, r)| r)
-    }
-
-    fn page_rule(&self, name: &str) -> Option<(&PageRule, &Relay)> {
-        match (self.rule(name)?, &self.relay) {
-            (Rule::Page(p), Some(relay)) => Some((p, relay)),
-            _ => None,
-        }
     }
 }
 
@@ -178,11 +175,10 @@ async fn matching(State(g): State<AppState>, Json(req): Json<MatchRequest>) -> R
             format!("at most {MAX_MATCH_INPUTS} inputs per request"),
         );
     }
-    let results = match g.rule(&req.rule) {
-        Some(Rule::Acestream(a)) => a.match_inputs(&req.inputs).await,
-        Some(Rule::Page(p)) => p.match_inputs(&req.inputs),
-        None => return unknown_rule(&req.rule),
+    let Some(rule) = g.rule(&req.rule) else {
+        return unknown_rule(&req.rule);
     };
+    let results = rule.match_inputs(&req.inputs).await;
     Json(MatchResponse { results }).into_response()
 }
 
@@ -194,22 +190,15 @@ async fn observe(State(g): State<AppState>, Json(req): Json<ObserveRequest>) -> 
             format!("at most {MAX_OBSERVE_REFS} refs per request"),
         );
     }
+    let Some(rule) = g.rule(&req.rule) else {
+        return unknown_rule(&req.rule);
+    };
+    if !rule.info().capabilities.contains(&Capability::Observe) {
+        return error(StatusCode::CONFLICT, "unsupported", "this rule does not observe");
+    }
     let mut results = Vec::with_capacity(req.refs.len());
-    match g.rule(&req.rule) {
-        Some(Rule::Acestream(a)) => {
-            for r in &req.refs {
-                results.push(a.observe(r).await);
-            }
-        }
-        Some(Rule::Page(_)) => {
-            let Some((p, relay)) = g.page_rule(&req.rule) else {
-                return unknown_rule(&req.rule);
-            };
-            for r in &req.refs {
-                results.push(p.observe(relay, r).await);
-            }
-        }
-        None => return unknown_rule(&req.rule),
+    for r in &req.refs {
+        results.push(rule.observe(r).await);
     }
     Json(ObserveResponse { results }).into_response()
 }
@@ -234,16 +223,11 @@ async fn tool_version(bin: &std::path::Path, args: &[String]) -> anyhow::Result<
 }
 
 async fn check(State(g): State<AppState>, Json(req): Json<CheckRequest>) -> Response {
-    let resp = match g.rule(&req.rule) {
-        Some(Rule::Acestream(a)) => a.check(&req.reference, req.force).await,
-        Some(Rule::Page(_)) => {
-            let Some((p, relay)) = g.page_rule(&req.rule) else {
-                return unknown_rule(&req.rule);
-            };
-            p.check(relay, &req.reference).await
-        }
-        None => return unknown_rule(&req.rule),
+    let Some(rule) = g.rule(&req.rule) else {
+        return unknown_rule(&req.rule);
     };
+    // A rule that cannot check says why in its answer (for example: no watcher guard).
+    let resp = rule.check(&req.reference, req.force).await;
     Json(resp).into_response()
 }
 
@@ -261,13 +245,14 @@ async fn play(
     Query(q): Query<PlayQuery>,
 ) -> Response {
     let head = method == Method::HEAD;
-    let Some((p, relay)) = file.strip_suffix(".m3u8").and_then(|name| g.page_rule(name)) else {
+    let Some(rule) = file.strip_suffix(".m3u8").and_then(|name| g.rule(name)) else {
         return text(StatusCode::NOT_FOUND, "no such play route");
     };
-    let Some(r) = q.reference.as_deref().and_then(|x| p.parse(x)) else {
-        return text(StatusCode::BAD_REQUEST, "ref is not a reference this rule accepts");
-    };
-    relay.play(&p.lookup(&r), head).await
+    let reference = q.reference.unwrap_or_default();
+    match rule.play(&reference, head) {
+        Some(f) => f.await,
+        None => text(StatusCode::NOT_FOUND, "no such play route"),
+    }
 }
 
 async fn resource(
