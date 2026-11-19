@@ -118,7 +118,12 @@ impl RuleConfig {
     pub fn matcher(&self, name: &str) -> anyhow::Result<Matcher> {
         let s = self.spec();
         let own = matches!(self, RuleConfig::Relay(_)).then(|| relay_play_path(name));
-        Matcher::new(&s.patterns, &s.vars, &s.identity, &s.reference, own)
+        let play = match self {
+            RuleConfig::Acestream(a) => Some(a.play.as_str()),
+            RuleConfig::Link(l) => Some(l.play.as_str()),
+            RuleConfig::Relay(_) => None,
+        };
+        Matcher::new(name, &s.patterns, &s.vars, &s.identity, &s.reference, play, own)
     }
 
     /// The play reference for a match: the acestream `play` template, or the relay path.
@@ -140,17 +145,17 @@ impl RuleConfig {
         match self {
             RuleConfig::Acestream(a) => {
                 // The engine's names, cleaned by code, are hints: version 1 of that cleaning.
-                let m = match_revision("acestream", 1, &self.spec());
+                let m = match_revision("acestream", 1, &(name, self.spec()));
                 let p = play_revision("acestream", &a.play, &m);
                 (m, p)
             }
             RuleConfig::Relay(r) => {
-                let m = match_revision("relay", 0, &(self.spec(), &r.title, &r.group));
+                let m = match_revision("relay", 0, &(name, self.spec(), &r.title, &r.group));
                 let p = play_revision("relay", &relay_play_path(name), &m);
                 (m, p)
             }
             RuleConfig::Link(l) => {
-                let m = match_revision("link", 0, &(self.spec(), &l.title, &l.group));
+                let m = match_revision("link", 0, &(name, self.spec(), &l.title, &l.group));
                 let p = play_revision("link", &l.play, &m);
                 (m, p)
             }
@@ -161,23 +166,12 @@ impl RuleConfig {
     /// identity, ref and play, and that its ref is accepted again with the same identity and ref.
     pub fn validate(&self, name: &str) -> anyhow::Result<()> {
         let m = self.matcher(name)?;
-        let play = match self {
-            RuleConfig::Acestream(a) => {
-                if !m.names().contains("id") {
-                    anyhow::bail!("an acestream rule's patterns must capture id");
-                }
-                if a.checks && a.acexy_control.is_none() {
-                    anyhow::bail!("checks need acexy_control: only acexy tells whether a stream is watched");
-                }
-                Some(&a.play)
+        if let RuleConfig::Acestream(a) = self {
+            if !m.names().contains("id") {
+                anyhow::bail!("an acestream rule's patterns must capture id");
             }
-            RuleConfig::Link(l) => Some(&l.play),
-            RuleConfig::Relay(_) => None,
-        };
-        if let Some(play) = play {
-            let t = Template::parse(play, Use::Play).map_err(|e| anyhow::anyhow!("play: {e}"))?;
-            if let Some(n) = t.names().iter().find(|n| !m.names().contains(*n)) {
-                anyhow::bail!("play: {{{n}}} is not captured by any pattern");
+            if a.checks && a.acexy_control.is_none() {
+                anyhow::bail!("checks need acexy_control: only acexy tells whether a stream is watched");
             }
         }
         for (i, ex) in self.examples().iter().enumerate() {

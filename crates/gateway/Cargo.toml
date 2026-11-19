@@ -1,6 +1,6 @@
 [package]
 name = "lineup-gateway"
-description = "A gateway for lineup: turns references (Acestream ids, video pages) into playable URLs"
+description = "A gateway for lineup: turns references into playable URLs by configured rules"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -28,6 +28,7 @@ futures-util = "0.3"
 bytes = "1"
 toml = "1.0"
 regex = "1"
+percent-encoding = "2"
 
 [dev-dependencies]
 tempfile = "3"

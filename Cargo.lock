@@ -1325,6 +1325,7 @@ dependencies = [
  "clap",
  "futures-util",
  "gateway-contract",
+ "percent-encoding",
  "regex",
  "reqwest",
  "serde",

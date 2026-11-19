@@ -15,8 +15,15 @@
 //!
 //! Patterns with `hosts`, `path` or `query` need an http(s) URL with a host and no user info.
 //!
-//! Variables are the regexes' named captures. Fields are evaluated in order (input, path, then the
-//! query entries) and the first non-empty value of a variable wins. `vars` then normalises them:
+//! Variables are the regexes' named captures. Path captures are percent-decoded once (a `+` stays a
+//! `+`), query values are decoded as form values, input captures are taken as they are; templates
+//! encode once when rendering, so a ref reads back to itself. Fields are evaluated in order (input,
+//! path, then the query entries) and the first non-empty value of a variable wins. `rule` is
+//! built in: the rule's name (no pattern may capture it).
+//!
+//! Every `{var}` substitution in the identity, ref and play templates must be captured by every
+//! pattern (checked on load), and a match whose substitution came out empty is no match: an
+//! accepted input always has a full identity and ref. `{?…}` expansions may be empty. `vars` then normalises them:
 //! `int` (a signed 64-bit decimal, written canonically), `pos` (as `int`, above zero), `lower`.
 //! A value that does not convert fails the pattern, and the next one is tried.
 
@@ -26,6 +33,9 @@ use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 
 use crate::template::{Template, Use, Vars};
+
+/// The built-in variable holding the rule's name.
+pub const BUILTIN_RULE: &str = "rule";
 
 /// Inputs longer than this are refused before any regex runs.
 pub const MAX_INPUT: usize = 4096;
@@ -90,7 +100,10 @@ struct Pattern {
 /// A rule's compiled patterns and identity/ref templates.
 #[derive(Debug, Clone)]
 pub struct Matcher {
+    rule: String,
     patterns: Vec<Pattern>,
+    /// `{var}` substitutions of the identity, ref and play templates: never empty in a match.
+    required: BTreeSet<String>,
     vars: BTreeMap<String, VarType>,
     identity: Template,
     reference: Template,
@@ -123,20 +136,38 @@ fn capture_names(r: &Regex) -> impl Iterator<Item = String> + '_ {
 }
 
 impl Matcher {
-    /// Compile a rule's patterns and templates. `own_play`: the rule's relay play path, if any.
+    /// Compile a rule's patterns and templates. `play`: the rule's play template, if it has one;
+    /// `own_play`: the rule's relay play path, if any.
     pub fn new(
+        rule: &str,
         patterns: &[PatternConfig],
         vars: &BTreeMap<String, VarType>,
         identity: &str,
         reference: &str,
+        play: Option<&str>,
         own_play: Option<String>,
     ) -> anyhow::Result<Self> {
         if patterns.is_empty() {
             anyhow::bail!("match: at least one pattern");
         }
+        let identity = Template::parse(identity, Use::Identity).map_err(|e| anyhow::anyhow!("identity: {e}"))?;
+        let reference = Template::parse(reference, Use::Ref).map_err(|e| anyhow::anyhow!("ref: {e}"))?;
+        let play = play
+            .map(|p| Template::parse(p, Use::Play).map_err(|e| anyhow::anyhow!("play: {e}")))
+            .transpose()?;
+        let templates: Vec<(&str, &Template)> = [("identity", &identity), ("ref", &reference)]
+            .into_iter()
+            .chain(play.as_ref().map(|t| ("play", t)))
+            .collect();
+        let mut required = BTreeSet::new();
+        for (_, t) in &templates {
+            required.extend(t.required());
+        }
+        required.remove(BUILTIN_RULE);
         let mut compiled = Vec::new();
         let mut names = BTreeSet::new();
         for (i, p) in patterns.iter().enumerate() {
+            let mut own = BTreeSet::new();
             let at = |e: anyhow::Error| anyhow::anyhow!("match[{i}]: {e}");
             if p.input.is_none() && p.hosts.is_none() && p.path.is_none() && p.query.is_empty() {
                 anyhow::bail!("match[{i}]: a pattern needs input, hosts, path or query");
@@ -149,12 +180,25 @@ impl Matcher {
             let mut query = Vec::new();
             for q in &p.query {
                 let r = compile(&q.re, true).map_err(at)?;
-                names.extend(capture_names(&r));
+                own.extend(capture_names(&r));
                 query.push((q.param.clone(), r, q.optional));
             }
             for r in input.iter().chain(path.iter()) {
-                names.extend(capture_names(r));
+                own.extend(capture_names(r));
             }
+            if own.contains(BUILTIN_RULE) {
+                anyhow::bail!("match[{i}]: `rule` is built in (the rule's name); capture another name");
+            }
+            for (what, t) in &templates {
+                if let Some(n) = t
+                    .names()
+                    .iter()
+                    .find(|n| *n != BUILTIN_RULE && !own.contains(*n) && t.required().contains(*n))
+                {
+                    anyhow::bail!("match[{i}]: {what} needs {{{n}}}, which this pattern does not capture");
+                }
+            }
+            names.extend(own.iter().cloned());
             let hosts = p
                 .hosts
                 .as_ref()
@@ -166,8 +210,8 @@ impl Matcher {
                 anyhow::bail!("match[{i}]: hosts must not be empty");
             }
             for r in &p.require {
-                if !names.contains(r) {
-                    anyhow::bail!("match[{i}]: require names {r:?}, which no pattern captures");
+                if !own.contains(r) {
+                    anyhow::bail!("match[{i}]: require names {r:?}, which this pattern does not capture");
                 }
             }
             compiled.push(Pattern {
@@ -183,14 +227,14 @@ impl Matcher {
                 anyhow::bail!("vars: {v:?} is not captured by any pattern");
             }
         }
-        let identity = Template::parse(identity, Use::Identity).map_err(|e| anyhow::anyhow!("identity: {e}"))?;
-        let reference = Template::parse(reference, Use::Ref).map_err(|e| anyhow::anyhow!("ref: {e}"))?;
-        for (what, t) in [("identity", &identity), ("ref", &reference)] {
-            if let Some(n) = t.names().iter().find(|n| !names.contains(*n)) {
+        for (what, t) in &templates {
+            if let Some(n) = t.names().iter().find(|n| *n != BUILTIN_RULE && !names.contains(*n)) {
                 anyhow::bail!("{what}: {{{n}}} is not captured by any pattern");
             }
         }
         Ok(Matcher {
+            rule: rule.to_string(),
+            required,
             patterns: compiled,
             vars: vars.clone(),
             identity,
@@ -240,17 +284,8 @@ impl Matcher {
 
     fn try_pattern(&self, p: &Pattern, input: &str, url: Option<&url::Url>) -> Option<Match> {
         let mut vars = Vars::new();
-        let mut take = |r: &Regex, text: &str| -> bool {
-            let Some(c) = r.captures(text) else { return false };
-            for name in r.capture_names().flatten() {
-                if let Some(m) = c.name(name).filter(|m| !m.as_str().is_empty()) {
-                    vars.entry(name.to_string()).or_insert_with(|| m.as_str().to_string());
-                }
-            }
-            true
-        };
         if let Some(r) = &p.input
-            && !take(r, input)
+            && !take(&mut vars, r, input, false)
         {
             return None;
         }
@@ -262,14 +297,15 @@ impl Matcher {
                     return None;
                 }
             }
+            // Path captures are decoded once; templates encode them again.
             if let Some(r) = &p.path
-                && !take(r, u.path())
+                && !take(&mut vars, r, u.path(), true)
             {
                 return None;
             }
             for (param, r, optional) in &p.query {
                 let value = u.query_pairs().find(|(k, _)| k == param).map(|(_, v)| v.into_owned());
-                let ok = value.as_deref().is_some_and(|v| take(r, v));
+                let ok = value.as_deref().is_some_and(|v| take(&mut vars, r, v, false));
                 if !ok && !optional {
                     return None;
                 }
@@ -280,15 +316,42 @@ impl Matcher {
                 *v = convert(v, *ty)?;
             }
         }
-        if p.require.iter().any(|r| vars.get(r).is_none_or(String::is_empty)) {
+        if p.require
+            .iter()
+            .chain(self.required.iter())
+            .any(|r| vars.get(r).is_none_or(String::is_empty))
+        {
             return None;
         }
+        vars.insert(BUILTIN_RULE.to_string(), self.rule.clone());
         Some(Match {
             identity: self.identity.render(&vars),
             reference: self.reference.render(&vars),
             vars,
         })
     }
+}
+
+/// Search `text` with `r` and keep its non-empty named captures that are not set yet;
+/// `decode`: percent-decode them (path text). False when `r` does not match, or a capture does not
+/// decode to UTF-8.
+fn take(vars: &mut Vars, r: &Regex, text: &str, decode: bool) -> bool {
+    let Some(c) = r.captures(text) else { return false };
+    for name in r.capture_names().flatten() {
+        let Some(m) = c.name(name).filter(|m| !m.as_str().is_empty()) else {
+            continue;
+        };
+        let v = if decode {
+            match percent_encoding::percent_decode_str(m.as_str()).decode_utf8() {
+                Ok(v) => v.into_owned(),
+                Err(_) => return false,
+            }
+        } else {
+            m.as_str().to_string()
+        };
+        vars.entry(name.to_string()).or_insert(v);
+    }
+    true
 }
 
 fn convert(v: &str, ty: VarType) -> Option<String> {
@@ -316,6 +379,7 @@ mod tests {
     #[test]
     fn first_pattern_and_first_value_win() {
         let m = Matcher::new(
+            "x",
             &pat(r#"
                 [[match]]
                 hosts = ["vk.com"]
@@ -331,6 +395,7 @@ mod tests {
             &[("o".into(), VarType::Int), ("v".into(), VarType::Pos)].into(),
             "x:{o}_{v}",
             "https://vk.com/video{o}_{v}{?l}",
+            None,
             Some("play/x.m3u8".into()),
         )
         .unwrap();
@@ -377,7 +442,7 @@ mod tests {
     #[test]
     fn refuses_bad_definitions() {
         let vars = BTreeMap::new();
-        let one = |toml: &str, id: &str, r: &str| Matcher::new(&pat(toml), &vars, id, r, None);
+        let one = |toml: &str, id: &str, r: &str| Matcher::new("x", &pat(toml), &vars, id, r, None, None);
         assert!(one("match = []", "x", "a://x").is_err());
         assert!(one("[[match]]\n", "x", "a://x").is_err(), "empty pattern");
         assert!(one("[[match]]\ninput = '('", "x", "a://x").is_err(), "bad regex");
@@ -393,6 +458,105 @@ mod tests {
         );
         assert!(one("[[match]]\ninput = '(?P<a>x)'", "{a}", "a://{a}").is_ok());
         let typed = [("b".to_string(), VarType::Int)].into();
-        assert!(Matcher::new(&pat("[[match]]\ninput = '(?P<a>x)'"), &typed, "{a}", "a://{a}", None).is_err());
+        assert!(
+            Matcher::new(
+                "x",
+                &pat("[[match]]\ninput = '(?P<a>x)'"),
+                &typed,
+                "{a}",
+                "a://{a}",
+                None,
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn every_pattern_gives_a_full_identity_and_ref() {
+        let vars = BTreeMap::new();
+        let two = pat(r#"
+            [[match]]
+            path = '^/a/(?P<id>[0-9]+)$'
+            [[match]]
+            path = '^/b/(?P<other>[0-9]+)$'
+        "#);
+        let e = Matcher::new("x", &two, &vars, "p:{id}", "https://v.example/a/{id}", None, None).unwrap_err();
+        assert!(e.to_string().contains("match[1]"), "{e}");
+        // The play template counts too.
+        let one = pat("[[match]]\npath = '^/a/(?P<id>[0-9]+)(?:/(?P<q>[a-z]+))?$'");
+        assert!(
+            Matcher::new(
+                "x",
+                &one,
+                &vars,
+                "p:{id}",
+                "https://v.example/a/{id}",
+                Some("https://p/{zz}"),
+                None
+            )
+            .is_err()
+        );
+        // An optional group that captured nothing: no match rather than an empty substitution.
+        let m = Matcher::new(
+            "x",
+            &one,
+            &vars,
+            "p:{id}:{q}",
+            "https://v.example/a/{id}/{q}",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.matches("https://v.example/a/1"), None);
+        assert_eq!(m.matches("https://v.example/a/1/z").unwrap().identity, "p:1:z");
+        // `rule` is built in, and nobody may capture it.
+        let m = Matcher::new(
+            "pages",
+            &one,
+            &vars,
+            "{rule}:{id}",
+            "https://v.example/a/{id}",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.matches("https://v.example/a/7").unwrap().identity, "pages:7");
+        let taken = pat("[[match]]\npath = '^/a/(?P<rule>[0-9]+)$'");
+        assert!(Matcher::new("x", &taken, &vars, "{rule}", "https://v.example/", None, None).is_err());
+    }
+
+    #[test]
+    fn path_captures_read_back_to_themselves() {
+        let m = Matcher::new(
+            "x",
+            &pat("[[match]]\nhosts = ['v.example']\npath = '^/v/(?P<id>[^/]+)$'"),
+            &BTreeMap::new(),
+            "p:{id}",
+            "https://v.example/v/{id}",
+            None,
+            None,
+        )
+        .unwrap();
+        for (input, id, r) in [
+            (
+                "https://v.example/v/caf%C3%A9",
+                "p:café",
+                "https://v.example/v/caf%C3%A9",
+            ),
+            ("https://v.example/v/a%2Fb", "p:a/b", "https://v.example/v/a%2Fb"),
+            ("https://v.example/v/100%25", "p:100%", "https://v.example/v/100%25"),
+            ("https://v.example/v/a+b", "p:a+b", "https://v.example/v/a%2Bb"),
+        ] {
+            let first = m.matches(input).unwrap();
+            assert_eq!((first.identity.as_str(), first.reference.as_str()), (id, r), "{input}");
+            let again = m.matches(&first.reference).unwrap();
+            assert_eq!(
+                (again.identity, again.reference),
+                (first.identity, first.reference),
+                "{input}"
+            );
+        }
+        assert_eq!(m.matches("https://v.example/v/%FF"), None, "not UTF-8");
     }
 }
