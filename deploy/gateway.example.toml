@@ -2,18 +2,37 @@
 
 listen = "0.0.0.0:8099"
 
-# The acestream rule: Acestream ids played through acexy. Remove the section to turn it off.
-# [acestream]
+# Extractors: commands that look a page up. `{url}` is the page, `{proxy}` the gateway's egress
+# proxy (required: every tool's traffic goes through it).
+[extractors.yt-dlp]
+command = "/opt/tools/bin/yt-dlp"
+args = ["--ignore-config", "--no-playlist", "--no-warnings", "--dump-single-json",
+        "--socket-timeout", "15", "--proxy", "{proxy}", "--", "{url}"]
+output = "yt-dlp-json"
+
+[extractors.streamlink]
+command = "/opt/tools/bin/streamlink"
+args = ["--no-config", "--json", "--http-proxy", "{proxy}", "--", "{url}", "best"]
+output = "streamlink-json"
+
+# Rules: each [rules.<name>] block is one rule lineup routes can use, by that name.
+
+# VK video pages, live or recorded, relayed as HLS.
+[rules.vk]
+kind = "vk"
+title = "VK video"
+input_hint = "vk.com, vkvideo.ru or vksport link to a video or broadcast"
+group = "VK"
+extractors = ["yt-dlp", "streamlink"]
+
+# Acestream ids played through acexy. Uncomment and set the addresses to turn it on.
+# [rules.acestream]
+# kind = "acestream"
+# title = "Acestream"
+# input_hint = "40-hex content id, acestream:// link or acexy/engine URL"
 # engine_control = "http://acestream:6878"     # gateway -> engine (names, checks)
 # acexy_control  = "http://acexy:8080"         # gateway -> acexy (activity guard, live numbers)
 # acexy_public   = "http://media-host:8080"    # written into play URLs: as players reach acexy
-
-# The vk rule: VK video pages, live or recorded, relayed as HLS.
-[vk]
-
-[tools]
-yt_dlp = "/opt/tools/bin/yt-dlp"
-streamlink = "/opt/tools/bin/streamlink"
 
 [limits]
 extractions = 2

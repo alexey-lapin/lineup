@@ -201,6 +201,15 @@ fn fake_yt_dlp(dir: &std::path::Path, cdn: &str, live: bool) -> std::path::PathB
     p
 }
 
+/// An `[extractors.yt-dlp]` block for a fake tool.
+fn extractor(path: &std::path::Path) -> String {
+    format!(
+        "[extractors.yt-dlp]\ncommand = \"{}\"\nargs = [\"--proxy\", \"{{proxy}}\", \"--\", \"{{url}}\"]\n\
+         output = \"yt-dlp-json\"\nversion_args = []\n",
+        path.display()
+    )
+}
+
 struct Fixture {
     url: String,
     engine: Shared,
@@ -222,13 +231,16 @@ async fn fixture_with(live: bool, acexy: bool) -> Fixture {
     let yt = fake_yt_dlp(dir.path(), &cdn_url, live);
     let cfg = Config::parse(&format!(
         r#"
-        [acestream]
+        [rules.acestream]
+        kind = "acestream"
         engine_control = "{engine_url}"
         {}
         acexy_public = "http://192.168.1.50:8080"
-        [vk]
-        [tools]
-        yt_dlp = "{}"
+        [rules.vk]
+        kind = "vk"
+        group = "VK"
+        extractors = ["yt-dlp"]
+        {}
         [egress]
         allow = ["127.0.0.1"]
         "#,
@@ -237,7 +249,7 @@ async fn fixture_with(live: bool, acexy: bool) -> Fixture {
         } else {
             String::new()
         },
-        yt.display()
+        extractor(&yt)
     ))
     .unwrap();
     let g = lineup_gateway::Gateway::new(
@@ -468,7 +480,11 @@ async fn public_fetches_refuse_private_addresses() {
     let cdn_url = cdn(cdn_state.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let yt = fake_yt_dlp(dir.path(), &cdn_url, true);
-    let cfg = Config::parse(&format!("[vk]\n[tools]\nyt_dlp = \"{}\"\n", yt.display())).unwrap();
+    let cfg = Config::parse(&format!(
+        "[rules.vk]\nkind = \"vk\"\nextractors = [\"yt-dlp\"]\n{}",
+        extractor(&yt)
+    ))
+    .unwrap();
     let g = lineup_gateway::Gateway::new(&cfg, ProbeTiming::default())
         .await
         .unwrap();
@@ -633,4 +649,124 @@ async fn a_refresh_never_splices_and_concurrent_expiries_share_one_refresh() {
         cdn.ended = true;
     }
     assert_eq!(reqwest::get(c).await.unwrap().status(), 410);
+}
+
+async fn gateway(cfg: &str) -> String {
+    let cfg = Config::parse(cfg).unwrap();
+    let g = lineup_gateway::Gateway::new(
+        &cfg,
+        ProbeTiming {
+            poll_every: std::time::Duration::from_millis(20),
+            give_up_after: std::time::Duration::from_millis(100),
+        },
+    )
+    .await
+    .unwrap();
+    serve(lineup_gateway::router(g)).await
+}
+
+#[tokio::test]
+async fn rules_on_one_engine_share_its_probe_lock() {
+    let shared = Shared::default();
+    let engine_url = engine(shared.clone()).await;
+    let rule = |name: &str| {
+        format!(
+            "[rules.{name}]\nkind = \"acestream\"\nengine_control = \"{engine_url}\"\nacexy_control = \"{engine_url}\"\n\
+             acexy_public = \"http://192.168.1.50:8080\"\n"
+        )
+    };
+    let url = gateway(&format!("{}{}", rule("one"), rule("two"))).await;
+    let check = |rule: &'static str| {
+        let url = format!("{url}/v1/check");
+        async move { post(&url, json!({"rule": rule, "ref": format!("acestream://{ACE}")})).await }
+    };
+    // One caller goes away mid-probe; checks through both rules run at once.
+    let cancelled = tokio::spawn(check("one"));
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    cancelled.abort();
+    let (a, b) = tokio::join!(check("one"), check("two"));
+    assert_eq!(
+        (a.1["outcome"].as_str(), b.1["outcome"].as_str()),
+        (Some("dead"), Some("dead"))
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let e = shared.lock().unwrap();
+    assert_eq!(e.max_open, 1, "probes on one engine never overlap, whatever the rule");
+    assert_eq!(e.open, 0);
+}
+
+#[tokio::test]
+async fn page_rules_keep_their_own_lookups_and_expiry() {
+    let cdn_state = CdnState::default();
+    let cdn_url = cdn(cdn_state.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let good = fake_yt_dlp(dir.path(), &cdn_url, true);
+    let bad = dir.path().join("broken");
+    std::fs::write(
+        &bad,
+        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho 'ERROR: Unable to download webpage: timed out' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let x = |name: &str, path: &std::path::Path| {
+        extractor(path).replace("[extractors.yt-dlp]", &format!("[extractors.{name}]"))
+    };
+    let url = gateway(&format!(
+        r#"
+        [rules.good]
+        kind = "vk"
+        extractors = ["good"]
+        [rules.broken]
+        kind = "vk"
+        extractors = ["broken"]
+        [rules.strict]
+        kind = "vk"
+        extractors = ["good"]
+        expired_status = [410]
+        {}{}
+        [egress]
+        allow = ["127.0.0.1"]
+        "#,
+        x("good", &good),
+        x("broken", &bad)
+    ))
+    .await;
+    let page = "https://vk.com/video-1_2";
+    // The same page: one rule's failure is not another rule's answer, in either order.
+    for rule in ["broken", "good", "broken"] {
+        let (_, r) = post(&format!("{url}/v1/check"), json!({"rule": rule, "ref": page})).await;
+        let want = if rule == "good" { "ok" } else { "unknown" };
+        assert_eq!(r["outcome"], want, "{rule}: {r}");
+    }
+    // Own play routes; a rule's expired_status decides what counts as expired.
+    let seg = |master_url: String| async move {
+        let master = reqwest::get(&master_url).await.unwrap().text().await.unwrap();
+        let child = url::Url::parse(&master_url)
+            .unwrap()
+            .join(master.lines().find(|l| l.starts_with("s/")).unwrap())
+            .unwrap();
+        let media = reqwest::get(child.clone()).await.unwrap().text().await.unwrap();
+        child.join(media.lines().find(|l| l.ends_with(".ts")).unwrap()).unwrap()
+    };
+    let q = "ref=https%3A%2F%2Fvk.com%2Fvideo-1_2";
+    let good_seg = seg(format!("{url}/play/good.m3u8?{q}")).await;
+    let strict_seg = seg(format!("{url}/play/strict.m3u8?{q}")).await;
+    cdn_state.lock().unwrap().expired = true; // the CDN answers 403
+    assert_eq!(
+        reqwest::get(good_seg).await.unwrap().status(),
+        410,
+        "403 is expired by default"
+    );
+    assert_eq!(
+        reqwest::get(strict_seg).await.unwrap().status(),
+        502,
+        "403 is not in this rule's expired_status"
+    );
+    assert_eq!(
+        reqwest::get(format!("{url}/play/nope.m3u8?{q}"))
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
 }

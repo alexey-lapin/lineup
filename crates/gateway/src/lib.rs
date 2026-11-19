@@ -1,5 +1,5 @@
-//! lineup-gateway: serves the gateway contract (`/v1/*`) for its rules, and relays page streams
-//! (`/play/*`).
+//! lineup-gateway: serves the gateway contract (`/v1/*`) for its configured rules, and relays the
+//! streams of page rules (`/play/*`).
 
 pub mod config;
 pub mod extract;
@@ -8,6 +8,7 @@ pub mod net;
 pub mod relay;
 pub mod rules;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
@@ -16,22 +17,24 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gateway_contract::{
-    CONTRACT, Capability, CheckOutcome, CheckRequest, CheckResponse, ContentState, ErrorBody, ErrorDetail, Fact, Info,
-    MAX_MATCH_INPUTS, MAX_OBSERVE_REFS, MatchRequest, MatchResponse, Observation, ObserveRequest, ObserveResponse,
-    RuleInfo,
+    CONTRACT, CheckRequest, ErrorBody, ErrorDetail, Info, MAX_MATCH_INPUTS, MAX_OBSERVE_REFS, MatchRequest,
+    MatchResponse, ObserveRequest, ObserveResponse,
 };
 use serde::Deserialize;
 
-use crate::config::Config;
-use crate::extract::{ExtractError, Extractor, Priority, Tools};
+use crate::config::{Config, RuleConfig};
+use crate::extract::{Extractor, RelayPolicy, Tool};
 use crate::net::{Allow, EgressProxy};
 use crate::relay::{Relay, text};
-use crate::rules::acestream::{Acestream, ProbeTiming};
-use crate::rules::vk;
+use crate::rules::Rule;
+use crate::rules::acestream::{Acestream, EngineLock, ProbeTiming};
+use crate::rules::page::PageRule;
 
 pub struct Gateway {
-    pub acestream: Option<Acestream>,
-    pub vk: Option<Relay>,
+    /// Rules by name, in name order.
+    rules: Vec<(String, Rule)>,
+    /// The relay every page rule plays through; present when there is one.
+    relay: Option<Relay>,
     /// Kept alive while the gateway runs.
     _proxy: Option<EgressProxy>,
 }
@@ -39,77 +42,81 @@ pub struct Gateway {
 pub type AppState = Arc<Gateway>;
 
 impl Gateway {
-    /// Build the gateway from its config: start the egress proxy, check the tools.
+    /// Build the gateway from its config: start the egress proxy, check the extractors.
     pub async fn new(cfg: &Config, timing: ProbeTiming) -> anyhow::Result<Arc<Self>> {
         let allow = Allow::new(&cfg.egress.allow);
-        let acestream = cfg.acestream.clone().map(|a| Acestream::new(a, timing));
-        let (vk, proxy) = match &cfg.vk {
-            None => (None, None),
-            Some(_) => {
-                let proxy = EgressProxy::start(allow.clone()).await?;
-                tracing::info!("egress proxy for the extractors on {}", proxy.url());
-                for (name, bin) in [("yt_dlp", &cfg.tools.yt_dlp), ("streamlink", &cfg.tools.streamlink)] {
-                    if let Some(b) = bin {
-                        let version = tool_version(b)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("tools.{name}: {e}"))?;
-                        tracing::info!("tools.{name}: {} {version}", b.display());
-                    }
-                }
-                let extractor = Extractor::new(
-                    Tools {
-                        yt_dlp: cfg.tools.yt_dlp.clone(),
-                        streamlink: cfg.tools.streamlink.clone(),
-                        proxy: proxy.url(),
-                        timeout: cfg.limits.extraction_timeout(),
-                    },
-                    cfg.limits.extractions,
-                );
-                let client = net::public_client(&allow, cfg.limits.upstream_timeout());
-                (
-                    Some(Relay::new(client, allow.clone(), extractor, &cfg.limits)),
-                    Some(proxy),
-                )
-            }
+        let pages = cfg.rules.values().any(|r| matches!(r, RuleConfig::Vk(_)));
+        let (relay, proxy) = if pages {
+            let proxy = EgressProxy::start(allow.clone()).await?;
+            tracing::info!("egress proxy for the extractors on {}", proxy.url());
+            let extractor = Extractor::new(proxy.url(), cfg.limits.extractions);
+            let client = net::public_client(&allow, cfg.limits.upstream_timeout());
+            (
+                Some(Relay::new(client, allow.clone(), extractor, &cfg.limits)),
+                Some(proxy),
+            )
+        } else {
+            (None, None)
         };
+        // Extractors that some rule uses: checked once, shared by every rule naming them.
+        let mut tools: HashMap<&str, Arc<Tool>> = HashMap::new();
+        for r in cfg.rules.values() {
+            let RuleConfig::Vk(p) = r else { continue };
+            for name in &p.extractors {
+                if tools.contains_key(name.as_str()) {
+                    continue;
+                }
+                let x = &cfg.extractors[name];
+                let version = tool_version(&x.command, &x.version_args)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("extractors.{name}: {e}"))?;
+                tracing::info!("extractors.{name}: {} {version}", x.command.display());
+                tools.insert(
+                    name.as_str(),
+                    Arc::new(Tool::from_config(name, x, cfg.limits.extraction_timeout())),
+                );
+            }
+        }
+        let mut engines: HashMap<String, EngineLock> = HashMap::new();
+        let mut rules = Vec::new();
+        for (name, r) in &cfg.rules {
+            let rule = match r {
+                RuleConfig::Acestream(a) => {
+                    let lock = engines.entry(Acestream::engine_key(a)).or_default().clone();
+                    Rule::Acestream(Acestream::new(name, a.clone(), timing, lock))
+                }
+                RuleConfig::Vk(p) => {
+                    let chain = p.extractors.iter().map(|x| tools[x.as_str()].clone()).collect();
+                    let policy = RelayPolicy::new(chain, p.expired_status.clone(), p.expires_param.clone());
+                    Rule::Page(PageRule::new(name, p, Arc::new(policy)))
+                }
+            };
+            rules.push((name.clone(), rule));
+        }
         Ok(Arc::new(Gateway {
-            acestream,
-            vk,
+            rules,
+            relay,
             _proxy: proxy,
         }))
     }
 
     pub fn info(&self) -> Info {
-        let mut rules = Vec::new();
-        if let Some(a) = &self.acestream {
-            rules.push(RuleInfo {
-                name: "acestream".into(),
-                title: "Acestream".into(),
-                input_hint: Some("40-hex content id, acestream:// link or acexy/engine URL".into()),
-                capabilities: if a.can_check() {
-                    vec![Capability::Observe, Capability::Check]
-                } else {
-                    vec![Capability::Observe]
-                },
-                match_revision: rules::acestream::MATCH_REVISION.into(),
-                play_revision: a.play_revision(),
-            });
-        }
-        if self.vk.is_some() {
-            rules.push(RuleInfo {
-                name: "vk".into(),
-                title: "VK video".into(),
-                input_hint: Some("vk.com, vkvideo.ru or vksport link to a video or broadcast".into()),
-                capabilities: vec![Capability::Observe, Capability::Check],
-                match_revision: vk::MATCH_REVISION.into(),
-                play_revision: vk::PLAY_REVISION.into(),
-            });
-        }
         Info {
             name: "lineup-gateway".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             contract: CONTRACT,
-            rules,
+            rules: self.rules.iter().map(|(_, r)| r.info()).collect(),
+        }
+    }
+
+    fn rule(&self, name: &str) -> Option<&Rule> {
+        self.rules.iter().find(|(n, _)| n == name).map(|(_, r)| r)
+    }
+
+    fn page_rule(&self, name: &str) -> Option<(&PageRule, &Relay)> {
+        match (self.rule(name)?, &self.relay) {
+            (Rule::Page(p), Some(relay)) => Some((p, relay)),
+            _ => None,
         }
     }
 }
@@ -171,13 +178,10 @@ async fn matching(State(g): State<AppState>, Json(req): Json<MatchRequest>) -> R
             format!("at most {MAX_MATCH_INPUTS} inputs per request"),
         );
     }
-    let results = match req.rule.as_str() {
-        "acestream" => match &g.acestream {
-            Some(a) => a.match_inputs(&req.inputs).await,
-            None => return unknown_rule(&req.rule),
-        },
-        "vk" if g.vk.is_some() => vk::match_inputs(&req.inputs),
-        other => return unknown_rule(other),
+    let results = match g.rule(&req.rule) {
+        Some(Rule::Acestream(a)) => a.match_inputs(&req.inputs).await,
+        Some(Rule::Page(p)) => p.match_inputs(&req.inputs),
+        None => return unknown_rule(&req.rule),
     };
     Json(MatchResponse { results }).into_response()
 }
@@ -191,166 +195,56 @@ async fn observe(State(g): State<AppState>, Json(req): Json<ObserveRequest>) -> 
         );
     }
     let mut results = Vec::with_capacity(req.refs.len());
-    match req.rule.as_str() {
-        "acestream" => {
-            let Some(a) = &g.acestream else {
-                return unknown_rule(&req.rule);
-            };
+    match g.rule(&req.rule) {
+        Some(Rule::Acestream(a)) => {
             for r in &req.refs {
                 results.push(a.observe(r).await);
             }
         }
-        "vk" => {
-            let Some(relay) = &g.vk else {
+        Some(Rule::Page(_)) => {
+            let Some((p, relay)) = g.page_rule(&req.rule) else {
                 return unknown_rule(&req.rule);
             };
             for r in &req.refs {
-                results.push(observe_page(relay, r).await);
+                results.push(p.observe(relay, r).await);
             }
         }
-        other => return unknown_rule(other),
+        None => return unknown_rule(&req.rule),
     }
     Json(ObserveResponse { results }).into_response()
 }
 
-async fn observe_page(relay: &Relay, reference: &str) -> Observation {
-    let mut o = Observation {
-        reference: reference.to_string(),
-        available: false,
-        reason: None,
-        content_state: None,
-        watching: None,
-        facts: vec![],
-        title: None,
-        raw: None,
-    };
-    let Some(r) = vk::parse(reference) else {
-        o.reason = Some("not a VK reference".into());
-        return o;
-    };
-    match relay.probe(&r.canonical(), Priority::Background).await {
-        Ok((d, summary)) => {
-            o.available = true;
-            o.content_state = Some(page_state(&d, &summary));
-            o.title = d.title.clone();
-            o.facts.push(Fact {
-                label: "Found by".into(),
-                value: d.tool.into(),
-            });
-            if let Some(secs) = d.duration.filter(|_| o.content_state == Some(ContentState::Recording)) {
-                o.facts.push(Fact {
-                    label: "Duration".into(),
-                    value: hms(secs),
-                });
-            }
-        }
-        Err(ExtractError::NoStream(m)) => {
-            o.available = true;
-            o.content_state = Some(ContentState::EndedProcessing);
-            o.reason = Some(m);
-        }
-        Err(e) => o.reason = Some(e.to_string()),
-    }
-    o
-}
-
-/// What a page is now, from its lookup and its first media playlist. ENDLIST alone is not a
-/// recording: a lookup that still says live, or a playlist without segments, means the broadcast
-/// ended and its recording is not playable yet.
-fn page_state(d: &extract::Descriptor, s: &hls::Summary) -> ContentState {
-    if !s.ended {
-        ContentState::Live
-    } else if d.is_live == Some(true) || s.segments == 0 {
-        ContentState::EndedProcessing
-    } else {
-        ContentState::Recording
-    }
-}
-
-/// `tool --version`, which also proves the tool runs.
-async fn tool_version(bin: &std::path::Path) -> anyhow::Result<String> {
+/// `tool --version` (or the configured version arguments), which also proves the tool runs.
+async fn tool_version(bin: &std::path::Path, args: &[String]) -> anyhow::Result<String> {
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::new(bin)
-            .arg("--version")
+            .args(args)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("{} --version did not finish", bin.display()))?
+    .map_err(|_| anyhow::anyhow!("{} {} did not finish", bin.display(), args.join(" ")))?
     .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", bin.display()))?;
     if !out.status.success() {
-        anyhow::bail!("{} --version failed", bin.display());
+        anyhow::bail!("{} {} failed", bin.display(), args.join(" "));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn hms(secs: f64) -> String {
-    let s = secs.round() as u64;
-    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-}
-
 async fn check(State(g): State<AppState>, Json(req): Json<CheckRequest>) -> Response {
-    let resp = match req.rule.as_str() {
-        "acestream" => {
-            let Some(a) = &g.acestream else {
+    let resp = match g.rule(&req.rule) {
+        Some(Rule::Acestream(a)) => a.check(&req.reference, req.force).await,
+        Some(Rule::Page(_)) => {
+            let Some((p, relay)) = g.page_rule(&req.rule) else {
                 return unknown_rule(&req.rule);
             };
-            a.check(&req.reference, req.force).await
+            p.check(relay, &req.reference).await
         }
-        "vk" => {
-            let Some(relay) = &g.vk else {
-                return unknown_rule(&req.rule);
-            };
-            check_page(relay, &req.reference).await
-        }
-        other => return unknown_rule(other),
+        None => return unknown_rule(&req.rule),
     };
     Json(resp).into_response()
-}
-
-async fn check_page(relay: &Relay, reference: &str) -> CheckResponse {
-    let mut resp = CheckResponse {
-        reference: reference.to_string(),
-        outcome: CheckOutcome::Unknown,
-        reason: None,
-        content_state: None,
-        detail: None,
-        checked_at: chrono::Utc::now().to_rfc3339(),
-    };
-    let Some(r) = vk::parse(reference) else {
-        resp.reason = Some("bad_ref".into());
-        return resp;
-    };
-    match relay.probe(&r.canonical(), Priority::Background).await {
-        Ok((d, summary)) => {
-            let state = page_state(&d, &summary);
-            resp.content_state = Some(state);
-            if state == ContentState::EndedProcessing {
-                // Ended, recording not ready: inconclusive, never a failure.
-                resp.reason = Some("recording_not_ready".into());
-            } else {
-                resp.outcome = CheckOutcome::Ok;
-            }
-            resp.detail = Some(serde_json::json!({ "tool": d.tool, "segments": summary.segments }));
-        }
-        Err(ExtractError::NotFound(m)) => {
-            resp.outcome = CheckOutcome::Dead;
-            resp.reason = Some("not_found".into());
-            resp.detail = Some(serde_json::json!({ "error": m }));
-        }
-        Err(ExtractError::NoStream(m)) => {
-            resp.content_state = Some(ContentState::EndedProcessing);
-            resp.reason = Some("no_stream_yet".into());
-            resp.detail = Some(serde_json::json!({ "error": m }));
-        }
-        Err(ExtractError::Failed(m)) => {
-            resp.reason = Some("lookup_failed".into());
-            resp.detail = Some(serde_json::json!({ "error": m }));
-        }
-    }
-    resp
 }
 
 #[derive(Deserialize)]
@@ -359,6 +253,7 @@ struct PlayQuery {
     reference: Option<String>,
 }
 
+/// `/play/<rule>.m3u8?ref=<ref>` for a page rule.
 async fn play(
     State(g): State<AppState>,
     method: Method,
@@ -366,18 +261,13 @@ async fn play(
     Query(q): Query<PlayQuery>,
 ) -> Response {
     let head = method == Method::HEAD;
-    match file.as_str() {
-        "vk.m3u8" => {
-            let Some(relay) = &g.vk else {
-                return text(StatusCode::NOT_FOUND, "the vk rule is off");
-            };
-            let Some(r) = q.reference.as_deref().and_then(vk::parse) else {
-                return text(StatusCode::BAD_REQUEST, "ref must be a VK video link");
-            };
-            relay.play(&r.canonical(), head).await
-        }
-        _ => text(StatusCode::NOT_FOUND, "no such play route"),
-    }
+    let Some((p, relay)) = file.strip_suffix(".m3u8").and_then(|name| g.page_rule(name)) else {
+        return text(StatusCode::NOT_FOUND, "no such play route");
+    };
+    let Some(r) = q.reference.as_deref().and_then(|x| p.parse(x)) else {
+        return text(StatusCode::BAD_REQUEST, "ref is not a reference this rule accepts");
+    };
+    relay.play(&p.lookup(&r), head).await
 }
 
 async fn resource(
@@ -386,7 +276,7 @@ async fn resource(
     Path((sid, file)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(relay) = &g.vk else {
+    let Some(relay) = &g.relay else {
         return text(StatusCode::NOT_FOUND, "no such session");
     };
     relay.resource(&sid, &file, &headers, method == Method::HEAD).await

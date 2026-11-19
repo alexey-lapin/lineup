@@ -1,13 +1,11 @@
-//! The `vk` rule: VK video pages, live or recorded, relayed as HLS.
+//! The `vk` kind's parser: VK video pages, live or recorded, relayed as HLS.
 //!
 //! match (no extraction): `vk.com`, `vk.ru`, `vkvideo.ru` (and subdomains such as
 //! `sport.vkvideo.ru`, `m.vk.com`) video links in their usual forms — `/video-1_2`,
 //! `/video/-1_2`, `/live-1_2`, `?z=video-1_2%2F…`, `/video_ext.php?oid=-1&id=2` — legacy vkserve
-//! URLs (`…/vk/-1_2`), and this gateway's own play URLs. Identity `vk:<owner>_<video>`; ref the
-//! canonical `https://vk.com/video<owner>_<video>[?list=…]` (the `list` access token is kept: some
-//! videos need it); play `play/vk.m3u8?ref=<ref>`.
-
-use gateway_contract::{Hints, MatchResult, Matched};
+//! URLs (`…/vk/-1_2`), and this gateway's own play URLs for the rule. Identity
+//! `vk:<owner>_<video>`; ref the canonical `https://vk.com/video<owner>_<video>[?list=…]` (the `list`
+//! access token is kept: some videos need it); play `play/<rule>.m3u8?ref=<ref>`.
 
 pub const MATCH_REVISION: &str = "1";
 pub const PLAY_REVISION: &str = "1";
@@ -37,40 +35,16 @@ impl VkRef {
         format!("vk:{}_{}", self.owner, self.video)
     }
 
-    pub fn play(&self) -> String {
+    pub fn play(&self, rule: &str) -> String {
         format!(
-            "play/vk.m3u8?ref={}",
+            "play/{rule}.m3u8?ref={}",
             url::form_urlencoded::byte_serialize(self.canonical().as_bytes()).collect::<String>()
         )
     }
 }
 
-pub fn match_inputs(inputs: &[String]) -> Vec<MatchResult> {
-    inputs
-        .iter()
-        .map(|input| match parse(input) {
-            Some(r) => MatchResult::Matched(Matched {
-                input: input.clone(),
-                identity: r.identity(),
-                reference: r.canonical(),
-                play: r.play(),
-                hints: Hints {
-                    title: None,
-                    region: None,
-                    group: Some("VK".into()),
-                },
-                warnings: vec![],
-            }),
-            None => MatchResult::NoMatch {
-                input: input.clone(),
-                reason: Some("not a VK video link".into()),
-            },
-        })
-        .collect()
-}
-
-/// Parse any accepted form.
-pub fn parse(input: &str) -> Option<VkRef> {
+/// Parse any accepted form; `rule` names the rule whose own play URLs are accepted too.
+pub fn parse(rule: &str, input: &str) -> Option<VkRef> {
     let u = url::Url::parse(input.trim()).ok()?;
     if !matches!(u.scheme(), "http" | "https") {
         return None;
@@ -80,8 +54,8 @@ pub fn parse(input: &str) -> Option<VkRef> {
         !l.is_empty() && l.len() <= 64 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     });
     // This gateway's play URL (any host or prefix): the ref inside it.
-    if u.path().ends_with("/play/vk.m3u8") {
-        return parse(&q("ref")?);
+    if u.path().ends_with(&format!("/play/{rule}.m3u8")) {
+        return parse(rule, &q("ref")?);
     }
     let host = u.host_str()?.to_ascii_lowercase();
     let vk_host = ["vk.com", "vk.ru", "vkvideo.ru"]
@@ -169,17 +143,21 @@ mod tests {
             "http://gw:8099/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-100001_200002%3Flist%3D0a1b2c3d4e5f6a7b8c",
             "http://proxy/gw/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-100001_200002%3Flist%3D0a1b2c3d4e5f6a7b8c",
         ] {
-            assert_eq!(parse(input).as_ref(), Some(&want), "{input}");
+            assert_eq!(parse("vk", input).as_ref(), Some(&want), "{input}");
         }
         assert_eq!(
             want.canonical(),
             "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
         );
         assert_eq!(want.identity(), "vk:-100001_200002");
-        assert_eq!(parse(&want.canonical()), Some(want.clone()), "canonical parses back");
-        let ext = parse("https://vk.com/video_ext.php?oid=-1&id=2&hash=abc").unwrap();
+        assert_eq!(
+            parse("vk", &want.canonical()),
+            Some(want.clone()),
+            "canonical parses back"
+        );
+        let ext = parse("vk", "https://vk.com/video_ext.php?oid=-1&id=2&hash=abc").unwrap();
         assert_eq!((ext.owner, ext.video, ext.list.as_deref()), (-1, 2, Some("abc")));
-        let no_list = parse("https://vk.com/video123_45").unwrap();
+        let no_list = parse("vk", "https://vk.com/video123_45").unwrap();
         assert_eq!(no_list.canonical(), "https://vk.com/video123_45");
         for bad in [
             "https://vk.com/id1",
@@ -189,9 +167,9 @@ mod tests {
             "https://vk.com/видео",
             "not a url",
         ] {
-            assert_eq!(parse(bad), None, "{bad}");
+            assert_eq!(parse("vk", bad), None, "{bad}");
         }
         // A list token with odd characters is dropped rather than carried.
-        assert_eq!(parse("https://vk.com/video1_2?list=a%22b").unwrap().list, None);
+        assert_eq!(parse("vk", "https://vk.com/video1_2?list=a%22b").unwrap().list, None);
     }
 }

@@ -1,4 +1,4 @@
-//! The `acestream` rule: Acestream content ids, played through acexy.
+//! The `acestream` kind: Acestream content ids, played through acexy.
 //!
 //! - match: `acestream://<id>`, a bare 40-hex id, or an acexy/engine URL with `id=` or
 //!   `content_id=` under an `/ace/` path segment (also behind a path prefix, and this gateway's
@@ -6,10 +6,12 @@
 //!   `<acexy_public>/ace/getstream?id=<id>`. The engine is asked for the content's name (cleaned:
 //!   quality words dropped, a `[DE]` tag becomes the region, sports-looking names get "Sports").
 //! - observe: acexy's per-stream status and, while acexy serves the stream, the statistics of its
-//!   engine session. Never starts, controls or stops a session.
+//!   engine session. Never starts, controls or stops a session. Without acexy: the engine's name
+//!   only.
 //! - check: a short engine session of its own (unique pid), its statistics polled, then stopped.
 //!   Before each check acexy is asked whether the stream is watched; a watched stream is skipped,
-//!   and an unreadable guard skips too (fail closed). One check per engine at a time.
+//!   and an unreadable guard skips too (fail closed). One check per engine at a time, across every
+//!   rule that uses the engine (the gateway hands rules on one engine the same lock).
 //!
 //! All requests go to the configured control origins only, never follow redirects, and URLs the
 //! engine reports are validated and rebased onto the configured engine.
@@ -17,7 +19,9 @@
 use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
-use gateway_contract::{CheckOutcome, CheckResponse, Fact, Hints, MatchResult, Matched, Observation};
+use gateway_contract::{
+    Capability, CheckOutcome, CheckResponse, Fact, Hints, MatchResult, Matched, Observation, RuleInfo,
+};
 use serde_json::{Value, json};
 
 use crate::config::AcestreamConfig;
@@ -40,13 +44,17 @@ impl Default for ProbeTiming {
     }
 }
 
+/// One probe per engine at a time: the lock every rule on that engine shares.
+pub type EngineLock = std::sync::Arc<tokio::sync::Mutex<()>>;
+
 pub struct Acestream {
+    name: String,
     cfg: AcestreamConfig,
     client: reqwest::Client,
     timing: ProbeTiming,
     /// One probe per engine at a time. Held by the task that owns the probe, so a caller that goes
     /// away does not release it while the probe still runs.
-    probe_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    probe_lock: EngineLock,
     /// Engine names already looked up (raw), for observe.
     names: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>,
 }
@@ -58,7 +66,7 @@ const NAME_CACHE: Duration = Duration::from_secs(600);
 pub const MATCH_REVISION: &str = "1";
 
 impl Acestream {
-    pub fn new(cfg: AcestreamConfig, timing: ProbeTiming) -> Self {
+    pub fn new(name: &str, cfg: AcestreamConfig, timing: ProbeTiming, probe_lock: EngineLock) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy() // only the configured origins, directly
             .redirect(reqwest::redirect::Policy::none())
@@ -66,11 +74,40 @@ impl Acestream {
             .build()
             .expect("building the control client");
         Acestream {
+            name: name.to_string(),
             cfg,
             client,
             timing,
-            probe_lock: Default::default(),
+            probe_lock,
             names: Default::default(),
+        }
+    }
+
+    /// The engine this rule probes, as the key for its shared lock: scheme, host and port.
+    pub fn engine_key(cfg: &AcestreamConfig) -> String {
+        match url::Url::parse(&cfg.engine_control) {
+            Ok(u) => format!(
+                "{}://{}:{}",
+                u.scheme(),
+                u.host_str().unwrap_or_default().to_ascii_lowercase(),
+                u.port_or_known_default().unwrap_or_default()
+            ),
+            Err(_) => cfg.engine_control.clone(),
+        }
+    }
+
+    pub fn info(&self) -> RuleInfo {
+        RuleInfo {
+            name: self.name.clone(),
+            title: self.cfg.title.clone().unwrap_or_else(|| self.name.clone()),
+            input_hint: self.cfg.input_hint.clone(),
+            capabilities: if self.can_check() {
+                vec![Capability::Observe, Capability::Check]
+            } else {
+                vec![Capability::Observe]
+            },
+            match_revision: MATCH_REVISION.into(),
+            play_revision: self.play_revision(),
         }
     }
 

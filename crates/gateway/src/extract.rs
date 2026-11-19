@@ -1,11 +1,14 @@
-//! Running the extractors (yt-dlp first, streamlink as the fallback) as subprocesses, and caching
+//! Running the configured extractors as subprocesses, in the order a rule lists them, and caching
 //! what they find as descriptors.
 //!
-//! Subprocess hygiene: argument arrays (no shell), null stdin, their own config files ignored,
-//! all traffic through the egress proxy, bounded output, a deadline, and kill on drop (the process
-//! group is killed so helpers die too). At most `limits.extractions` run at once; background work
-//! (observe, check) gets at most one of those slots, so playback always has room. Lookups of the
-//! same page are coalesced.
+//! Subprocess hygiene: argument arrays (no shell), null stdin, all traffic through the egress
+//! proxy (the `{proxy}` argument), bounded output, a deadline, and kill on drop (the process group
+//! is killed so helpers die too). At most `limits.extractions` run at once; background work
+//! (observe, check) gets at most one of those slots, so playback always has room.
+//!
+//! Lookups are keyed by the rule's [`RelayPolicy`] and the page: two rules with different
+//! extractors or expiry settings never share a descriptor, a failure or its backoff. Lookups of the
+//! same key are coalesced.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,12 +18,15 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
+
+pub use crate::config::OutputFormat;
 use tokio::sync::Semaphore;
 
 /// What an extraction found: the HLS manifest to play and how to request it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Descriptor {
-    pub tool: &'static str,
+    /// The extractor that found it (its configured name).
+    pub tool: String,
     /// HLS master (or media) playlist.
     pub manifest_url: String,
     /// Request headers the CDN expects (User-Agent etc.). Never cookies or credentials.
@@ -51,13 +57,93 @@ pub enum Priority {
     Background,
 }
 
-#[derive(Debug, Clone)]
-pub struct Tools {
-    pub yt_dlp: Option<PathBuf>,
-    pub streamlink: Option<PathBuf>,
-    /// The egress proxy URL every tool must use.
-    pub proxy: String,
+/// A configured extractor.
+#[derive(Debug, Clone, Hash)]
+pub struct Tool {
+    pub name: String,
+    pub command: PathBuf,
+    /// Argument templates: `{url}` and `{proxy}` are replaced as they are (never encoded).
+    pub args: Vec<String>,
+    pub output: OutputFormat,
     pub timeout: Duration,
+    pub phrases: Phrases,
+}
+
+/// Extra phrases in a tool's error output, on top of the format's defaults.
+#[derive(Debug, Clone, Default, Hash)]
+pub struct Phrases {
+    pub not_found: Vec<String>,
+    pub no_stream: Vec<String>,
+}
+
+impl Tool {
+    pub fn from_config(name: &str, c: &crate::config::ExtractorConfig, default_timeout: Duration) -> Self {
+        Tool {
+            name: name.to_string(),
+            command: c.command.clone(),
+            args: c.args.clone(),
+            output: c.output,
+            timeout: c.timeout_secs.map_or(default_timeout, Duration::from_secs),
+            phrases: Phrases {
+                not_found: c.not_found.clone(),
+                no_stream: c.no_stream.clone(),
+            },
+        }
+    }
+}
+
+/// How one relay rule looks pages up and treats its upstream: immutable, shared by its lookups
+/// and sessions.
+#[derive(Debug)]
+pub struct RelayPolicy {
+    pub tools: Vec<Arc<Tool>>,
+    pub expired_status: Vec<u16>,
+    pub expires_param: String,
+    /// A hash of everything above: lookups of rules with the same policy may share results.
+    pub fingerprint: String,
+}
+
+impl RelayPolicy {
+    pub fn new(tools: Vec<Arc<Tool>>, expired_status: Vec<u16>, expires_param: String) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for t in &tools {
+            t.hash(&mut h);
+        }
+        expired_status.hash(&mut h);
+        expires_param.hash(&mut h);
+        RelayPolicy {
+            fingerprint: format!("{:016x}", h.finish()),
+            tools,
+            expired_status,
+            expires_param,
+        }
+    }
+
+    pub fn expired(&self, status: u16) -> bool {
+        self.expired_status.contains(&status)
+    }
+}
+
+/// One page under one rule's policy.
+#[derive(Debug, Clone)]
+pub struct Lookup {
+    pub page: String,
+    pub policy: Arc<RelayPolicy>,
+}
+
+impl Lookup {
+    pub fn new(page: impl Into<String>, policy: Arc<RelayPolicy>) -> Self {
+        Lookup {
+            page: page.into(),
+            policy,
+        }
+    }
+
+    /// The cache and coalescing key.
+    pub fn key(&self) -> String {
+        format!("{} {}", self.policy.fingerprint, self.page)
+    }
 }
 
 struct Entry {
@@ -68,7 +154,8 @@ struct Entry {
 }
 
 struct Inner {
-    tools: Tools,
+    /// The egress proxy URL every tool must use.
+    proxy: String,
     all: Arc<Semaphore>,
     background: Arc<Semaphore>,
     cache: Mutex<HashMap<String, Entry>>,
@@ -98,9 +185,9 @@ const MAX_ADMITTED_BACKGROUND: usize = 8;
 const QUEUE_DEADLINE: Duration = Duration::from_secs(60);
 
 impl Extractor {
-    pub fn new(tools: Tools, concurrency: usize) -> Self {
+    pub fn new(proxy: String, concurrency: usize) -> Self {
         Extractor(Arc::new(Inner {
-            tools,
+            proxy,
             all: Arc::new(Semaphore::new(concurrency.max(1))),
             background: Arc::new(Semaphore::new(1)),
             cache: Mutex::new(HashMap::new()),
@@ -110,33 +197,33 @@ impl Extractor {
         }))
     }
 
-    /// The descriptor of `page`, from the cache or a new extraction. The extraction runs in a task
-    /// of its own: a caller that goes away does not stop work other callers wait for, and the
+    /// The descriptor of a lookup, from the cache or a new extraction. The extraction runs in a
+    /// task of its own: a caller that goes away does not stop work other callers wait for, and the
     /// tool's process group is still killed on its deadline.
-    pub async fn descriptor(&self, page: &str, priority: Priority) -> Result<Descriptor, ExtractError> {
-        if let Some(r) = self.0.cached(page) {
+    pub async fn descriptor(&self, l: &Lookup, priority: Priority) -> Result<Descriptor, ExtractError> {
+        if let Some(r) = self.0.cached(&l.key()) {
             return r;
         }
         let me = self.0.clone();
-        let page = page.to_string();
-        tokio::spawn(async move { me.lookup(&page, priority).await })
+        let l = l.clone();
+        tokio::spawn(async move { me.lookup(&l, priority).await })
             .await
             .unwrap_or_else(|e| Err(ExtractError::Failed(format!("lookup task failed: {e}"))))
     }
 
-    /// Forget a page's descriptor (its URLs stopped working).
-    pub fn invalidate(&self, page: &str) {
-        self.0.cache.lock().unwrap().remove(page);
+    /// Forget a lookup's descriptor (its URLs stopped working).
+    pub fn invalidate(&self, l: &Lookup) {
+        self.0.cache.lock().unwrap().remove(&l.key());
     }
 
-    /// A media playlist of `page`'s descriptor has ENDLIST: unless the lookup said live, the item
-    /// is a finished recording and its descriptor may be kept longer.
-    pub fn observed_ended(&self, page: &str, d: &Descriptor) {
+    /// A media playlist of the lookup's descriptor has ENDLIST: unless the lookup said live, the
+    /// item is a finished recording and its descriptor may be kept longer.
+    pub fn observed_ended(&self, l: &Lookup, d: &Descriptor) {
         if d.is_live == Some(true) {
             return;
         }
         let mut cache = self.0.cache.lock().unwrap();
-        if let Some(e) = cache.get_mut(page)
+        if let Some(e) = cache.get_mut(&l.key())
             && matches!(&e.result, Ok(x) if x == d)
         {
             e.until = Instant::now() + expiry_cap(d, RECORDING_TTL);
@@ -145,15 +232,17 @@ impl Extractor {
 }
 
 impl Inner {
-    fn cached(&self, page: &str) -> Option<Result<Descriptor, ExtractError>> {
+    fn cached(&self, key: &str) -> Option<Result<Descriptor, ExtractError>> {
         let cache = self.cache.lock().unwrap();
         cache
-            .get(page)
+            .get(key)
             .filter(|e| e.until > Instant::now())
             .map(|e| e.result.clone())
     }
 
-    async fn lookup(self: Arc<Self>, page: &str, priority: Priority) -> Result<Descriptor, ExtractError> {
+    async fn lookup(self: Arc<Self>, l: &Lookup, priority: Priority) -> Result<Descriptor, ExtractError> {
+        let key = l.key();
+        let page = key.as_str();
         use std::sync::atomic::Ordering;
         let (counter, max) = match priority {
             Priority::Playback => (&self.admitted_playback, MAX_ADMITTED),
@@ -206,7 +295,7 @@ impl Inner {
             .await
             .map_err(|_| ExtractError::Failed("the lookup queue is full; try again".into()))?
             .expect("semaphore");
-        let result = self.extract(page).await;
+        let result = self.extract(l).await;
         self.store(page, &result);
         result
     }
@@ -242,16 +331,10 @@ impl Inner {
         );
     }
 
-    async fn extract(&self, page: &str) -> Result<Descriptor, ExtractError> {
+    async fn extract(&self, l: &Lookup) -> Result<Descriptor, ExtractError> {
         let mut errors = Vec::new();
-        if let Some(y) = &self.tools.yt_dlp {
-            match self.yt_dlp(y, page).await {
-                Ok(d) => return Ok(d),
-                Err(e) => errors.push(e),
-            }
-        }
-        if let Some(s) = &self.tools.streamlink {
-            match self.streamlink(s, page).await {
+        for tool in &l.policy.tools {
+            match self.run_tool(tool, &l.page, &l.policy.expires_param).await {
                 Ok(d) => return Ok(d),
                 Err(e) => errors.push(e),
             }
@@ -264,39 +347,42 @@ impl Inner {
             .unwrap_or_else(|| ExtractError::Failed("no extractor is configured".into())))
     }
 
-    async fn yt_dlp(&self, bin: &PathBuf, page: &str) -> Result<Descriptor, ExtractError> {
-        let args = [
-            "--ignore-config",
-            "--no-playlist",
-            "--no-warnings",
-            "--dump-single-json",
-            "--socket-timeout",
-            "15",
-            "--proxy",
-            &self.tools.proxy,
-            "--",
-            page,
-        ];
-        let out = run(bin, &args, self.tools.timeout).await?;
+    async fn run_tool(&self, tool: &Tool, page: &str, expires_param: &str) -> Result<Descriptor, ExtractError> {
+        let args: Vec<String> = tool
+            .args
+            .iter()
+            .map(|a| a.replace("{url}", page).replace("{proxy}", &self.proxy))
+            .collect();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run(tool, &args).await?;
         let v: Value = serde_json::from_slice(&out)
-            .map_err(|e| ExtractError::Failed(format!("yt-dlp printed something that is not JSON: {e}")))?;
-        descriptor_from_yt_dlp(&v)
+            .map_err(|e| ExtractError::Failed(format!("{} printed something that is not JSON: {e}", tool.name)))?;
+        let d = match tool.output {
+            OutputFormat::YtDlpJson => descriptor_from_yt_dlp(&v, expires_param),
+            OutputFormat::StreamlinkJson => descriptor_from_streamlink(&v, expires_param, &tool.phrases),
+        };
+        d.map(|d| Descriptor {
+            tool: tool.name.clone(),
+            ..d
+        })
+        .map_err(|e| rename_error(e, &tool.name, tool.output))
     }
+}
 
-    async fn streamlink(&self, bin: &PathBuf, page: &str) -> Result<Descriptor, ExtractError> {
-        let args = [
-            "--no-config",
-            "--json",
-            "--http-proxy",
-            &self.tools.proxy,
-            "--",
-            page,
-            "best",
-        ];
-        let out = run(bin, &args, self.tools.timeout).await?;
-        let v: Value = serde_json::from_slice(&out)
-            .map_err(|e| ExtractError::Failed(format!("streamlink printed something that is not JSON: {e}")))?;
-        descriptor_from_streamlink(&v)
+/// Parser messages name the format's usual tool; name the configured extractor instead.
+fn rename_error(e: ExtractError, name: &str, output: OutputFormat) -> ExtractError {
+    let default = match output {
+        OutputFormat::YtDlpJson => "yt-dlp",
+        OutputFormat::StreamlinkJson => "streamlink",
+    };
+    let fix = |m: String| match m.strip_prefix(default) {
+        Some(rest) if name != default => format!("{name}{rest}"),
+        _ => m,
+    };
+    match e {
+        ExtractError::NotFound(m) => ExtractError::NotFound(fix(m)),
+        ExtractError::NoStream(m) => ExtractError::NoStream(fix(m)),
+        ExtractError::Failed(m) => ExtractError::Failed(fix(m)),
     }
 }
 
@@ -327,8 +413,9 @@ impl Drop for GroupGuard {
 }
 
 /// Run a tool; its stdout on success. Errors carry the tail of its stderr.
-async fn run(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<u8>, ExtractError> {
-    let mut cmd = tokio::process::Command::new(bin);
+async fn run(tool: &Tool, args: &[&str]) -> Result<Vec<u8>, ExtractError> {
+    let timeout = tool.timeout;
+    let mut cmd = tokio::process::Command::new(&tool.command);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -337,9 +424,7 @@ async fn run(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<u8>,
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
-    let name = bin
-        .file_name()
-        .map_or_else(|| "tool".into(), |n| n.to_string_lossy().to_string());
+    let name = tool.name.clone();
     let mut child = cmd
         .spawn()
         .map_err(|e| ExtractError::Failed(format!("starting {name}: {e}")))?;
@@ -403,7 +488,7 @@ async fn run(bin: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<u8>,
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            Err(classify(&name, &line))
+            Err(classify(&name, &line, &tool.phrases))
         }
     }
 }
@@ -421,7 +506,7 @@ fn kill_group(pid: u32) {
 
 /// What a tool's error line says about the page. Only explicit statements that the video is gone
 /// count as "not found"; parser, schema and network errors stay inconclusive.
-fn classify(tool: &str, line: &str) -> ExtractError {
+fn classify(tool: &str, line: &str, extra: &Phrases) -> ExtractError {
     let l = line.to_ascii_lowercase();
     let msg = format!("{tool}: {line}");
     let gone = [
@@ -434,8 +519,13 @@ fn classify(tool: &str, line: &str) -> ExtractError {
         "video does not exist",
         "http error 404",
     ];
+    let has = |extra: &[String]| {
+        extra
+            .iter()
+            .any(|k| !k.is_empty() && l.contains(&k.to_ascii_lowercase()))
+    };
     let schema = l.contains("unable to validate") || l.contains("key '") || l.contains("unable to extract");
-    if !schema && gone.iter().any(|k| l.contains(k)) {
+    if !schema && (gone.iter().any(|k| l.contains(k)) || has(&extra.not_found)) {
         ExtractError::NotFound(msg)
     } else if [
         "no video formats",
@@ -446,6 +536,7 @@ fn classify(tool: &str, line: &str) -> ExtractError {
     ]
     .iter()
     .any(|k| l.contains(k))
+        || has(&extra.no_stream)
     {
         ExtractError::NoStream(msg)
     } else {
@@ -472,17 +563,17 @@ fn headers(v: Option<&Value>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn expires_of(url: &str) -> Option<i64> {
+fn expires_of(url: &str, param: &str) -> Option<i64> {
     let u = url::Url::parse(url).ok()?;
     u.query_pairs()
-        .find(|(k, _)| k == "expires")
+        .find(|(k, _)| k == param)
         .and_then(|(_, v)| v.parse().ok())
         .filter(|t: &i64| *t > 1_000_000_000)
 }
 
 /// The HLS master of a yt-dlp info dict: any HLS format's `manifest_url`, else the best HLS
 /// format's own URL.
-pub fn descriptor_from_yt_dlp(v: &Value) -> Result<Descriptor, ExtractError> {
+pub fn descriptor_from_yt_dlp(v: &Value, expires_param: &str) -> Result<Descriptor, ExtractError> {
     let formats = v.get("formats").and_then(Value::as_array).cloned().unwrap_or_default();
     let is_hls = |f: &Value| {
         f.get("protocol")
@@ -515,8 +606,8 @@ pub fn descriptor_from_yt_dlp(v: &Value) -> Result<Descriptor, ExtractError> {
         }
     };
     Ok(Descriptor {
-        tool: "yt-dlp",
-        expires: expires_of(&manifest),
+        tool: "yt-dlp".into(),
+        expires: expires_of(&manifest, expires_param),
         manifest_url: manifest,
         headers,
         is_live: v.get("is_live").and_then(Value::as_bool),
@@ -526,9 +617,9 @@ pub fn descriptor_from_yt_dlp(v: &Value) -> Result<Descriptor, ExtractError> {
 }
 
 /// The selected stream of `streamlink --json URL best`.
-pub fn descriptor_from_streamlink(v: &Value) -> Result<Descriptor, ExtractError> {
+pub fn descriptor_from_streamlink(v: &Value, expires_param: &str, extra: &Phrases) -> Result<Descriptor, ExtractError> {
     if let Some(e) = v.get("error").and_then(Value::as_str) {
-        return Err(classify("streamlink", e));
+        return Err(classify("streamlink", e, extra));
     }
     let kind = v.get("type").and_then(Value::as_str).unwrap_or_default();
     if kind != "hls" {
@@ -543,8 +634,8 @@ pub fn descriptor_from_streamlink(v: &Value) -> Result<Descriptor, ExtractError>
         .ok_or_else(|| ExtractError::NoStream("streamlink: the stream has no URL".into()))?
         .to_string();
     Ok(Descriptor {
-        tool: "streamlink",
-        expires: expires_of(&manifest),
+        tool: "streamlink".into(),
+        expires: expires_of(&manifest, expires_param),
         manifest_url: manifest,
         headers: headers(v.get("headers")),
         is_live: None,
@@ -562,6 +653,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn yt_dlp(script: Option<PathBuf>, timeout: Duration) -> Arc<RelayPolicy> {
+        let tools = script
+            .map(|command| {
+                Arc::new(Tool {
+                    name: "yt-dlp".into(),
+                    command,
+                    args: ["--ignore-config", "--proxy", "{proxy}", "--", "{url}"]
+                        .map(String::from)
+                        .to_vec(),
+                    output: OutputFormat::YtDlpJson,
+                    timeout,
+                    phrases: Phrases::default(),
+                })
+            })
+            .into_iter()
+            .collect();
+        Arc::new(RelayPolicy::new(tools, vec![400, 403], "expires".into()))
+    }
+
+    fn page(policy: &Arc<RelayPolicy>, page: &str) -> Lookup {
+        Lookup::new(page, policy.clone())
+    }
+
     #[test]
     fn reads_yt_dlp() {
         let v = json!({
@@ -574,28 +688,35 @@ mod tests {
                  "http_headers": {"User-Agent": "Mozilla/5.0 Chrome", "Cookie": "secret", "Accept": "*/*"}}
             ]
         });
-        let d = descriptor_from_yt_dlp(&v).unwrap();
+        let d = descriptor_from_yt_dlp(&v, "expires").unwrap();
         assert_eq!(d.manifest_url, "https://cdn/master.m3u8?expires=1999999999&sig=a");
         assert_eq!(d.expires, Some(1999999999));
         assert_eq!(d.is_live, Some(false));
         assert!(d.headers.iter().all(|(k, _)| k != "Cookie"), "{:?}", d.headers);
         assert!(d.headers.iter().any(|(k, _)| k == "User-Agent"));
         let none = json!({"formats": [{"protocol": "https", "url": "https://cdn/x.mp4"}]});
-        assert!(matches!(descriptor_from_yt_dlp(&none), Err(ExtractError::NoStream(_))));
+        assert!(matches!(
+            descriptor_from_yt_dlp(&none, "expires"),
+            Err(ExtractError::NoStream(_))
+        ));
     }
 
     #[test]
     fn reads_streamlink() {
         let v = json!({"type": "hls", "url": "https://cdn/720.m3u8", "master": "https://cdn/master.m3u8",
                        "headers": {"User-Agent": "Mozilla/5.0 Firefox"}});
-        let d = descriptor_from_streamlink(&v).unwrap();
+        let d = descriptor_from_streamlink(&v, "expires", &Phrases::default()).unwrap();
         assert_eq!(d.manifest_url, "https://cdn/master.m3u8");
         assert!(matches!(
-            descriptor_from_streamlink(&json!({"type": "http", "url": "x"})),
+            descriptor_from_streamlink(&json!({"type": "http", "url": "x"}), "expires", &Phrases::default()),
             Err(ExtractError::NoStream(_))
         ));
         assert!(matches!(
-            descriptor_from_streamlink(&json!({"error": "No plugin can handle URL: x"})),
+            descriptor_from_streamlink(
+                &json!({"error": "No plugin can handle URL: x"}),
+                "expires",
+                &Phrases::default()
+            ),
             Err(ExtractError::Failed(_))
         ));
     }
@@ -603,15 +724,19 @@ mod tests {
     #[test]
     fn classifies_errors() {
         assert!(matches!(
-            classify("yt-dlp", "ERROR: [vk] 1_2: Video not found"),
+            classify("yt-dlp", "ERROR: [vk] 1_2: Video not found", &Phrases::default()),
             ExtractError::NotFound(_)
         ));
         assert!(matches!(
-            classify("yt-dlp", "ERROR: No video formats found!"),
+            classify("yt-dlp", "ERROR: No video formats found!", &Phrases::default()),
             ExtractError::NoStream(_)
         ));
         assert!(matches!(
-            classify("yt-dlp", "ERROR: Unable to download webpage: timed out"),
+            classify(
+                "yt-dlp",
+                "ERROR: Unable to download webpage: timed out",
+                &Phrases::default()
+            ),
             ExtractError::Failed(_)
         ));
     }
@@ -631,18 +756,12 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let x = Extractor::new(
-            Tools {
-                yt_dlp: Some(script),
-                streamlink: None,
-                proxy: "http://127.0.0.1:9".into(),
-                timeout: Duration::from_secs(5),
-            },
-            2,
-        );
+        let policy = yt_dlp(Some(script), Duration::from_secs(5));
+        let x = Extractor::new("http://127.0.0.1:9".into(), 2);
+        let l = page(&policy, "https://vk.com/video1_2");
         let (a, b) = tokio::join!(
-            x.descriptor("https://vk.com/video1_2", Priority::Playback),
-            x.descriptor("https://vk.com/video1_2", Priority::Background)
+            x.descriptor(&l, Priority::Playback),
+            x.descriptor(&l, Priority::Background)
         );
         assert_eq!(a.unwrap().manifest_url, "https://cdn/a.m3u8");
         assert_eq!(b.unwrap().is_live, Some(true));
@@ -658,7 +777,7 @@ mod tests {
     #[test]
     fn unknown_liveness_is_looked_up_again_soon() {
         let d = Descriptor {
-            tool: "streamlink",
+            tool: "streamlink".into(),
             manifest_url: "https://cdn/m.m3u8".into(),
             headers: vec![],
             is_live: None,
@@ -666,30 +785,25 @@ mod tests {
             duration: None,
             expires: None,
         };
-        let x = Extractor::new(
-            Tools {
-                yt_dlp: None,
-                streamlink: None,
-                proxy: String::new(),
-                timeout: Duration::from_secs(1),
-            },
-            1,
-        );
-        x.0.store("p", &Ok(d.clone()));
-        let until = x.0.cache.lock().unwrap()["p"].until;
+        let policy = yt_dlp(None, Duration::from_secs(1));
+        let x = Extractor::new("http://127.0.0.1:9".into(), 1);
+        let p = page(&policy, "p");
+        x.0.store(&p.key(), &Ok(d.clone()));
+        let until = x.0.cache.lock().unwrap()[&p.key()].until;
         assert!(until <= Instant::now() + SHORT_TTL);
         // An observed ENDLIST promotes it to a recording.
-        x.observed_ended("p", &d);
-        let until = x.0.cache.lock().unwrap()["p"].until;
+        x.observed_ended(&p, &d);
+        let until = x.0.cache.lock().unwrap()[&p.key()].until;
         assert!(until > Instant::now() + Duration::from_secs(3600));
         // A live lookup is never promoted.
         let live = Descriptor {
             is_live: Some(true),
             ..d
         };
-        x.0.store("q", &Ok(live.clone()));
-        x.observed_ended("q", &live);
-        assert!(x.0.cache.lock().unwrap()["q"].until <= Instant::now() + SHORT_TTL);
+        let q = page(&policy, "q");
+        x.0.store(&q.key(), &Ok(live.clone()));
+        x.observed_ended(&q, &live);
+        assert!(x.0.cache.lock().unwrap()[&q.key()].until <= Instant::now() + SHORT_TTL);
     }
 
     #[tokio::test]
@@ -702,27 +816,25 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let x = Extractor::new(
-            Tools {
-                yt_dlp: Some(script),
-                streamlink: None,
-                proxy: "http://127.0.0.1:9".into(),
-                timeout: Duration::from_secs(5),
-            },
-            2,
-        );
+        let policy = yt_dlp(Some(script), Duration::from_secs(5));
+        let x = Extractor::new("http://127.0.0.1:9".into(), 2);
         // Fill background admission with lookups of distinct pages.
         let bg: Vec<_> = (0..20)
             .map(|i| {
-                let x = x.clone();
+                let (x, policy) = (x.clone(), policy.clone());
                 tokio::spawn(async move {
-                    x.descriptor(&format!("https://vk.com/video1_{i}"), Priority::Background)
-                        .await
+                    x.descriptor(
+                        &page(&policy, &format!("https://vk.com/video1_{i}")),
+                        Priority::Background,
+                    )
+                    .await
                 })
             })
             .collect();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let r = x.descriptor("https://vk.com/video9_9", Priority::Playback).await;
+        let r = x
+            .descriptor(&page(&policy, "https://vk.com/video9_9"), Priority::Playback)
+            .await;
         assert!(r.is_ok(), "{r:?}");
         let refused = futures_util::future::join_all(bg)
             .await
@@ -750,16 +862,11 @@ sleep 30
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let x = Extractor::new(
-            Tools {
-                yt_dlp: Some(script),
-                streamlink: None,
-                proxy: "http://127.0.0.1:9".into(),
-                timeout: Duration::from_millis(500),
-            },
-            1,
-        );
-        let _ = x.descriptor("https://vk.com/video1_2", Priority::Playback).await;
+        let policy = yt_dlp(Some(script), Duration::from_millis(500));
+        let x = Extractor::new("http://127.0.0.1:9".into(), 1);
+        let _ = x
+            .descriptor(&page(&policy, "https://vk.com/video1_2"), Priority::Playback)
+            .await;
         let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
         let alive = std::process::Command::new("kill")
             .args(["-0", &pid])
@@ -775,17 +882,12 @@ sleep 30
         let script = dir.path().join("yt-dlp");
         std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let x = Extractor::new(
-            Tools {
-                yt_dlp: Some(script),
-                streamlink: None,
-                proxy: "http://127.0.0.1:9".into(),
-                timeout: Duration::from_millis(300),
-            },
-            1,
-        );
+        let policy = yt_dlp(Some(script), Duration::from_millis(300));
+        let x = Extractor::new("http://127.0.0.1:9".into(), 1);
         let started = Instant::now();
-        let r = x.descriptor("https://vk.com/video1_2", Priority::Playback).await;
+        let r = x
+            .descriptor(&page(&policy, "https://vk.com/video1_2"), Priority::Playback)
+            .await;
         assert!(matches!(r, Err(ExtractError::Failed(m)) if m.contains("longer than")));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
