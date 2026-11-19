@@ -7,7 +7,9 @@
 //! - observe: acexy's per-stream status and, while acexy serves the stream, the statistics of its
 //!   engine session. Never starts, controls or stops a session. Without acexy: the engine's name
 //!   only.
-//! - check: a short engine session of its own (unique pid), its statistics polled, then stopped.
+//! - check (opt-in, `checks = true`, needs acexy): a short engine session of its own (unique pid),
+//!   its statistics polled, then stopped. The guard only sees viewers who play through acexy:
+//!   leave checks off when the play template sends players elsewhere.
 //!   Before each check acexy is asked whether the stream is watched; a watched stream is skipped,
 //!   and an unreadable guard skips too (fail closed). One check per engine at a time, across every
 //!   rule that uses the engine (the gateway hands rules on one engine the same lock).
@@ -124,9 +126,10 @@ impl Acestream {
         }
     }
 
-    /// Checks need acexy: only it can tell whether a stream is being watched.
+    /// Checks are opt-in (`checks = true`) and need acexy: only it can tell whether a stream is
+    /// being watched, and only for players that go through it.
     pub fn can_check(&self) -> bool {
-        self.cfg.acexy_control.is_some()
+        self.cfg.checks && self.cfg.acexy_control.is_some()
     }
 
     // ---------------------------------------------------------------- match
@@ -369,12 +372,18 @@ impl Acestream {
                 json!({"error": "not an Acestream reference"}),
             );
         };
-        // Without acexy there is no guard, so there are no checks, forced or not.
-        if self.cfg.acexy_control.is_none() {
+        // Without acexy there is no guard, so there are no checks, forced or not; and checks are
+        // off unless the rule turns them on.
+        if !self.can_check() {
+            let why = if self.cfg.acexy_control.is_none() {
+                "checks need acexy, which tells whether a stream is watched"
+            } else {
+                "checks are off for this rule (checks = true turns them on)"
+            };
             return done(
                 CheckOutcome::Skipped,
                 Some("guard_unavailable"),
-                json!({ "reason": "checks need acexy, which tells whether a stream is watched" }),
+                json!({ "reason": why }),
             );
         }
         // The lock, the guard and the probe all live in one task of its own: once started, a check

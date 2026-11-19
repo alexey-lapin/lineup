@@ -257,7 +257,9 @@ async fn fixture_with(live: bool, acexy: bool) -> Fixture {
             ace.insert("acexy_control".into(), engine_url.clone().into());
         } else {
             ace.remove("acexy_control");
+            ace.remove("checks");
         }
+        rules.remove("streams");
         rules["vk"]
             .as_table_mut()
             .unwrap()
@@ -790,5 +792,73 @@ async fn page_rules_keep_their_own_lookups_and_expiry() {
             .unwrap()
             .status(),
         404
+    );
+}
+
+#[tokio::test]
+async fn link_rules_only_match() {
+    let mut rules = toml::Table::new();
+    rules.insert("streams".into(), example_rules()["streams"].clone());
+    let url = gateway(&rules_toml(rules)).await;
+    let (_, r) = post(
+        &format!("{url}/v1/match"),
+        json!({"rule": "streams", "inputs": ["stream://news-1", "news 1"]}),
+    )
+    .await;
+    assert_eq!(r["results"][0]["play"], "http://media-host:8000/stream/news-1.m3u8");
+    assert_eq!(r["results"][0]["hints"]["group"], "Streams");
+    assert_eq!(r["results"][1]["status"], "no_match");
+    let info: Value = reqwest::get(format!("{url}/v1/info"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["rules"][0]["capabilities"], json!([]));
+    let (s, _) = post(
+        &format!("{url}/v1/observe"),
+        json!({"rule": "streams", "refs": ["stream://a"]}),
+    )
+    .await;
+    assert_eq!(s, 409);
+    let (_, r) = post(
+        &format!("{url}/v1/check"),
+        json!({"rule": "streams", "ref": "stream://a"}),
+    )
+    .await;
+    assert_eq!(r["outcome"], "skipped");
+}
+
+#[tokio::test]
+async fn acestream_checks_are_opt_in() {
+    let shared = Shared::default();
+    let engine_url = engine(shared.clone()).await;
+    let mut ace = example_rules()["acestream"].as_table().unwrap().clone();
+    ace.insert("engine_control".into(), engine_url.clone().into());
+    ace.insert("acexy_control".into(), engine_url.into());
+    ace.remove("checks");
+    let mut rules = toml::Table::new();
+    rules.insert("acestream".into(), ace.into());
+    let url = gateway(&rules_toml(rules)).await;
+    let info: Value = reqwest::get(format!("{url}/v1/info"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["rules"][0]["capabilities"], json!(["observe"]));
+    let (_, r) = post(
+        &format!("{url}/v1/check"),
+        json!({"rule": "acestream", "ref": format!("acestream://{ACE}"), "force": true}),
+    )
+    .await;
+    assert_eq!(r["reason"], "guard_unavailable", "{r}");
+    assert!(
+        !shared
+            .lock()
+            .unwrap()
+            .seen
+            .iter()
+            .any(|s| s.starts_with("/ace/getstream"))
     );
 }

@@ -1,9 +1,10 @@
 //! Running the configured extractors as subprocesses, in the order a rule lists them, and caching
 //! what they find as descriptors.
 //!
-//! Subprocess hygiene: argument arrays (no shell), null stdin, all traffic through the egress
-//! proxy (the `{proxy}` argument), bounded output, a deadline, and kill on drop (the process group
-//! is killed so helpers die too). At most `limits.extractions` run at once; background work
+//! Subprocess hygiene: argument arrays (no shell), null stdin, a cleaned environment, all traffic
+//! through the egress proxy (the `{proxy}` argument and the proxy variables), bounded output, a
+//! deadline, and kill on drop (the process group is killed so helpers die too). Every output
+//! format goes through one validator before anything is cached. At most `limits.extractions` run at once; background work
 //! (observe, check) gets at most one of those slots, so playback always has room.
 //!
 //! Lookups are keyed by the rule's [`RelayPolicy`] and the page: two rules with different
@@ -67,6 +68,10 @@ pub struct Tool {
     pub output: OutputFormat,
     pub timeout: Duration,
     pub phrases: Phrases,
+    /// Arguments that print the version (startup check).
+    pub version_args: Vec<String>,
+    /// Extra environment variables, set before the forced proxy variables.
+    pub env: Vec<(String, String)>,
 }
 
 /// Extra phrases in a tool's error output, on top of the format's defaults.
@@ -88,8 +93,41 @@ impl Tool {
                 not_found: c.not_found.clone(),
                 no_stream: c.no_stream.clone(),
             },
+            version_args: c.version_args.clone(),
+            env: c.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         }
     }
+}
+
+/// Variables passed through from the gateway's own environment; everything else is cleared.
+const PASS_ENV: [&str; 7] = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR"];
+
+/// Proxy variables: set to the egress proxy for every tool, never configurable.
+pub const PROXY_ENV: [&str; 6] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
+
+/// Bypass variables: never set.
+pub const BYPASS_ENV: [&str; 2] = ["NO_PROXY", "no_proxy"];
+
+/// `tool <version args>` through the common runner, which also proves the tool runs.
+pub async fn tool_version(tool: &Tool, proxy: &str) -> Result<String, String> {
+    let args: Vec<&str> = tool.version_args.iter().map(String::as_str).collect();
+    let deadline = Tool {
+        timeout: tool.timeout.min(Duration::from_secs(30)),
+        ..tool.clone()
+    };
+    let out = run(&deadline, &args, proxy).await.map_err(|e| e.to_string())?;
+    if !out.success {
+        return Err(format!("{} failed: {}", tool.name, out.error_line));
+    }
+    let v = String::from_utf8_lossy(&out.stdout);
+    Ok(v.lines().next().unwrap_or("").trim().chars().take(200).collect())
 }
 
 /// How one relay rule looks pages up and treats its upstream: immutable, shared by its lookups
@@ -354,18 +392,27 @@ impl Inner {
             .map(|a| a.replace("{url}", page).replace("{proxy}", &self.proxy))
             .collect();
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = run(tool, &args).await?;
-        let v: Value = serde_json::from_slice(&out)
-            .map_err(|e| ExtractError::Failed(format!("{} printed something that is not JSON: {e}", tool.name)))?;
+        let out = run(tool, &args, &self.proxy).await?;
+        let parsed: Option<Value> = serde_json::from_slice(&out.stdout).ok();
+        // descriptor-json may explain a failure on stdout, whatever the exit status.
+        if tool.output == OutputFormat::DescriptorJson
+            && let Some(v) = &parsed
+            && v.get("error").is_some()
+        {
+            return Err(descriptor_error(&tool.name, v));
+        }
+        if !out.success {
+            return Err(classify(&tool.name, &out.error_line, &tool.phrases));
+        }
+        let v =
+            parsed.ok_or_else(|| ExtractError::Failed(format!("{} printed something that is not JSON", tool.name)))?;
         let d = match tool.output {
             OutputFormat::YtDlpJson => descriptor_from_yt_dlp(&v, expires_param),
             OutputFormat::StreamlinkJson => descriptor_from_streamlink(&v, expires_param, &tool.phrases),
+            OutputFormat::DescriptorJson => descriptor_from_json(&v),
         };
-        d.map(|d| Descriptor {
-            tool: tool.name.clone(),
-            ..d
-        })
-        .map_err(|e| rename_error(e, &tool.name, tool.output))
+        d.map_err(|e| rename_error(e, &tool.name, tool.output))
+            .and_then(|d| validate(d, &tool.name))
     }
 }
 
@@ -374,6 +421,7 @@ fn rename_error(e: ExtractError, name: &str, output: OutputFormat) -> ExtractErr
     let default = match output {
         OutputFormat::YtDlpJson => "yt-dlp",
         OutputFormat::StreamlinkJson => "streamlink",
+        OutputFormat::DescriptorJson => "descriptor",
     };
     let fix = |m: String| match m.strip_prefix(default) {
         Some(rest) if name != default => format!("{name}{rest}"),
@@ -412,16 +460,37 @@ impl Drop for GroupGuard {
     }
 }
 
-/// Run a tool; its stdout on success. Errors carry the tail of its stderr.
-async fn run(tool: &Tool, args: &[&str]) -> Result<Vec<u8>, ExtractError> {
+/// What a finished tool left: its exit status, its stdout, and the telling line of its stderr.
+struct Output {
+    success: bool,
+    stdout: Vec<u8>,
+    error_line: String,
+}
+
+/// Run a tool in a cleaned environment. Err only when it could not run to the end (start failure,
+/// deadline, too much output).
+async fn run(tool: &Tool, args: &[&str], proxy: &str) -> Result<Output, ExtractError> {
     let timeout = tool.timeout;
     let mut cmd = tokio::process::Command::new(&tool.command);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env_clear()
         .kill_on_drop(true);
+    for k in PASS_ENV {
+        if let Some(v) = std::env::var_os(k) {
+            cmd.env(k, v);
+        }
+    }
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    for (k, v) in &tool.env {
+        cmd.env(k, v);
+    }
+    // Last, so nothing above can change where the tool's traffic goes.
+    for k in PROXY_ENV {
+        cmd.env(k, proxy);
+    }
     #[cfg(unix)]
     cmd.process_group(0);
     let name = tool.name.clone();
@@ -476,9 +545,6 @@ async fn run(tool: &Tool, args: &[&str]) -> Result<Vec<u8>, ExtractError> {
         Ok(Ok((status, out, err))) => {
             // Helpers a finished tool left behind are killed too.
             drop(std::mem::replace(&mut guard, GroupGuard { pid: None }));
-            if status.success() {
-                return Ok(out);
-            }
             let msg = String::from_utf8_lossy(&err);
             let line = msg
                 .lines()
@@ -488,7 +554,11 @@ async fn run(tool: &Tool, args: &[&str]) -> Result<Vec<u8>, ExtractError> {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            Err(classify(&name, &line, &tool.phrases))
+            Ok(Output {
+                success: status.success(),
+                stdout: out,
+                error_line: line,
+            })
         }
     }
 }
@@ -648,6 +718,80 @@ pub fn descriptor_from_streamlink(v: &Value, expires_param: &str, extra: &Phrase
     })
 }
 
+/// A descriptor-json tool's own error: `{"error": "...", "kind": "not_found" | "no_stream" | "failed"}`.
+fn descriptor_error(tool: &str, v: &Value) -> ExtractError {
+    let msg = format!(
+        "{tool}: {}",
+        v.get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("failed")
+            .chars()
+            .take(500)
+            .collect::<String>()
+    );
+    match v.get("kind").and_then(Value::as_str) {
+        Some("not_found") => ExtractError::NotFound(msg),
+        Some("no_stream") => ExtractError::NoStream(msg),
+        _ => ExtractError::Failed(msg),
+    }
+}
+
+/// The documented plugin format: `{"manifest_url": "...", "headers": {...}, "is_live": bool,
+/// "title": "...", "duration": seconds, "expires": unix time}`, all but `manifest_url` optional.
+pub fn descriptor_from_json(v: &Value) -> Result<Descriptor, ExtractError> {
+    let manifest = v
+        .get("manifest_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ExtractError::Failed("descriptor: no manifest_url".into()))?;
+    Ok(Descriptor {
+        tool: String::new(),
+        manifest_url: manifest.to_string(),
+        headers: headers(v.get("headers")),
+        is_live: v.get("is_live").and_then(Value::as_bool),
+        title: v.get("title").and_then(Value::as_str).map(str::to_string),
+        duration: v.get("duration").and_then(Value::as_f64),
+        expires: v.get("expires").and_then(Value::as_i64),
+    })
+}
+
+/// One check for every output format, before a descriptor is cached or used: an absolute http(s)
+/// manifest URL with a host and no user info; only the allowed headers, with valid names and
+/// values; a finite, non-negative duration; an expiry in a sane range (otherwise ignored: it
+/// only ever shortens the cache lifetime). Public-only address checks still happen at every
+/// fetch.
+fn validate(d: Descriptor, tool: &str) -> Result<Descriptor, ExtractError> {
+    let u = url::Url::parse(&d.manifest_url)
+        .map_err(|_| ExtractError::Failed(format!("{tool}: the manifest URL is not a URL")))?;
+    if !matches!(u.scheme(), "http" | "https")
+        || u.host_str().is_none()
+        || !u.username().is_empty()
+        || u.password().is_some()
+    {
+        return Err(ExtractError::Failed(format!(
+            "{tool}: the manifest URL must be http(s) with a host and no user info"
+        )));
+    }
+    let headers = d
+        .headers
+        .into_iter()
+        .filter(|(k, v)| {
+            keep_header(k)
+                && axum::http::HeaderName::try_from(k.as_str()).is_ok()
+                && axum::http::HeaderValue::try_from(v.as_str()).is_ok()
+        })
+        .collect();
+    let now = chrono::Utc::now().timestamp();
+    Ok(Descriptor {
+        tool: tool.to_string(),
+        manifest_url: u.to_string(),
+        headers,
+        duration: d.duration.filter(|x| x.is_finite() && *x >= 0.0),
+        expires: d.expires.filter(|t| *t > 1_000_000_000 && *t < now + 10 * 365 * 86400),
+        title: d.title.map(|t| t.trim().chars().take(500).collect()),
+        is_live: d.is_live,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +809,8 @@ mod tests {
                     output: OutputFormat::YtDlpJson,
                     timeout,
                     phrases: Phrases::default(),
+                    version_args: vec![],
+                    env: vec![],
                 })
             })
             .into_iter()
@@ -890,5 +1036,97 @@ sleep 30
             .await;
         assert!(matches!(r, Err(ExtractError::Failed(m)) if m.contains("longer than")));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn validates_every_descriptor() {
+        let d = |url: &str| Descriptor {
+            tool: String::new(),
+            manifest_url: url.into(),
+            headers: vec![
+                ("User-Agent".into(), "UA".into()),
+                ("Cookie".into(), "secret".into()),
+                ("Authorization".into(), "Bearer x".into()),
+                ("Host".into(), "evil".into()),
+                ("Referer".into(), "bad\nvalue".into()),
+            ],
+            is_live: None,
+            title: Some(format!("  {}  ", "t".repeat(900))),
+            duration: Some(-1.0),
+            expires: Some(99_999_999_999),
+        };
+        let ok = validate(d("https://cdn/m.m3u8"), "x").unwrap();
+        assert_eq!(ok.headers, [("User-Agent".to_string(), "UA".to_string())]);
+        assert_eq!(
+            (ok.duration, ok.expires),
+            (None, None),
+            "nonsense is dropped, not trusted"
+        );
+        assert_eq!(ok.title.unwrap().len(), 500);
+        assert_eq!(ok.tool, "x");
+        for bad in ["ftp://cdn/m", "https://u:p@cdn/m", "/relative", "data:text/plain,x"] {
+            assert!(validate(d(bad), "x").is_err(), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn descriptor_json_tools_and_a_clean_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let envfile = dir.path().join("env");
+        let script = dir.path().join("plugin");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nenv > {}\ncase \"$2\" in\n\
+                 *gone*) echo '{{\"error\": \"removed\", \"kind\": \"not_found\"}}'; exit 3;;\n\
+                 *) echo '{{\"manifest_url\": \"https://cdn/p.m3u8\", \"headers\": {{\"Cookie\": \"c\", \"Origin\": \"o\"}}, \"is_live\": true}}';;\n\
+                 esac\n",
+                envfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        // SAFETY: tests in this module do not read these variables concurrently.
+        unsafe {
+            std::env::set_var("LINEUP_TEST_SECRET", "leak");
+            std::env::set_var("NO_PROXY", "*");
+        }
+        let tool = Arc::new(Tool {
+            name: "plugin".into(),
+            command: script,
+            args: ["--proxy", "{url}", "{proxy}"].map(String::from).to_vec(),
+            output: OutputFormat::DescriptorJson,
+            timeout: Duration::from_secs(5),
+            phrases: Phrases::default(),
+            version_args: vec![],
+            env: vec![("XDG_CACHE_HOME".into(), "/tmp/c".into())],
+        });
+        let policy = Arc::new(RelayPolicy::new(vec![tool], vec![403], "expires".into()));
+        let x = Extractor::new("http://127.0.0.1:9".into(), 1);
+        let d = x
+            .descriptor(&Lookup::new("https://v.example/1", policy.clone()), Priority::Playback)
+            .await
+            .unwrap();
+        assert_eq!((d.manifest_url.as_str(), d.is_live), ("https://cdn/p.m3u8", Some(true)));
+        assert_eq!(d.headers, [("Origin".to_string(), "o".to_string())]);
+        let env = std::fs::read_to_string(&envfile).unwrap();
+        for want in [
+            "HTTP_PROXY=http://127.0.0.1:9",
+            "https_proxy=http://127.0.0.1:9",
+            "XDG_CACHE_HOME=/tmp/c",
+        ] {
+            assert!(env.lines().any(|l| l == want), "{want} missing: {env}");
+        }
+        assert!(
+            !env.contains("LINEUP_TEST_SECRET") && !env.contains("NO_PROXY"),
+            "{env}"
+        );
+        let gone = x
+            .descriptor(&Lookup::new("https://v.example/gone", policy), Priority::Playback)
+            .await;
+        assert!(
+            matches!(gone, Err(ExtractError::NotFound(m)) if m.contains("removed")),
+            "the error envelope counts on a failed exit too"
+        );
     }
 }

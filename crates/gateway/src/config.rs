@@ -66,6 +66,7 @@ fn default_listen() -> SocketAddr {
 pub enum RuleConfig {
     Acestream(AcestreamConfig),
     Relay(RelayConfig),
+    Link(LinkConfig),
 }
 
 /// How a rule recognises inputs: patterns, typed variables, identity and ref templates, and the
@@ -87,6 +88,7 @@ impl RuleConfig {
         match self {
             RuleConfig::Acestream(_) => "acestream",
             RuleConfig::Relay(_) => "relay",
+            RuleConfig::Link(_) => "link",
         }
     }
 
@@ -94,6 +96,7 @@ impl RuleConfig {
         let (patterns, vars, identity, reference) = match self {
             RuleConfig::Acestream(a) => (&a.patterns, &a.vars, &a.identity, &a.reference),
             RuleConfig::Relay(r) => (&r.patterns, &r.vars, &r.identity, &r.reference),
+            RuleConfig::Link(l) => (&l.patterns, &l.vars, &l.identity, &l.reference),
         };
         MatchSpec {
             patterns: patterns.clone(),
@@ -107,6 +110,7 @@ impl RuleConfig {
         match self {
             RuleConfig::Acestream(a) => &a.examples,
             RuleConfig::Relay(r) => &r.examples,
+            RuleConfig::Link(l) => &l.examples,
         }
     }
 
@@ -121,6 +125,7 @@ impl RuleConfig {
     pub fn play(&self, name: &str, m: &Match) -> anyhow::Result<String> {
         Ok(match self {
             RuleConfig::Acestream(a) => Template::parse(&a.play, Use::Play)?.render(&m.vars),
+            RuleConfig::Link(l) => Template::parse(&l.play, Use::Play)?.render(&m.vars),
             RuleConfig::Relay(_) => format!(
                 "{}?ref={}",
                 relay_play_path(name),
@@ -144,6 +149,11 @@ impl RuleConfig {
                 let p = play_revision("relay", &relay_play_path(name), &m);
                 (m, p)
             }
+            RuleConfig::Link(l) => {
+                let m = match_revision("link", 0, &(self.spec(), &l.title, &l.group));
+                let p = play_revision("link", &l.play, &m);
+                (m, p)
+            }
         }
     }
 
@@ -151,11 +161,21 @@ impl RuleConfig {
     /// identity, ref and play, and that its ref is accepted again with the same identity and ref.
     pub fn validate(&self, name: &str) -> anyhow::Result<()> {
         let m = self.matcher(name)?;
-        if let RuleConfig::Acestream(a) = self {
-            let t = Template::parse(&a.play, Use::Play).map_err(|e| anyhow::anyhow!("play: {e}"))?;
-            if !m.names().contains("id") {
-                anyhow::bail!("an acestream rule's patterns must capture id");
+        let play = match self {
+            RuleConfig::Acestream(a) => {
+                if !m.names().contains("id") {
+                    anyhow::bail!("an acestream rule's patterns must capture id");
+                }
+                if a.checks && a.acexy_control.is_none() {
+                    anyhow::bail!("checks need acexy_control: only acexy tells whether a stream is watched");
+                }
+                Some(&a.play)
             }
+            RuleConfig::Link(l) => Some(&l.play),
+            RuleConfig::Relay(_) => None,
+        };
+        if let Some(play) = play {
+            let t = Template::parse(play, Use::Play).map_err(|e| anyhow::anyhow!("play: {e}"))?;
             if let Some(n) = t.names().iter().find(|n| !m.names().contains(*n)) {
                 anyhow::bail!("play: {{{n}}} is not captured by any pattern");
             }
@@ -211,6 +231,30 @@ pub struct AcestreamConfig {
     pub engine_control: String,
     pub acexy_control: Option<String>,
     /// Play URL template, as players reach the stream (acexy, the engine or any proxy).
+    pub play: String,
+    /// Guarded checks: a short engine session, skipped while acexy reports viewers. Needs
+    /// `acexy_control`, and players that play through acexy (the guard sees no one else).
+    #[serde(default)]
+    pub checks: bool,
+    #[serde(rename = "match")]
+    pub patterns: Vec<PatternConfig>,
+    #[serde(default)]
+    pub vars: BTreeMap<String, VarType>,
+    pub identity: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    #[serde(default)]
+    pub examples: Vec<ExampleConfig>,
+}
+
+/// A rule whose play URLs are a template: streams behind some other service, keyed by what the
+/// patterns capture. No lookups, observation or checks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkConfig {
+    pub title: Option<String>,
+    pub input_hint: Option<String>,
+    pub group: Option<String>,
     pub play: String,
     #[serde(rename = "match")]
     pub patterns: Vec<PatternConfig>,
@@ -277,6 +321,10 @@ pub struct ExtractorConfig {
     /// Extra phrases meaning the page has a video but no playable stream yet.
     #[serde(default)]
     pub no_stream: Vec<String>,
+    /// Extra environment variables (the environment is otherwise cleared but for PATH, HOME,
+    /// LANG, LC_ALL, LC_CTYPE, TZ, TMPDIR). Proxy variables are always the egress proxy.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 fn default_version_args() -> Vec<String> {
@@ -290,6 +338,9 @@ pub enum OutputFormat {
     YtDlpJson,
     /// `streamlink --json URL best`.
     StreamlinkJson,
+    /// The plugin format: `{"manifest_url", "headers", "is_live", "title", "duration",
+    /// "expires"}`, or `{"error", "kind"}` (see docs/gateway.md).
+    DescriptorJson,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -398,12 +449,25 @@ impl Config {
             if x.timeout_secs.is_some_and(|t| t == 0 || t > 3600) {
                 anyhow::bail!("extractors.{name}: timeout_secs must be 1-3600");
             }
+            for k in x.env.keys() {
+                let reserved = crate::extract::PROXY_ENV
+                    .iter()
+                    .chain(crate::extract::BYPASS_ENV.iter())
+                    .any(|r| r.eq_ignore_ascii_case(k));
+                if reserved {
+                    anyhow::bail!("extractors.{name}.env: {k} is always the gateway's egress proxy setting");
+                }
+                if k.is_empty() || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                    anyhow::bail!("extractors.{name}.env: {k:?} is not a variable name");
+                }
+            }
         }
         for (name, rule) in &mut c.rules {
             if !valid_name(name) {
                 anyhow::bail!("rules.{name}: names are 1-32 of a-z, 0-9, '-' and '_', starting with a letter or digit");
             }
             match rule {
+                RuleConfig::Link(_) => {}
                 RuleConfig::Acestream(a) => {
                     a.engine_control = base(&a.engine_control, &format!("rules.{name}.engine_control"))?;
                     if let Some(x) = &a.acexy_control {
@@ -494,6 +558,21 @@ mod tests {
     }
 
     #[test]
+    fn link_rules_and_extractor_env() {
+        let link = ACE
+            .replace("kind = 'acestream'", "kind = 'link'\ngroup = 'G'")
+            .replace("engine_control = 'http://e:6878/'\n", "");
+        let c = Config::parse(&format!("{link}{X}env = {{ XDG_CACHE_HOME = '/c' }}\n")).unwrap();
+        assert_eq!(c.rules["ace"].kind(), "link");
+        assert_eq!(c.extractors["yt-dlp"].env["XDG_CACHE_HOME"], "/c");
+        let checks = ACE.replace(
+            "kind = 'acestream'",
+            "kind = 'acestream'\nchecks = true\nacexy_control = 'http://x'",
+        );
+        Config::parse(&checks).unwrap();
+    }
+
+    #[test]
     fn revisions_follow_the_config() {
         let rev = |extra: &str| {
             let c = Config::parse(&relay(extra)).unwrap();
@@ -549,6 +628,10 @@ mod tests {
             relay("").replace("['yt-dlp']", "['other']"),
             relay("expired_status = [200]"),
             relay("vars = { m = 'int' }"),
+            ACE.replace("kind = 'acestream'", "kind = 'acestream'\nchecks = true"),
+            format!("{X}env = {{ HTTPS_PROXY = 'x' }}\n"),
+            format!("{X}env = {{ no_proxy = 'x' }}\n"),
+            format!("{X}env = {{ 'A-B' = 'x' }}\n"),
             relay("").replace("ref = 'https://v.example/{n}'", "ref = 'https://{n}.example/'"),
             "[extractors.x]\ncommand = '/x'\nargs = ['{url}']\noutput = 'yt-dlp-json'\n".into(),
             "[extractors.x]\ncommand = '/x'\nargs = ['{url}', '{proxy}']\noutput = 'other'\n".into(),

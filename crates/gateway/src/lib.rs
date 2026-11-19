@@ -31,6 +31,7 @@ use crate::net::{Allow, EgressProxy};
 use crate::relay::{Relay, text};
 use crate::rules::Rule;
 use crate::rules::acestream::{Acestream, EngineLock, ProbeTiming};
+use crate::rules::link::LinkRule;
 use crate::rules::page::PageRule;
 
 pub struct Gateway {
@@ -70,14 +71,13 @@ impl Gateway {
                     continue;
                 }
                 let x = &cfg.extractors[name];
-                let version = tool_version(&x.command, &x.version_args)
+                let tool = Tool::from_config(name, x, cfg.limits.extraction_timeout());
+                let proxy_url = proxy.as_ref().map(|p| p.url()).unwrap_or_default();
+                let version = extract::tool_version(&tool, &proxy_url)
                     .await
                     .map_err(|e| anyhow::anyhow!("extractors.{name}: {e}"))?;
                 tracing::info!("extractors.{name}: {} {version}", x.command.display());
-                tools.insert(
-                    name.as_str(),
-                    Arc::new(Tool::from_config(name, x, cfg.limits.extraction_timeout())),
-                );
+                tools.insert(name.as_str(), Arc::new(tool));
             }
         }
         let mut engines: HashMap<String, EngineLock> = HashMap::new();
@@ -94,6 +94,7 @@ impl Gateway {
                     let relay = relay.clone().expect("a relay rule starts the relay");
                     Arc::new(PageRule::new(name, p, Arc::new(policy), relay)?)
                 }
+                RuleConfig::Link(l) => Arc::new(LinkRule::new(name, l)?),
             };
             rules.push((name.clone(), rule));
         }
@@ -201,25 +202,6 @@ async fn observe(State(g): State<AppState>, Json(req): Json<ObserveRequest>) -> 
         results.push(rule.observe(r).await);
     }
     Json(ObserveResponse { results }).into_response()
-}
-
-/// `tool --version` (or the configured version arguments), which also proves the tool runs.
-async fn tool_version(bin: &std::path::Path, args: &[String]) -> anyhow::Result<String> {
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio::process::Command::new(bin)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("{} {} did not finish", bin.display(), args.join(" ")))?
-    .map_err(|e| anyhow::anyhow!("cannot run {}: {e}", bin.display()))?;
-    if !out.status.success() {
-        anyhow::bail!("{} {} failed", bin.display(), args.join(" "));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 async fn check(State(g): State<AppState>, Json(req): Json<CheckRequest>) -> Response {

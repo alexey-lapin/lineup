@@ -130,6 +130,7 @@ match = false
 # engine_control = "http://acestream:6878"     # gateway -> engine (names, checks)
 # acexy_control = "http://acexy:8080"          # gateway -> acexy (live numbers, the check guard)
 # play = "http://media-host:8080/ace/getstream?id={id}"   # as players reach acexy
+# checks = true   # guarded engine probes; the guard only sees players that go through acexy
 # vars = { id = "lower" }
 # identity = "ace:{id}"
 # ref = "acestream://{id}"
@@ -170,6 +171,20 @@ match = false
 # [[rules.acestream.examples]]
 # input = "41169a3f280a5537b0611b775e926852d372743d/"
 # match = false
+
+# Streams behind any other service, keyed by an id: the gateway only matches and writes play URLs.
+# [rules.streams]
+# kind = "link"
+# title = "Streams"
+# group = "Streams"
+# play = "http://media-host:8000/stream/{id}.m3u8"
+# identity = "stream:{id}"
+# ref = "stream://{id}"
+# [[rules.streams.match]]
+# input = '^(?:stream://)?(?P<id>[a-z0-9-]{1,64})$'
+# [[rules.streams.examples]]
+# input = "stream://news-1"
+# play = "http://media-host:8000/stream/news-1.m3u8"
 
 [limits]
 extractions = 2

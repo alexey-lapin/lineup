@@ -2,6 +2,7 @@
 //! The gateway keeps them in a name → rule registry and knows nothing else about them.
 
 pub mod acestream;
+pub mod link;
 pub mod page;
 
 use axum::response::Response;
