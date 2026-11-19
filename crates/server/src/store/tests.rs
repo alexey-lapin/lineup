@@ -3,20 +3,20 @@ use api_types::{CheckOutcome, ResyncTrigger, RouteConfig};
 use super::*;
 use crate::routes::{self, Validated};
 
-const ACE1: &str = "41169a3f280a5537b0611b775e926852d372743d";
-const ACE2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
-const ACE3: &str = "914c3344a2cb94beeb26c187ca10e5c862090dba";
+const ID1: &str = "41169a3f280a5537b0611b775e926852d372743d";
+const ID2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
+const ID3: &str = "914c3344a2cb94beeb26c187ca10e5c862090dba";
 const DIRECT: i64 = 1;
 
-/// A store with the seeded Direct route (id 1) and an Acestream gateway route (id 2).
+/// A store with the seeded Direct route (id 1) and an `ids` gateway route (id 2).
 async fn store() -> Store {
     let s = Store::open_memory().await.unwrap();
     let r = s
         .create_route(
-            "Acestream",
+            "Ids",
             RouteConfig::Gateway {
                 base_url: "http://10.0.0.5:8099".into(),
-                rule: "acestream".into(),
+                rule: "ids".into(),
             },
             true,
         )
@@ -26,12 +26,12 @@ async fn store() -> Store {
     s
 }
 
-/// What the acestream rule of a gateway returns for an id: an absolute acexy play URL.
-fn ace(id: &str) -> Validated {
+/// An id rule: an absolute play URL that points past the gateway.
+fn stream(id: &str) -> Validated {
     Validated {
-        source: format!("acestream://{id}"),
-        identity: format!("ace:{id}"),
-        play: Some(format!("http://10.0.0.5:8080/ace/getstream?id={id}")),
+        source: format!("id://{id}"),
+        identity: format!("id:{id}"),
+        play: Some(format!("http://10.0.0.5:8080/stream?id={id}")),
         play_revision: Some("1".into()),
         hints: Default::default(),
         warnings: vec![],
@@ -39,14 +39,14 @@ fn ace(id: &str) -> Validated {
 }
 
 /// A page rule: a play path relative to the gateway.
-fn page(id: &str, list: &str) -> Validated {
-    let source = format!("https://vk.com/video{id}?list={list}");
+fn page(n: &str, key: &str) -> Validated {
+    let source = format!("https://video.example/v/{n}?key={key}");
     Validated {
         play: Some(format!(
-            "play/vk.m3u8?ref={}",
+            "play/pages.m3u8?ref={}",
             url::form_urlencoded::byte_serialize(source.as_bytes()).collect::<String>()
         )),
-        identity: format!("vk:{id}"),
+        identity: format!("page:{n}"),
         source,
         play_revision: Some("1".into()),
         hints: Default::default(),
@@ -104,21 +104,21 @@ fn rename(name: &str) -> ChannelUpdate {
 async fn create_dedup_and_render() {
     let s = store().await;
     pl(&s, "jf").await;
-    let a = ch(&s, "Alpha", 2, ace(ACE1), &["jf"]).await.unwrap();
-    assert_eq!(a.play_url, format!("http://10.0.0.5:8080/ace/getstream?id={ACE1}"));
+    let a = ch(&s, "Alpha", 2, stream(ID1), &["jf"]).await.unwrap();
+    assert_eq!(a.play_url, format!("http://10.0.0.5:8080/stream?id={ID1}"));
     assert!(a.route_enabled);
-    assert_eq!((a.route_id, a.route_name.as_str()), (2, "Acestream"));
+    assert_eq!((a.route_id, a.route_name.as_str()), (2, "Ids"));
     assert_eq!(a.playlists, vec!["jf"]);
 
     // Duplicate identity on the same route.
-    let err = ch(&s, "Dup", 2, ace(ACE1), &[]).await.unwrap_err();
+    let err = ch(&s, "Dup", 2, stream(ID1), &[]).await.unwrap_err();
     assert_eq!(err.code(), "conflict");
     assert_eq!(
-        s.find_duplicate(2, &format!("ace:{ACE1}")).await.unwrap().map(|d| d.0),
+        s.find_duplicate(2, &format!("id:{ID1}")).await.unwrap().map(|d| d.0),
         Some(a.id)
     );
     // The same identity on another route is another channel.
-    ch(&s, "Alpha direct", DIRECT, direct(&format!("http://h/{ACE1}")), &[])
+    ch(&s, "Alpha direct", DIRECT, direct(&format!("http://h/{ID1}")), &[])
         .await
         .unwrap();
 
@@ -129,7 +129,7 @@ async fn create_dedup_and_render() {
         tvg_logo: None,
         route_id: 2,
         route_revision: s.route_row(2).await.unwrap().revision,
-        validated: ace(ACE2),
+        validated: stream(ID2),
         enabled: true,
         playlists: vec!["jf".into()],
     };
@@ -140,8 +140,8 @@ async fn create_dedup_and_render() {
     assert_eq!(
         out,
         format!(
-            "#EXTM3U\n\n#EXTINF:-1 tvg-id=\"lineup.{}\" tvg-chno=\"1\",Alpha\nhttp://10.0.0.5:8080/ace/getstream?id={ACE1}\n\n\
-             #EXTINF:-1 tvg-id=\"Arena.1.de\" tvg-chno=\"2\" group-title=\"Sports\",Arena 1\nhttp://10.0.0.5:8080/ace/getstream?id={ACE2}\n",
+            "#EXTM3U\n\n#EXTINF:-1 tvg-id=\"lineup.{}\" tvg-chno=\"1\",Alpha\nhttp://10.0.0.5:8080/stream?id={ID1}\n\n\
+             #EXTINF:-1 tvg-id=\"Arena.1.de\" tvg-chno=\"2\" group-title=\"Sports\",Arena 1\nhttp://10.0.0.5:8080/stream?id={ID2}\n",
             a.id
         )
     );
@@ -152,30 +152,30 @@ async fn relative_play_paths_join_below_the_base_path() {
     let s = Store::open_memory().await.unwrap();
     let r = s
         .create_route(
-            "VK",
+            "Pages",
             RouteConfig::Gateway {
                 base_url: "http://proxy/gateway/".into(),
-                rule: "vk".into(),
+                rule: "pages".into(),
             },
             true,
         )
         .await
         .unwrap();
-    let c = ch(&s, "Match", r.id, page("-1_2", "abc"), &[]).await.unwrap();
+    let c = ch(&s, "Match", r.id, page("12", "abc"), &[]).await.unwrap();
     assert_eq!(
         c.play_url,
-        "http://proxy/gateway/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-1_2%3Flist%3Dabc"
+        "http://proxy/gateway/play/pages.m3u8?ref=https%3A%2F%2Fvideo.example%2Fv%2F12%3Fkey%3Dabc"
     );
-    assert_eq!(c.source, "https://vk.com/video-1_2?list=abc");
-    assert_eq!(c.identity, "vk:-1_2");
+    assert_eq!(c.source, "https://video.example/v/12?key=abc");
+    assert_eq!(c.identity, "page:12");
 }
 
 #[tokio::test]
 async fn disabled_keeps_slot() {
     let s = store().await;
     pl(&s, "jf").await;
-    let a = ch(&s, "A", 2, ace(ACE1), &["jf"]).await.unwrap();
-    ch(&s, "B", 2, ace(ACE2), &["jf"]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &["jf"]).await.unwrap();
+    ch(&s, "B", 2, stream(ID2), &["jf"]).await.unwrap();
     s.patch_channel(
         a.id,
         ChannelUpdate {
@@ -195,7 +195,7 @@ async fn disabled_keeps_slot() {
 async fn disabled_routes_leave_output_and_keep_positions() {
     let s = store().await;
     pl(&s, "jf").await;
-    let a = ch(&s, "Ace", 2, ace(ACE1), &["jf"]).await.unwrap();
+    let a = ch(&s, "Main", 2, stream(ID1), &["jf"]).await.unwrap();
     ch(&s, "Direct", DIRECT, direct("http://x/live.m3u8"), &["jf"])
         .await
         .unwrap();
@@ -214,14 +214,14 @@ async fn disabled_routes_leave_output_and_keep_positions() {
         Event::RouteChanged { route_id: 2, .. }
     ));
     let out = s.render_m3u("jf").await.unwrap();
-    assert!(!out.contains("Ace"), "{out}");
+    assert!(!out.contains("Main"), "{out}");
     assert!(out.contains("tvg-chno=\"2\""), "positions are kept: {out}");
     let a2 = s.get_channel(a.id).await.unwrap();
     assert!(!a2.route_enabled);
     assert_eq!(a2.playlists, ["jf"], "membership is kept");
 
     // Renaming does not change output.
-    s.update_route(2, Some("Ace".into()), None).await.unwrap();
+    s.update_route(2, Some("Main".into()), None).await.unwrap();
     assert!(matches!(
         rx.try_recv().unwrap(),
         Event::RouteChanged { route_id: 2, .. }
@@ -247,9 +247,9 @@ async fn disabled_routes_leave_output_and_keep_positions() {
 async fn ordering_ops_keep_positions_dense() {
     let s = store().await;
     pl(&s, "jf").await;
-    let a = ch(&s, "A", 2, ace(ACE1), &["jf"]).await.unwrap();
-    let b = ch(&s, "B", 2, ace(ACE2), &["jf"]).await.unwrap();
-    let c = ch(&s, "C", 2, ace(ACE3), &["jf"]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &["jf"]).await.unwrap();
+    let b = ch(&s, "B", 2, stream(ID2), &["jf"]).await.unwrap();
+    let c = ch(&s, "C", 2, stream(ID3), &["jf"]).await.unwrap();
 
     s.move_item("jf", c.id, 1).await.unwrap();
     assert_eq!(
@@ -292,7 +292,7 @@ async fn ordering_ops_keep_positions_dense() {
 async fn events_follow_the_mutation_table() {
     let s = store().await;
     pl(&s, "jf").await;
-    let a = ch(&s, "A", 2, ace(ACE1), &["jf"]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &["jf"]).await.unwrap();
     let mut rx = s.subscribe();
 
     s.patch_channel(a.id, rename("A2")).await.unwrap();
@@ -349,7 +349,7 @@ async fn writes_refuse_a_route_that_changed_since_validation() {
             tvg_logo: None,
             route_id: 2,
             route_revision: stale,
-            validated: ace(ACE1),
+            validated: stream(ID1),
             enabled: true,
             playlists: vec![],
         })
@@ -362,7 +362,7 @@ async fn writes_refuse_a_route_that_changed_since_validation() {
 #[tokio::test]
 async fn source_changes_bump_the_revision_and_clear_health() {
     let s = store().await;
-    let a = ch(&s, "A", 2, ace(ACE1), &[]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &[]).await.unwrap();
     let before = s.channel_source(a.id).await.unwrap();
     let who = CheckIdentity {
         channel_id: a.id,
@@ -390,10 +390,10 @@ async fn source_changes_bump_the_revision_and_clear_health() {
         ..Default::default()
     };
     let rev = s.route_row(2).await.unwrap().revision;
-    let mut update = change(ace(ACE2), before.source_revision);
+    let mut update = change(stream(ID2), before.source_revision);
     update.source.as_mut().unwrap().route_revision = rev;
     let a2 = s.patch_channel(a.id, update).await.unwrap();
-    assert_eq!(a2.identity, format!("ace:{ACE2}"));
+    assert_eq!(a2.identity, format!("id:{ID2}"));
     assert!(a2.health.is_none(), "health described the old source");
     let after = s.channel_source(a.id).await.unwrap();
     assert_eq!(after.source_revision, before.source_revision + 1);
@@ -402,13 +402,13 @@ async fn source_changes_bump_the_revision_and_clear_health() {
     assert!(!s.record_check(who, rec()).await.unwrap());
 
     // An update computed from the old source revision is refused.
-    let mut stale = change(ace(ACE3), before.source_revision);
+    let mut stale = change(stream(ID3), before.source_revision);
     stale.source.as_mut().unwrap().route_revision = rev;
     assert_eq!(s.patch_channel(a.id, stale).await.unwrap_err().code(), "conflict");
 
     // Moving onto an identity another channel has is refused and changes nothing.
-    ch(&s, "B", 2, ace(ACE3), &[]).await.unwrap();
-    let mut clash = change(ace(ACE3), after.source_revision);
+    ch(&s, "B", 2, stream(ID3), &[]).await.unwrap();
+    let mut clash = change(stream(ID3), after.source_revision);
     clash.source.as_mut().unwrap().route_revision = rev;
     clash.name = Some("A3".into());
     assert_eq!(s.patch_channel(a.id, clash).await.unwrap_err().code(), "conflict");
@@ -442,9 +442,9 @@ async fn import(s: &Store, slug: &str, dry_run: bool, entries: Vec<ImportEntryIn
 
 fn sample() -> Vec<ImportEntryIn> {
     vec![
-        entry(1, "Sports One", ace(ACE1), Some("SportsOne.uk")),
-        entry(2, "Arena 1", ace(ACE2), Some("Arena.1.de")),
-        entry(3, "Alpha again", ace(ACE1), Some("dupe")),
+        entry(1, "Sports One", stream(ID1), Some("SportsOne.uk")),
+        entry(2, "Arena 1", stream(ID2), Some("Arena.1.de")),
+        entry(3, "Alpha again", stream(ID1), Some("dupe")),
     ]
 }
 
@@ -468,12 +468,9 @@ async fn import_commit_and_reimport() {
     let s = store().await;
     let r = import(&s, "jellyfin", false, sample()).await;
     assert_eq!(r.entries.iter().filter(|e| e.action == ImportAction::Create).count(), 2);
-    assert_eq!(r.entries[0].identity, format!("ace:{ACE1}"));
+    assert_eq!(r.entries[0].identity, format!("id:{ID1}"));
     let out = s.render_m3u("jellyfin").await.unwrap();
-    assert!(
-        out.contains(&format!("http://10.0.0.5:8080/ace/getstream?id={ACE2}")),
-        "{out}"
-    );
+    assert!(out.contains(&format!("http://10.0.0.5:8080/stream?id={ID2}")), "{out}");
     assert_eq!(order(&s, "jellyfin").await.len(), 2);
 
     // Edit existing metadata, then re-import into a second playlist: reuse, no overwrite, diff
@@ -487,7 +484,7 @@ async fn import_commit_and_reimport() {
         .unwrap();
     s.patch_channel(one[0].id, rename("Sports One HD")).await.unwrap();
     let mut again = sample();
-    again[0].validated.source = format!("acestream://{ACE1}?x=1");
+    again[0].validated.source = format!("id://{ID1}?x=1");
     let r = import(&s, "other", false, again).await;
     assert!(r.entries.iter().all(|e| e.action != ImportAction::Create));
     let e0 = &r.entries[0];
@@ -496,7 +493,7 @@ async fn import_commit_and_reimport() {
     assert_eq!(fields, ["name", "source"]);
     let kept = s.get_channel(one[0].id).await.unwrap();
     assert_eq!(kept.name, "Sports One HD");
-    assert_eq!(kept.source, format!("acestream://{ACE1}"), "the stored source is kept");
+    assert_eq!(kept.source, format!("id://{ID1}"), "the stored source is kept");
     assert_eq!(order(&s, "other").await.len(), 2);
 
     // re-import into the same playlist is a no-op
@@ -507,7 +504,7 @@ async fn import_commit_and_reimport() {
 #[tokio::test]
 async fn import_diffs_repeated_entries() {
     let s = store().await;
-    let two = |a: &str, b: &str| vec![entry(1, "A", ace(ACE1), Some(a)), entry(2, "A", ace(ACE1), Some(b))];
+    let two = |a: &str, b: &str| vec![entry(1, "A", stream(ID1), Some(a)), entry(2, "A", stream(ID1), Some(b))];
     for dry_run in [true, false] {
         let r = import(&s, "jf", dry_run, two("first.id", "second.id")).await;
         assert_eq!(r.entries[1].action, ImportAction::SkipInPlaylist);
@@ -525,7 +522,7 @@ async fn failed_mutations_roll_back() {
     let s = store().await;
     pl(&s, "jf").await;
     // create into a missing playlist: nothing is created
-    let err = ch(&s, "A", 2, ace(ACE1), &["jf", "missing"]).await.unwrap_err();
+    let err = ch(&s, "A", 2, stream(ID1), &["jf", "missing"]).await.unwrap_err();
     assert_eq!(err.code(), "not_found");
     assert!(s.list_channels(&ChannelFilter::default()).await.unwrap().is_empty());
     assert!(order(&s, "jf").await.is_empty());
@@ -549,19 +546,19 @@ fn resync_rows(s: &[(i64, i64, Validated)]) -> Vec<ResyncRow> {
 async fn resync_publishes_consistently() {
     let s = store().await;
     pl(&s, "jf").await;
-    let a = ch(&s, "A", 2, ace(ACE1), &["jf"]).await.unwrap();
-    let b = ch(&s, "B", 2, ace(ACE2), &["jf"]).await.unwrap();
-    let c = ch(&s, "C", 2, ace(ACE3), &[]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &["jf"]).await.unwrap();
+    let b = ch(&s, "B", 2, stream(ID2), &["jf"]).await.unwrap();
+    let c = ch(&s, "C", 2, stream(ID3), &[]).await.unwrap();
     let (ra, rb, rc) = (srev(&s, a.id).await, srev(&s, b.id).await, srev(&s, c.id).await);
 
     // The gateway now plays A from another address (play revision 2); B is unchanged except for the
     // revision; C changed in the meantime (its row is skipped).
-    let mut a_new = ace(ACE1);
-    a_new.play = Some(format!("http://acexy-new:8080/ace/getstream?id={ACE1}"));
+    let mut a_new = stream(ID1);
+    a_new.play = Some(format!("http://upstream-new:8080/stream?id={ID1}"));
     a_new.play_revision = Some("2".into());
-    let mut b_new = ace(ACE2);
+    let mut b_new = stream(ID2);
     b_new.play_revision = Some("2".into());
-    let mut c_new = ace(ACE3);
+    let mut c_new = stream(ID3);
     c_new.play_revision = Some("2".into());
     s.patch_channel(c.id, rename("C2")).await.unwrap(); // metadata only: source revision unchanged
     let route_rev = s.route_row(2).await.unwrap().revision;
@@ -593,7 +590,7 @@ async fn resync_publishes_consistently() {
             slugs: vec!["jf".into()]
         }
     );
-    assert!(s.render_m3u("jf").await.unwrap().contains("acexy-new"));
+    assert!(s.render_m3u("jf").await.unwrap().contains("upstream-new"));
     assert_eq!(
         s.route_pending(2, "2").await.unwrap(),
         1,
@@ -618,12 +615,12 @@ async fn resync_publishes_consistently() {
 
     // A complete resync (every member validated) advances the synced revisions.
     let route_rev = s.route_row(2).await.unwrap().revision;
-    let mut c_new = ace(ACE3);
+    let mut c_new = stream(ID3);
     c_new.play_revision = Some("2".into());
-    let mut a2 = ace(ACE1);
-    a2.play = Some(format!("http://acexy-new:8080/ace/getstream?id={ACE1}"));
+    let mut a2 = stream(ID1);
+    a2.play = Some(format!("http://upstream-new:8080/stream?id={ID1}"));
     a2.play_revision = Some("2".into());
-    let mut b2 = ace(ACE2);
+    let mut b2 = stream(ID2);
     b2.play_revision = Some("2".into());
     let (route, report) = s
         .publish_resync(ResyncPublish {
@@ -651,8 +648,8 @@ async fn resync_publishes_consistently() {
 async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
     let s = store().await;
     pl(&s, "jf").await;
-    let a = ch(&s, "A", 2, ace(ACE1), &["jf"]).await.unwrap();
-    let b = ch(&s, "B", 2, ace(ACE2), &["jf"]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &["jf"]).await.unwrap();
+    let b = ch(&s, "B", 2, stream(ID2), &["jf"]).await.unwrap();
     let ra = s.channel_source(a.id).await.unwrap().source_revision;
     let rb = s.channel_source(b.id).await.unwrap().source_revision;
     let route_rev = s.route_row(2).await.unwrap().revision;
@@ -663,7 +660,7 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
             route_id: 2,
             expected_revision: route_rev,
             new_base: None,
-            rows: resync_rows(&[(a.id, ra, ace(ACE2)), (b.id, rb, ace(ACE2))]),
+            rows: resync_rows(&[(a.id, ra, stream(ID2)), (b.id, rb, stream(ID2))]),
             report: new_report(ResyncTrigger::Manual, 2, None, None),
             all_or_nothing: false,
             name: None,
@@ -673,7 +670,7 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
         .unwrap();
     assert_eq!(report.failed.len(), 1);
     assert_eq!(report.failed[0].channel_id, a.id);
-    assert_eq!(s.get_channel(a.id).await.unwrap().identity, format!("ace:{ACE1}"));
+    assert_eq!(s.get_channel(a.id).await.unwrap().identity, format!("id:{ID1}"));
 
     // With a new base URL, any failure refuses everything, including the base change.
     let route_rev = s.route_row(2).await.unwrap().revision;
@@ -688,7 +685,7 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
             route_id: 2,
             expected_revision: route_rev,
             new_base: Some("http://new:8099".into()),
-            rows: resync_rows(&[(a.id, ra, ace(ACE1))]),
+            rows: resync_rows(&[(a.id, ra, stream(ID1))]),
             report: failed,
             all_or_nothing: true,
             name: None,
@@ -703,7 +700,7 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
         row.config,
         RouteConfig::Gateway {
             base_url: "http://10.0.0.5:8099".into(),
-            rule: "acestream".into()
+            rule: "ids".into()
         }
     );
     assert_eq!(row.revision, route_rev);
@@ -715,7 +712,7 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
             route_id: 2,
             expected_revision: route_rev,
             new_base: Some("http://new:8099".into()),
-            rows: resync_rows(&[(a.id, ra, ace(ACE1)), (b.id, rb, ace(ACE2))]),
+            rows: resync_rows(&[(a.id, ra, stream(ID1)), (b.id, rb, stream(ID2))]),
             report: new_report(ResyncTrigger::BaseUrlChange, 2, Some("1".into()), Some("1".into())),
             all_or_nothing: true,
             name: None,
@@ -727,7 +724,7 @@ async fn resync_never_merges_and_base_changes_are_all_or_nothing() {
         route.config,
         RouteConfig::Gateway {
             base_url: "http://new:8099".into(),
-            rule: "acestream".into()
+            rule: "ids".into()
         }
     );
     assert_eq!(
@@ -814,10 +811,10 @@ async fn a_new_database_has_one_direct_route() {
 #[tokio::test]
 async fn channel_ids_are_never_reused() {
     let s = store().await;
-    let a = ch(&s, "A", 2, ace(ACE1), &[]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &[]).await.unwrap();
     let staged = s.channel_source(a.id).await.unwrap();
     s.delete_channel(a.id).await.unwrap();
-    let b = ch(&s, "B", 2, ace(ACE2), &[]).await.unwrap();
+    let b = ch(&s, "B", 2, stream(ID2), &[]).await.unwrap();
     assert_ne!(a.id, b.id, "a deleted channel's id is not given to a new one");
     // A resync staged for the deleted channel does not touch the new one.
     let route_rev = s.route_row(2).await.unwrap().revision;
@@ -826,7 +823,7 @@ async fn channel_ids_are_never_reused() {
             route_id: 2,
             expected_revision: route_rev,
             new_base: None,
-            rows: resync_rows(&[(a.id, staged.source_revision, ace(ACE3))]),
+            rows: resync_rows(&[(a.id, staged.source_revision, stream(ID3))]),
             report: new_report(ResyncTrigger::Manual, 1, None, None),
             all_or_nothing: false,
             name: None,
@@ -835,22 +832,22 @@ async fn channel_ids_are_never_reused() {
         .await
         .unwrap();
     assert_eq!(report.updated, 0);
-    assert_eq!(s.get_channel(b.id).await.unwrap().identity, format!("ace:{ACE2}"));
+    assert_eq!(s.get_channel(b.id).await.unwrap().identity, format!("id:{ID2}"));
 }
 
 #[tokio::test]
 async fn channels_joining_during_a_resync_keep_it_incomplete() {
     let s = store().await;
-    let a = ch(&s, "A", 2, ace(ACE1), &[]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &[]).await.unwrap();
     let ra = srev(&s, a.id).await;
     let route_rev = s.route_row(2).await.unwrap().revision;
     // B joins after the snapshot was validated.
-    let b = ch(&s, "B", 2, ace(ACE2), &[]).await.unwrap();
+    let b = ch(&s, "B", 2, stream(ID2), &[]).await.unwrap();
     let publish = |base: Option<&str>, all: bool| ResyncPublish {
         route_id: 2,
         expected_revision: route_rev,
         new_base: base.map(Into::into),
-        rows: resync_rows(&[(a.id, ra, ace(ACE1))]),
+        rows: resync_rows(&[(a.id, ra, stream(ID1))]),
         report: new_report(ResyncTrigger::Manual, 1, Some("1".into()), Some("2".into())),
         all_or_nothing: all,
         name: None,
@@ -874,7 +871,7 @@ async fn channels_joining_during_a_resync_keep_it_incomplete() {
 async fn a_rejected_combined_route_edit_changes_nothing() {
     let s = store().await;
     s.create_route("Other", RouteConfig::Direct {}, true).await.unwrap();
-    let a = ch(&s, "A", 2, ace(ACE1), &[]).await.unwrap();
+    let a = ch(&s, "A", 2, stream(ID1), &[]).await.unwrap();
     let ra = srev(&s, a.id).await;
     let before = s.route_row(2).await.unwrap();
     let mut rx = s.subscribe();
@@ -883,7 +880,7 @@ async fn a_rejected_combined_route_edit_changes_nothing() {
             route_id: 2,
             expected_revision: before.revision,
             new_base: Some("http://new:8099".into()),
-            rows: resync_rows(&[(a.id, ra, ace(ACE1))]),
+            rows: resync_rows(&[(a.id, ra, stream(ID1))]),
             report: new_report(ResyncTrigger::BaseUrlChange, 1, None, None),
             all_or_nothing: true,
             name: Some("Other".into()),

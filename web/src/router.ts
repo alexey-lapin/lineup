@@ -12,7 +12,6 @@ export const router = createRouter({
     { path: '/hooks', component: () => import('./pages/HooksPage.vue') },
     { path: '/import', component: () => import('./pages/ImportPage.vue') },
     { path: '/routes', component: () => import('./pages/RoutesPage.vue') },
-    { path: '/integrations', redirect: '/routes' },
     { path: '/settings', component: () => import('./pages/SettingsPage.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/channels' }
   ]

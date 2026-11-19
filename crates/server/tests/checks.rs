@@ -8,8 +8,8 @@ use lineup_server::http::App;
 use lineup_server::testing::{Failure, StubGateway};
 use lineup_server::{Event, Store};
 
-const ACE1: &str = "41169a3f280a5537b0611b775e926852d372743d";
-const ACE2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
+const ID1: &str = "41169a3f280a5537b0611b775e926852d372743d";
+const ID2: &str = "816b61ec91d5d4da0bc477a42cd6ee407fc07d44";
 
 struct Fixture {
     gw: StubGateway,
@@ -26,10 +26,10 @@ async fn fixture() -> Fixture {
     let app = App::new(store.clone(), dir.path());
     let route = store
         .create_route(
-            "Acestream",
+            "Ids",
             RouteConfig::Gateway {
                 base_url: gw.url.clone(),
-                rule: "acestream".into(),
+                rule: "ids".into(),
             },
             true,
         )
@@ -68,7 +68,7 @@ impl Fixture {
 #[tokio::test]
 async fn results_are_recorded_with_transitions() {
     let f = fixture().await;
-    let a = f.channel("A", f.route, ACE1).await;
+    let a = f.channel("A", f.route, ID1).await;
     let mut rx = f.store.subscribe();
 
     f.gw.set_check(GwOutcome::Dead, None);
@@ -108,8 +108,8 @@ async fn results_are_recorded_with_transitions() {
 #[tokio::test]
 async fn a_failing_gateway_stops_its_route_and_records_unknown() {
     let f = fixture().await;
-    let a = f.channel("A", f.route, ACE1).await;
-    let b = f.channel("B", f.route, ACE2).await;
+    let a = f.channel("A", f.route, ID1).await;
+    let b = f.channel("B", f.route, ID2).await;
     f.gw.set_check(GwOutcome::Ok, None);
     f.app.checker.check(&[a], false).await.unwrap();
 
@@ -135,7 +135,7 @@ async fn a_failing_gateway_stops_its_route_and_records_unknown() {
 #[tokio::test]
 async fn a_check_answer_for_another_ref_is_refused() {
     let f = fixture().await;
-    let a = f.channel("A", f.route, ACE1).await;
+    let a = f.channel("A", f.route, ID1).await;
     f.gw.fail(Failure::WrongCheckRef);
     let r = f.app.checker.check(&[a], false).await.unwrap();
     assert_eq!(r[0].outcome, CheckOutcome::Unknown);
@@ -146,22 +146,22 @@ async fn a_check_answer_for_another_ref_is_refused() {
 #[tokio::test]
 async fn check_all_covers_enabled_channels_of_checkable_routes() {
     let f = fixture().await;
-    let vk = f
+    let pages = f
         .store
         .create_route(
-            "VK",
+            "Pages",
             RouteConfig::Gateway {
                 base_url: f.gw.url.clone(),
-                rule: "vk".into(),
+                rule: "pages".into(),
             },
             true,
         )
         .await
         .unwrap()
         .id;
-    let a = f.channel("A", f.route, ACE1).await;
-    let b = f.channel("B", f.route, ACE2).await;
-    f.channel("V", vk, "https://vk.com/video-1_2").await; // the vk rule has no checks
+    let a = f.channel("A", f.route, ID1).await;
+    let b = f.channel("B", f.route, ID2).await;
+    f.channel("V", pages, "https://video.example/v/12").await; // the pages rule has no checks
     f.channel("D", 1, "http://x/y.m3u8").await; // direct routes have no checks
     f.app
         .catalog
@@ -192,7 +192,7 @@ async fn check_all_covers_enabled_channels_of_checkable_routes() {
 #[tokio::test]
 async fn revision_changes_resync_routes() {
     let f = fixture().await;
-    let a = f.channel("A", f.route, ACE1).await;
+    let a = f.channel("A", f.route, ID1).await;
     // A new route has never synced: the first poll records the revisions.
     f.app.checker.poll_revisions().await;
     let r = f.store.get_route(f.route).await.unwrap();
@@ -204,11 +204,11 @@ async fn revision_changes_resync_routes() {
     f.app.checker.poll_revisions().await;
     assert_eq!(f.gw.calls("match"), matches);
 
-    // The gateway moved acexy: the next poll updates the play URL.
-    f.gw.set_acexy("http://acexy-new:8080", "2");
+    // The gateway moved its upstream: the next poll updates the play URL.
+    f.gw.set_upstream("http://upstream-new:8080", "2");
     f.app.checker.poll_revisions().await;
     let c = f.store.get_channel(a).await.unwrap();
-    assert_eq!(c.play_url, format!("http://acexy-new:8080/ace/getstream?id={ACE1}"));
+    assert_eq!(c.play_url, format!("http://upstream-new:8080/stream?id={ID1}"));
     let r = f.store.get_route(f.route).await.unwrap();
     assert_eq!(r.synced_play_revision.as_deref(), Some("2"));
     let st = f.app.catalog.route_status(f.route).await.unwrap();

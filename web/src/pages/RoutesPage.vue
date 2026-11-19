@@ -11,7 +11,7 @@ const invalidate = useInvalidateAll()
 const { data: routes, error, refetch } = useRoutes()
 
 /** Example address (kept out of the template: vue-tsc mangles "//" in some attribute values). */
-const example = 'http://media-host:8099'
+const example = 'http://gateway-host:8099'
 
 // ---------------------------------------------------------------- add / edit
 
@@ -170,7 +170,7 @@ async function confirmDelete() {
         />
         <p class="text-sm text-muted">
           A route is how channels are played. A direct route puts stream URLs in playlists as they are. A gateway route
-          sends links or ids (an Acestream id, a video page) to a gateway, which turns them into playable URLs; players
+          sends references (whatever the gateway's rule accepts, such as an id or a page link) to a gateway, which turns them into playable URLs; players
           then fetch from the gateway or from the service it points at, so use an address your players can reach, not
           localhost. You pick the route when you add a channel.
         </p>
@@ -183,7 +183,7 @@ async function confirmDelete() {
     <template #body>
       <form class="flex flex-col gap-4" @submit.prevent="save">
         <UFormField label="Name" required>
-          <UInput v-model="form.name" class="w-full" placeholder="Acestream" />
+          <UInput v-model="form.name" class="w-full" placeholder="Streams" />
         </UFormField>
 
         <UFormField

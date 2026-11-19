@@ -267,20 +267,20 @@ mod tests {
     fn configs() {
         let c = normalize_config(RouteConfig::Gateway {
             base_url: " http://h:8099/gw/ ".into(),
-            rule: " vk ".into(),
+            rule: " pages ".into(),
         })
         .unwrap();
         assert_eq!(
             c,
             RouteConfig::Gateway {
                 base_url: "http://h:8099/gw".into(),
-                rule: "vk".into()
+                rule: "pages".into()
             }
         );
         for (base, rule) in [
-            ("h:1", "vk"),
-            ("http://h/?q", "vk"),
-            ("http://u:p@h", "vk"),
+            ("h:1", "pages"),
+            ("http://h/?q", "pages"),
+            ("http://u:p@h", "pages"),
             ("http://h", "V K"),
         ] {
             assert!(

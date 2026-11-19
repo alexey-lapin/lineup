@@ -38,7 +38,7 @@ pub enum Command {
     /// Run the lineup server.
     Serve(ServeArgs),
     /// Add channels: each input is validated with the given route (a URL for a direct route; what
-    /// the gateway rule accepts for a gateway route, e.g. an Acestream id or a VK video link).
+    /// the gateway rule accepts for a gateway route, such as an id or a page link).
     Add(AddArgs),
     /// List channels, optionally filtered by a search term.
     Ls(LsArgs),

@@ -1,13 +1,14 @@
 //! A stub gateway for tests (feature `test-support`): speaks contract v1 with two rules.
 //!
-//! - `acestream`: 40-hex ids, `acestream://` links and `/ace/getstream?id=` URLs. Identity
-//!   `ace:<id>`, ref `acestream://<id>`, play `<acexy>/ace/getstream?id=<id>` (absolute). Titles come
-//!   and other hints from [`StubGateway::set_hints`]. Capabilities: observe, check.
-//! - `vk`: `vk.com/video<o>_<v>[?list=]` (also vkvideo.ru). Identity `vk:<o>_<v>`, ref the canonical
-//!   vk.com URL with `list`, play `play/vk.m3u8?ref=<encoded ref>` (relative). Capability: observe.
+//! - `ids`: 40-hex ids, `id://` links and `/stream?id=` URLs. Identity `id:<id>`, ref `id://<id>`,
+//!   play `<upstream>/stream?id=<id>` (absolute, pointing past the gateway). Titles and other hints
+//!   come from [`StubGateway::set_hints`]. Capabilities: observe, check.
+//! - `pages`: `video.example/v/<n>[?key=]` links (also on subdomains). Identity `page:<n>`, ref the
+//!   canonical `https://video.example/v/<n>` with `key`, play `play/pages.m3u8?ref=<encoded ref>`
+//!   (relative, served by the gateway). Capability: observe.
 //!
-//! Tests can make the stub fail, change rule revisions and the acexy address, set check outcomes,
-//! and count calls.
+//! Tests can make the stub fail, change rule revisions and the upstream address, set check
+//! outcomes, and count calls.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -39,7 +40,7 @@ pub enum Failure {
 }
 
 struct Inner {
-    acexy: String,
+    upstream: String,
     match_revision: String,
     play_revision: String,
     failure: Failure,
@@ -59,7 +60,7 @@ impl StubGateway {
     /// Start the stub on a random local port.
     pub async fn start() -> Self {
         let inner = Arc::new(Mutex::new(Inner {
-            acexy: "http://acexy:8080".into(),
+            upstream: "http://upstream:8080".into(),
             match_revision: "1".into(),
             play_revision: "1".into(),
             failure: Failure::None,
@@ -87,10 +88,10 @@ impl StubGateway {
         self.inner.lock().unwrap().failure = f;
     }
 
-    /// Where acestream play URLs point (changes the play revision too).
-    pub fn set_acexy(&self, base: &str, play_revision: &str) {
+    /// Where `ids` play URLs point (changes the play revision too).
+    pub fn set_upstream(&self, base: &str, play_revision: &str) {
         let mut i = self.inner.lock().unwrap();
-        i.acexy = base.into();
+        i.upstream = base.into();
         i.play_revision = play_revision.into();
     }
 
@@ -98,9 +99,9 @@ impl StubGateway {
         self.inner.lock().unwrap().match_revision = r.into();
     }
 
-    pub fn set_title(&self, ace_id: &str, title: &str) {
+    pub fn set_title(&self, id: &str, title: &str) {
         self.set_hints(
-            ace_id,
+            id,
             Hints {
                 title: Some(title.into()),
                 ..Default::default()
@@ -108,9 +109,9 @@ impl StubGateway {
         );
     }
 
-    /// Hints the acestream rule returns for an id.
-    pub fn set_hints(&self, ace_id: &str, hints: Hints) {
-        self.inner.lock().unwrap().hints.insert(ace_id.into(), hints);
+    /// Hints the `ids` rule returns for an id.
+    pub fn set_hints(&self, id: &str, hints: Hints) {
+        self.inner.lock().unwrap().hints.insert(id.into(), hints);
     }
 
     pub fn set_check(&self, outcome: CheckOutcome, content_state: Option<ContentState>) {
@@ -157,17 +158,17 @@ async fn info(State(s): St) -> Response {
         },
         rules: vec![
             RuleInfo {
-                name: "acestream".into(),
-                title: "Acestream".into(),
-                input_hint: Some("40-hex id or acestream:// link".into()),
+                name: "ids".into(),
+                title: "Ids".into(),
+                input_hint: Some("40-hex id or id:// link".into()),
                 capabilities: vec![Capability::Observe, Capability::Check],
                 match_revision: i.match_revision.clone(),
                 play_revision: i.play_revision.clone(),
             },
             RuleInfo {
-                name: "vk".into(),
-                title: "VK video".into(),
-                input_hint: Some("vk.com video link".into()),
+                name: "pages".into(),
+                title: "Video pages".into(),
+                input_hint: Some("video.example link".into()),
                 capabilities: vec![Capability::Observe],
                 match_revision: i.match_revision.clone(),
                 play_revision: i.play_revision.clone(),
@@ -177,32 +178,31 @@ async fn info(State(s): St) -> Response {
     .into_response()
 }
 
-fn ace_id(input: &str) -> Option<String> {
+fn stream_id(input: &str) -> Option<String> {
     let s = input.trim();
     let s = s
-        .strip_prefix("acestream://")
-        .or_else(|| s.split("/ace/getstream?id=").nth(1))
+        .strip_prefix("id://")
+        .or_else(|| s.split("/stream?id=").nth(1))
         .unwrap_or(s);
     let id: String = s.chars().take(40).collect();
     (id.len() == 40 && id.chars().all(|c| c.is_ascii_hexdigit()) && s.len() == 40).then(|| id.to_ascii_lowercase())
 }
 
-fn vk(input: &str) -> Option<(String, String)> {
+/// Identity and canonical ref of a `video.example` page link.
+fn page(input: &str) -> Option<(String, String)> {
     let u = url::Url::parse(input.trim()).ok()?;
     let host = u.host_str()?;
-    if !(host.ends_with("vk.com") || host.ends_with("vkvideo.ru")) {
+    if !(host == "video.example" || host.ends_with(".video.example")) {
         return None;
     }
-    let ov = u.path().strip_prefix("/video")?.to_string();
-    let (o, v) = ov.split_once('_')?;
-    o.parse::<i64>().ok()?;
-    v.parse::<i64>().ok()?;
-    let list = u.query_pairs().find(|(k, _)| k == "list").map(|(_, v)| v.into_owned());
-    let reference = match list {
-        Some(l) => format!("https://vk.com/video{ov}?list={l}"),
-        None => format!("https://vk.com/video{ov}"),
+    let n = u.path().strip_prefix("/v/")?.to_string();
+    n.parse::<u64>().ok()?;
+    let key = u.query_pairs().find(|(k, _)| k == "key").map(|(_, v)| v.into_owned());
+    let reference = match key {
+        Some(k) => format!("https://video.example/v/{n}?key={k}"),
+        None => format!("https://video.example/v/{n}"),
     };
-    Some((format!("vk:{ov}"), reference))
+    Some((format!("page:{n}"), reference))
 }
 
 async fn matching(State(s): St, Json(req): Json<MatchRequest>) -> Response {
@@ -217,8 +217,8 @@ async fn matching(State(s): St, Json(req): Json<MatchRequest>) -> Response {
             .map(|input| MatchResult::Error {
                 input: input.clone(),
                 error: ErrorDetail {
-                    code: "engine_error".into(),
-                    message: "the engine failed".into(),
+                    code: "upstream_error".into(),
+                    message: "the upstream failed".into(),
                 },
             })
             .collect();
@@ -229,39 +229,39 @@ async fn matching(State(s): St, Json(req): Json<MatchRequest>) -> Response {
         .inputs
         .iter()
         .map(|input| match req.rule.as_str() {
-            "acestream" => match ace_id(input) {
+            "ids" => match stream_id(input) {
                 Some(id) => MatchResult::Matched(Matched {
                     input: input.clone(),
-                    identity: format!("ace:{id}"),
-                    reference: format!("acestream://{id}"),
-                    play: format!("{}/ace/getstream?id={id}", i.acexy),
+                    identity: format!("id:{id}"),
+                    reference: format!("id://{id}"),
+                    play: format!("{}/stream?id={id}", i.upstream),
                     hints: i.hints.get(&id).cloned().unwrap_or_default(),
                     warnings: vec![],
                 }),
                 None => MatchResult::NoMatch {
                     input: input.clone(),
-                    reason: Some("not an Acestream id or link".into()),
+                    reason: Some("not an id or id:// link".into()),
                 },
             },
-            "vk" => match vk(input) {
+            "pages" => match page(input) {
                 Some((identity, reference)) => MatchResult::Matched(Matched {
                     input: input.clone(),
                     identity,
                     play: format!(
-                        "play/vk.m3u8?ref={}",
+                        "play/pages.m3u8?ref={}",
                         url::form_urlencoded::byte_serialize(reference.as_bytes()).collect::<String>()
                     ),
                     reference,
                     hints: Hints {
                         title: None,
                         region: None,
-                        group: Some("VK".into()),
+                        group: Some("Video".into()),
                     },
                     warnings: vec![],
                 }),
                 None => MatchResult::NoMatch {
                     input: input.clone(),
-                    reason: Some("not a VK video link".into()),
+                    reason: Some("not a video.example link".into()),
                 },
             },
             other => MatchResult::Error {
@@ -317,11 +317,7 @@ async fn check(State(s): St, Json(req): Json<CheckRequest>) -> Response {
     };
     let wrong = i.failure == Failure::WrongCheckRef;
     Json(CheckResponse {
-        reference: if wrong {
-            "acestream://other".into()
-        } else {
-            req.reference
-        },
+        reference: if wrong { "id://other".into() } else { req.reference },
         outcome,
         reason: skipped.then(|| "busy".into()),
         content_state: i.content_state,

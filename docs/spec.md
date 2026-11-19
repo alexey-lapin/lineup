@@ -2,11 +2,11 @@
 
 ## 1. Problem
 
-Media servers (such as Jellyfin and Emby Live TV) and IPTV players read channels from an M3U playlist and guide data from XMLTV, but the playlist itself is usually a hand-edited file. lineup started as a replacement for one such file behind Jellyfin. When channels come from several places (Acestream streams played through [acexy](https://github.com/Javinator9889/acexy), live video pages that need a lookup before they play, plain stream URLs), that file gets messy fast. The host address is repeated on every line, tvg-ids are matched to the guide by hand, and any script that builds the guide has to grep the file.
+Media servers (such as Jellyfin and Emby Live TV) and IPTV players read channels from an M3U playlist and guide data from XMLTV, but the playlist itself is usually a hand-edited file. lineup started as a replacement for one such file behind Jellyfin. When channels come from several places (streams behind a local proxy, live video pages that need a lookup before they play, plain stream URLs), that file gets messy fast. The host address is repeated on every line, tvg-ids are matched to the guide by hand, and any script that builds the guide has to grep the file.
 
 lineup is a standalone service that owns the channels. It serves playlists and their EPG over HTTP to any client that reads them from a URL, and tells Jellyfin (or any webhook) when they change. You drive it from a web UI (an iOS home-screen app) or from a CLI that agents can use too.
 
-lineup itself knows no streaming protocol. A channel is played through a **route**: either *direct* (the source is a stream URL, emitted as it is) or a **gateway** (a separate service that turns a reference, such as an Acestream id or a video page, into a playable URL). The gateway contract is in crate `gateway-contract`; the first gateway is lineup-gateway.
+lineup itself knows no streaming protocol. A channel is played through a **route**: either *direct* (the source is a stream URL, emitted as it is) or a **gateway** (a separate service that turns a reference, such as an id or a page link, into a playable URL). The gateway contract is in crate `gateway-contract`; the first gateway is lineup-gateway.
 
 ## 2. Goals and non-goals
 
@@ -93,7 +93,7 @@ A new database has one route, **Direct**.
 
 **Identity and source**
 - Direct: both are the input URL, trimmed. Nothing else is normalized; the query is kept as it is.
-- Gateway: the rule decides. The identity is for de-duplication only (VK: `vk:<owner>_<video>`, without the `list` token); the source is self-contained, so the gateway can play, observe or check it after a restart (VK: the canonical vk.com URL with `list`).
+- Gateway: the rule decides. The identity is for de-duplication only (for a page link, say, the page without its access token); the source is self-contained, so the gateway can play, observe or check it after a restart (the canonical link with the token).
 
 **Positions**
 - `position` counts from 1 and is emitted as `tvg-chno`.
@@ -114,9 +114,9 @@ A route is a configured way to play channels; every channel has exactly one.
 | Kind | Config | Input it takes |
 |---|---|---|
 | direct | nothing | an http(s) URL with a host |
-| gateway | `base_url` (as players reach it), `rule` (one of the gateway's rules) | whatever the rule accepts (e.g. an Acestream id, a VK video link) |
+| gateway | `base_url` (as players reach it), `rule` (one of the gateway's rules) | whatever the rule accepts (e.g. an id, a page link) |
 
-- Several routes may use the same gateway (e.g. "Acestream" with rule `acestream` and "VK" with rule `vk`). A route's kind and rule never change; create another route instead.
+- Several routes may use the same gateway (e.g. "Streams" with rule `ids` and "Pages" with rule `pages`). A route's kind and rule never change; create another route instead.
 - **Enabled** is the only switch. A disabled route's channels stay listed with their playlist memberships and positions, but are left out of M3U and XMLTV output. Gateway reachability never changes output: a gateway that is down only fails writes and checks.
 - A route used by channels can't be deleted (409).
 - Each route has a `revision`, raised on every change; of two copies the higher is newer. Writes validated against a route at one revision are refused (409) if it changed meanwhile.
@@ -130,7 +130,7 @@ A route is a configured way to play channels; every channel has exactly one.
 - A base URL edit revalidates every channel of the route against the new base first; the new base and every revalidated row are published in one transaction. If any channel fails, the edit is refused (409, listing them) and nothing changes.
 - `POST /routes/{id}/resync` revalidates every channel with the current config and publishes the results in one transaction: rows the gateway now answers differently are updated; rows that fail keep their values and are listed; rows whose channel changed during the resync are skipped and listed; identity collisions are never merged; names, groups, tvg-ids and other metadata are never touched; health of a channel whose source changed is cleared. The synced revisions advance only when every channel succeeded. The report is kept as `last_resync`.
 - A poller reads `/v1/info` of every enabled gateway route every 10 minutes (first after 1 minute) and resyncs a route whose rule's `match_revision` or `play_revision` differs from the synced ones.
-- Play references stay valid within contract 1 (gateways only add play path formats). Changing an absolute target, such as acexy's public address, is an operator migration: keep the old address reachable until every affected route shows no channels pending (`GET /routes/{id}/status`), then retire it.
+- Play references stay valid within contract 1 (gateways only add play path formats). Changing an absolute target, such as the public address of a service the gateway points players at, is an operator migration: keep the old address reachable until every affected route shows no channels pending (`GET /routes/{id}/status`), then retire it.
 
 **Live details** (`GET /channels/{id}/info`): the latest check, and for gateway routes whose rule supports `observe`, what the gateway reports now (`/v1/observe`): content state, whether someone is watching, labelled facts, a title. Observing never starts a stream and is never recorded as health.
 
@@ -140,7 +140,7 @@ A route is a configured way to play channels; every channel has exactly one.
 ```
 #EXTM3U url-tvg="http://<host>/p/<slug>/epg.xml"
 #EXTINF:-1 tvg-id="Arena.1.de" tvg-chno="2" tvg-logo="…" group-title="Sports",Arena 1
-http://media-host:8080/ace/getstream?id=816b…
+http://media-host:8080/stream?id=816b…
 ```
 - Built per request from the DB, which is cheap and needs no gateway. The `ETag` is a hash of the rendered body, so route changes and resyncs invalidate it automatically.
 - Only eligible channels are listed: the channel and its route are enabled (§4b). `tvg-chno` is the playlist position, so numbering does not shift when a channel is left out.
@@ -212,7 +212,7 @@ You pick the route, then paste the input. `POST /api/v1/resolve {route_id, input
 
 Suggestions come from the gateway's hints (`title`, `region`, `group`): `name` from the title (or a placeholder: host and last path segment for direct URLs, the identity for gateway routes), `group_title` from the group. When there is a title, it is fuzzy-matched against `epg_channels.display_names` with normalized token similarity (strsim), with a bonus for a matching region suffix (`.de`, `.uk`, `.us`); the top 5 `{xmltv_id, display_name, icon, score}` are returned, and the best one's tvg-id and logo are suggested when it scores at least 0.6. Gateway warnings (such as a failed title lookup) never fail the resolve.
 
-Site- or protocol-specific suggestion logic (cleaning engine names, region tags, a "Sports" guess) belongs to the gateway rule that produces the hints. The UI fills empty fields with the suggestions and offers the other matches and a guide search. In the CLI, the suggested name is always used unless `--name` is given; the other suggestions are applied with `--yes`, or after a confirmation prompt on a terminal. Explicit flags always win. Creating a channel validates the input again; a preview is never trusted.
+Site- or protocol-specific suggestion logic (cleaning upstream names, region tags, guessing a group) belongs to the gateway rule that produces the hints. The UI fills empty fields with the suggestions and offers the other matches and a guide search. In the CLI, the suggested name is always used unless `--name` is given; the other suggestions are applied with `--yes`, or after a confirmation prompt on a terminal. Explicit flags always win. Creating a channel validates the input again; a preview is never trusted.
 
 ## 8. Events and hooks
 
@@ -255,7 +255,7 @@ Site- or protocol-specific suggestion logic (cleaning engine names, region tags,
 
 ## 9. Channel checks
 
-A check asks the route's gateway whether a channel plays (`POST {base}/v1/check {rule, ref, force}`). Only gateway routes whose rule has the `check` capability can be checked; others get 409. How a check is done safely (for Acestream: a short engine session with its own pid, the acexy activity guard, stopping only its own session, one probe per engine at a time, refusing when the guard can't read status) is the gateway's job. Checks say whether a channel plays, not how well.
+A check asks the route's gateway whether a channel plays (`POST {base}/v1/check {rule, ref, force}`). Only gateway routes whose rule has the `check` capability can be checked; others get 409. How a check is done safely (for example: never disturbing a stream someone is watching, cleaning up only what it started, refusing when it can't tell) is the gateway's job. Checks say whether a channel plays, not how well.
 
 **Outcomes**: `ok`, `dead`, `unknown` (the gateway, its services or the network failed), `skipped` (not checked, e.g. `reason: busy` because someone is watching; `force` checks anyway). A check may also report a `content_state`: `live`, `ended_processing` (the broadcast ended and the recording is not ready; reported as `unknown`), `recording` (reported as `ok`). An ended broadcast is never a failure.
 
@@ -393,7 +393,7 @@ The server's `test-support` feature adds a stub gateway (`lineup_server::testing
 
 **M1–M4** (0.1–0.4, done): core and deployment, EPG and the add flow, hooks and health, polish (PWA, player links, usage/completions, release binaries).
 
-**M5 Routes and gateways** (0.5): routes replace integrations; protocol knowledge (Acestream, VK) moves into gateways behind contract v1; generic checks, observation and resync; fresh schema lineage.
+**M5 Routes and gateways** (0.5): routes replace integrations; protocol knowledge moves out of lineup into gateways behind contract v1; generic checks, observation and resync; fresh schema lineage.
 
 ## 15. Open questions
 

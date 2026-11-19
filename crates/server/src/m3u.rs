@@ -164,14 +164,14 @@ mod tests {
 
     const SAMPLE: &str = "#EXTM3U\n\
 #EXTINF:-1 tvg-id=\"SportsOne.uk\" tvg-logo=\"https://x/a,b.png\" group-title=\"Sports\",Sports One\n\
-http://10.0.0.5:8080/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d\n\
+http://10.0.0.5:8080/stream?id=41169a3f280a5537b0611b775e926852d372743d\n\
 \n\
 #EXTINF:-1 tvg-id=\"kino.hd.ru\" group-title=\"Other\",Kino HD (RU)\n\
-http://10.0.0.5:8080/ace/getstream?id=914c3344a2cb94beeb26c187ca10e5c862090dba\n\
+http://10.0.0.5:8080/stream?id=914c3344a2cb94beeb26c187ca10e5c862090dba\n\
 #EXTINF:-1,No URL\n\
 #EXTINF:0 tvg-id=plain,Plain, with comma\n\
-#EXTGRP:VK\n\
-http://10.0.0.5:8099/vk/-1_2?list=x\n\
+#EXTGRP:Video\n\
+http://10.0.0.5:8099/play/x.m3u8\n\
 http://orphan\n";
 
     #[test]
@@ -186,7 +186,7 @@ http://orphan\n";
         let e = &p.entries[2];
         assert_eq!(e.name, "Plain, with comma");
         assert_eq!(e.attr("tvg-id"), Some("plain"));
-        assert_eq!(e.attr("group-title"), Some("VK"));
+        assert_eq!(e.attr("group-title"), Some("Video"));
         assert_eq!(p.skipped.len(), 2, "{:?}", p.skipped);
     }
 

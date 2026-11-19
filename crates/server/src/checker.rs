@@ -2,7 +2,7 @@
 //!
 //! A check asks the route's gateway (`/v1/check`) about one channel's source; lineup only stores
 //! the result and its transitions. Checks run one at a time and runs never overlap; the gateway
-//! decides how to check safely (for Acestream: its activity guard, its own probe sessions). A
+//! decides how to check safely (for example, skipping a stream someone is watching). A
 //! gateway that fails stops the run for that route: the rest of its channels are reported, not
 //! recorded.
 //!

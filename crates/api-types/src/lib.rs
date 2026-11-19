@@ -102,9 +102,9 @@ pub enum RouteConfig {
     Direct {},
     /// A gateway service turns channel sources into play URLs.
     Gateway {
-        /// Gateway base URL, as players reach it (e.g. `http://media-host:8099`).
+        /// Gateway base URL, as players reach it (e.g. `http://gateway-host:8099`).
         base_url: String,
-        /// One of the gateway's rules (e.g. `acestream`, `vk`).
+        /// One of the rules the gateway lists in its `/v1/info`.
         rule: String,
     },
 }

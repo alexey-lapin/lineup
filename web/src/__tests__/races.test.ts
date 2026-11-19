@@ -23,17 +23,17 @@ import ChannelForm from '../components/ChannelForm.vue'
 import PlaylistPage from '../pages/PlaylistPage.vue'
 import ImportPage from '../pages/ImportPage.vue'
 
-const ACE_A = 'a'.repeat(40)
+const ID_A = 'a'.repeat(40)
 const ch = (id: number, name: string) => ({
   id,
   name,
   enabled: true,
   playlists: [],
   route_id: 2,
-  route_name: 'Acestream',
+  route_name: 'Ids',
   route_enabled: true,
-  source: `acestream://${ACE_A}`,
-  identity: `ace:${ACE_A}`,
+  source: `id://${ID_A}`,
+  identity: `id:${ID_A}`,
   play_url: 'http://x',
   created_at: '',
   updated_at: ''
@@ -50,7 +50,7 @@ const detail = (slug: string, ids: number[]) => ({
 
 const ROUTES = [
   { id: 1, name: 'Direct', enabled: true, config: { kind: 'direct' }, channel_count: 0, revision: 0 },
-  { id: 2, name: 'Acestream', enabled: true, config: { kind: 'gateway', base_url: 'http://g', rule: 'acestream' }, channel_count: 0, revision: 0 }
+  { id: 2, name: 'Ids', enabled: true, config: { kind: 'gateway', base_url: 'http://g', rule: 'ids' }, channel_count: 0, revision: 0 }
 ]
 
 /** What `resolve` answers for an input on a route. */
@@ -93,11 +93,11 @@ describe('ChannelForm', () => {
     const vm = w.vm as any
     vm.state.route_id = 2
     await flush()
-    vm.state.input = `acestream://${ACE_A}`
+    vm.state.input = `id://${ID_A}`
     vm.resolveInput()
     await w.setProps({ open: false })
     await w.setProps({ open: true })
-    pending.resolve(resolution(2, `acestream://${ACE_A}`))
+    pending.resolve(resolution(2, `id://${ID_A}`))
     await flush()
     expect(vm.currentResolution).toBeNull()
     expect(vm.canSave).toBe(false)
@@ -113,7 +113,7 @@ describe('ChannelForm', () => {
     const vm = w.vm as any
     vm.state.route_id = 2
     await flush()
-    vm.state.input = ACE_A
+    vm.state.input = ID_A
     await vm.resolveInput()
     vm.state.name = 'X'
     expect(vm.canSave).toBe(true)
@@ -129,16 +129,16 @@ describe('ChannelForm', () => {
     const vm = w.vm as any
     vm.state.route_id = 2
     await flush()
-    vm.state.input = ACE_A
+    vm.state.input = ID_A
     await vm.resolveInput()
     expect(vm.currentResolution.route_id).toBe(2)
     vm.state.route_id = 1
     await flush()
-    expect(api.resolve).toHaveBeenLastCalledWith(1, ACE_A)
+    expect(api.resolve).toHaveBeenLastCalledWith(1, ID_A)
     expect(vm.currentResolution.route_id).toBe(1)
     vm.state.name = 'X'
     await vm.save()
-    expect(api.createChannel).toHaveBeenCalledWith(expect.objectContaining({ route_id: 1, input: ACE_A }))
+    expect(api.createChannel).toHaveBeenCalledWith(expect.objectContaining({ route_id: 1, input: ID_A }))
   })
 })
 
@@ -239,11 +239,11 @@ describe('ChannelForm suggestions', () => {
     await flush()
 
     api.resolve.mockResolvedValueOnce(
-      resolution(1, 'http://a', { name: 'VK 1_2', group_title: 'VK', tvg_id: 'A.uk', tvg_logo: 'http://l' })
+      resolution(1, 'http://a', { name: 'Page 12', group_title: 'Video', tvg_id: 'A.uk', tvg_logo: 'http://l' })
     )
     vm.state.input = 'http://a'
     await vm.resolveInput()
-    expect([vm.state.group_title, vm.state.tvg_id]).toEqual(['VK', 'A.uk'])
+    expect([vm.state.group_title, vm.state.tvg_id]).toEqual(['Video', 'A.uk'])
 
     // The user edits the logo; the next source suggests nothing beyond a name.
     vm.state.tvg_logo = 'http://mine'

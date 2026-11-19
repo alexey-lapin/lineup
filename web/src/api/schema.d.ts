@@ -993,11 +993,11 @@ export interface components {
             /** @enum {string} */
             kind: "direct";
         } | {
-            /** @description Gateway base URL, as players reach it (e.g. `http://media-host:8099`). */
+            /** @description Gateway base URL, as players reach it (e.g. `http://gateway-host:8099`). */
             base_url: string;
             /** @enum {string} */
             kind: "gateway";
-            /** @description One of the gateway's rules (e.g. `acestream`, `vk`). */
+            /** @description One of the rules the gateway lists in its `/v1/info`. */
             rule: string;
         };
         RouteCreate: {

@@ -247,37 +247,37 @@ mod tests {
     #[test]
     fn joins_below_the_base_path() {
         assert_eq!(
-            play_url("http://h:8099", "play/vk.m3u8?ref=x"),
-            "http://h:8099/play/vk.m3u8?ref=x"
+            play_url("http://h:8099", "play/pages.m3u8?ref=x"),
+            "http://h:8099/play/pages.m3u8?ref=x"
         );
         assert_eq!(
-            play_url("http://proxy/gateway/", "play/vk.m3u8?ref=x"),
-            "http://proxy/gateway/play/vk.m3u8?ref=x"
+            play_url("http://proxy/gateway/", "play/pages.m3u8?ref=x"),
+            "http://proxy/gateway/play/pages.m3u8?ref=x"
         );
         assert_eq!(
-            play_url("http://proxy/gateway", "/play/vk.m3u8"),
-            "http://proxy/gateway/play/vk.m3u8",
+            play_url("http://proxy/gateway", "/play/pages.m3u8"),
+            "http://proxy/gateway/play/pages.m3u8",
             "a stray leading slash does not drop the prefix"
         );
         assert_eq!(
-            play_url("http://proxy/gateway", "http://acexy:8080/ace/getstream?id=1"),
-            "http://acexy:8080/ace/getstream?id=1"
+            play_url("http://proxy/gateway", "http://upstream:8080/stream?id=1"),
+            "http://upstream:8080/stream?id=1"
         );
     }
 
     #[test]
     fn play_references() {
         assert_eq!(
-            normalize_play("play/vk.m3u8?ref=a%20b").as_deref(),
-            Some("play/vk.m3u8?ref=a%20b")
+            normalize_play("play/pages.m3u8?ref=a%20b").as_deref(),
+            Some("play/pages.m3u8?ref=a%20b")
         );
         assert_eq!(
-            normalize_play("http://acexy:8080/ace/getstream?id=1").as_deref(),
-            Some("http://acexy:8080/ace/getstream?id=1")
+            normalize_play("http://upstream:8080/stream?id=1").as_deref(),
+            Some("http://upstream:8080/stream?id=1")
         );
         // Accepted absolute URLs are stored normalised and render as themselves.
-        let mixed = normalize_play("HTTPS://Acexy.Example/ace/getstream?id=1").unwrap();
-        assert_eq!(mixed, "https://acexy.example/ace/getstream?id=1");
+        let mixed = normalize_play("HTTPS://Upstream.Example/stream?id=1").unwrap();
+        assert_eq!(mixed, "https://upstream.example/stream?id=1");
         assert_eq!(play_url("http://gw/prefix", &mixed), mixed);
         for bad in [
             "",
