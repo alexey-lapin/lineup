@@ -198,9 +198,9 @@ sandbox: an extractor is code you trust. Keep the host-level egress rules below.
 - Only standard HLS tags reach the player. Comments, vendor tags (such as `#EXT-X-TWITCH-INFO`,
   `#EXT-X-CUE-OUT` or image playlists), `#EXT-X-DATERANGE` and `#EXT-X-SESSION-DATA` are dropped:
   their attributes can carry upstream URLs (ad trackers, interstitial assets, CDN nodes) and the
-  viewer's address.
-- Refused: LL-HLS parts and hints, content steering, variable substitution, and keys other than
-  plain AES-128. No transcoding: DASH-only or MP4-only pages fail clearly.
+  viewer's address. Kept tags pass with their values as they are.
+- Refused: LL-HLS parts and hints, delta updates (`EXT-X-SKIP`), content steering, variable
+  substitution, and keys other than plain AES-128. No transcoding: DASH-only or MP4-only pages fail clearly.
 - Sessions: at most `limits.sessions`; idle ones are evicted, but a session used within the last
   minute never is, so a new viewer gets 503 instead of stopping an active one. HEAD opens no session.
 - Upstream requests carry only the lookup's User-Agent, Accept, Accept-Language, Referer and

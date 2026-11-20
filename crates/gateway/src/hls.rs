@@ -6,8 +6,9 @@
 //! `#EXT-X-SESSION-DATA`, whose attributes and values can carry upstream URLs (ad trackers,
 //! interstitial `X-ASSET-URI`s, CDN nodes) and the viewer's address. URIs are resolved against the playlist's final (post-redirect) URL and
 //! replaced by whatever the caller maps them to. Features a relay can't serve safely are refused
-//! instead of leaking a CDN URL to the player: LL-HLS parts and hints, content steering, and keys
-//! other than plain AES-128.
+//! instead of leaking a CDN URL to the player or misnumbering segments: LL-HLS parts and hints,
+//! delta updates (`EXT-X-SKIP`), content steering, and keys other than plain AES-128. Kept tags are
+//! passed on with their values as they are (an `EXTINF` title, for example).
 
 use url::Url;
 
@@ -116,6 +117,7 @@ pub fn rewrite(
                 | "EXT-X-PRELOAD-HINT"
                 | "EXT-X-RENDITION-REPORT"
                 | "EXT-X-CONTENT-STEERING"
+                | "EXT-X-SKIP"
                 | "EXT-X-DEFINE" => {
                     return Err(HlsError::Unsupported(name.into()));
                 }
@@ -403,6 +405,8 @@ mod tests {
             "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n",
             "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n",
             "#EXTM3U\n#EXT-X-DEFINE:NAME=\"x\",VALUE=\"y\"\n",
+            // A delta update: dropping the tag would renumber every segment (and implicit IVs).
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-SKIP:SKIPPED-SEGMENTS=6\n#EXTINF:6,\nseg106.ts\n",
         ] {
             assert!(
                 matches!(run(body, "https://c/x.m3u8"), Err(HlsError::Unsupported(_))),
