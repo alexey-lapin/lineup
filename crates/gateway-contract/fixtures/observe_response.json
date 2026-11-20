@@ -1,13 +1,13 @@
 {
   "results": [
     {
-      "ref": "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c",
+      "ref": "https://video.example/v/42?key=abc",
       "available": true,
       "reason": null,
       "content_state": "recording",
       "watching": false,
       "facts": [{"label": "Duration", "value": "2:16:03"}],
-      "title": "Кристал Пэлас – Ливерпуль",
+      "title": "Match replay",
       "raw": {"extractor": "yt-dlp"}
     }
   ]

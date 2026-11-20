@@ -363,11 +363,11 @@ mod tests {
     fn checks_urls() {
         let none = Allow::default();
         let u = |s: &str| url::Url::parse(s).unwrap();
-        assert!(check_url(&u("https://vk.com/x"), &none).is_ok());
+        assert!(check_url(&u("https://video.example/x"), &none).is_ok());
         assert!(check_url(&u("http://192.168.1.1/x"), &none).is_err());
         assert!(check_url(&u("http://[::1]/x"), &none).is_err());
-        assert!(check_url(&u("ftp://vk.com/x"), &none).is_err());
-        assert!(check_url(&u("http://a:b@vk.com/x"), &none).is_err());
+        assert!(check_url(&u("ftp://video.example/x"), &none).is_err());
+        assert!(check_url(&u("http://a:b@video.example/x"), &none).is_err());
         let local = Allow::new(&["127.0.0.1".into()]);
         assert!(check_url(&u("http://127.0.0.1:9/x"), &local).is_ok());
     }

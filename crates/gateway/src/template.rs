@@ -222,23 +222,23 @@ mod tests {
 
     #[test]
     fn renders_and_encodes() {
-        let t = Template::parse("https://vk.com/video{owner}_{video}{?list}", Use::Ref).unwrap();
+        let t = Template::parse("https://video.example/video{owner}_{video}{?list}", Use::Ref).unwrap();
         assert_eq!(
             t.render(&vars(&[("owner", "-1"), ("video", "2"), ("list", "a+b/c&d=e?f#g %ü")])),
-            "https://vk.com/video-1_2?list=a%2Bb%2Fc%26d%3De%3Ff%23g%20%25%C3%BC"
+            "https://video.example/video-1_2?list=a%2Bb%2Fc%26d%3De%3Ff%23g%20%25%C3%BC"
         );
         assert_eq!(
             t.render(&vars(&[("owner", "-1"), ("video", "2")])),
-            "https://vk.com/video-1_2"
+            "https://video.example/video-1_2"
         );
         let q = Template::parse("https://h/p{?a,b}{&c}", Use::Ref).unwrap();
         assert_eq!(q.render(&vars(&[("b", "2"), ("c", "3")])), "https://h/p?b=2&c=3");
-        let id = Template::parse("vk:{owner}_{video}", Use::Identity).unwrap();
-        assert_eq!(id.render(&vars(&[("owner", "-1"), ("video", "2")])), "vk:-1_2");
-        let ace = Template::parse("acestream://{id}", Use::Ref).unwrap();
-        assert_eq!(ace.render(&vars(&[("id", "abc")])), "acestream://abc");
+        let id = Template::parse("v:{owner}_{video}", Use::Identity).unwrap();
+        assert_eq!(id.render(&vars(&[("owner", "-1"), ("video", "2")])), "v:-1_2");
+        let opaque = Template::parse("id://{id}", Use::Ref).unwrap();
+        assert_eq!(opaque.render(&vars(&[("id", "abc")])), "id://abc");
         assert_eq!(
-            ace.names().into_iter().collect::<Vec<_>>(),
+            opaque.names().into_iter().collect::<Vec<_>>(),
             ["id"],
             "names lists the variables"
         );
@@ -250,7 +250,7 @@ mod tests {
             ("https://{host}/x", Use::Play),
             ("https://h{port}/x", Use::Play),
             ("{base}/x", Use::Play),
-            ("acestream://{id}", Use::Play),
+            ("id://{id}", Use::Play),
             ("https://{host}/x", Use::Ref),
             ("{x}", Use::Ref),
             ("://{x}", Use::Ref),
@@ -264,10 +264,10 @@ mod tests {
             assert!(Template::parse(bad.0, bad.1).is_err(), "{bad:?}");
         }
         for good in [
-            ("http://media-host:8080/ace/getstream?id={id}", Use::Play),
+            ("http://media-host:8080/stream?id={id}", Use::Play),
             ("https://h/x{?a}", Use::Play),
-            ("acestream://{id}", Use::Ref),
-            ("https://vk.com/video{o}", Use::Ref),
+            ("id://{id}", Use::Ref),
+            ("https://video.example/video{o}", Use::Ref),
             ("{anything}", Use::Identity),
             ("https://v.example", Use::Ref),
             ("https://v.example", Use::Play),

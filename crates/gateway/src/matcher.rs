@@ -382,10 +382,10 @@ mod tests {
             "x",
             &pat(r#"
                 [[match]]
-                hosts = ["vk.com"]
+                hosts = ["video.example"]
                 query = [{ param = "z", re = 'video(?P<o>-?[0-9]+)_(?P<v>[0-9]+)(?:[^0-9].*)?' }]
                 [[match]]
-                hosts = ["vk.com"]
+                hosts = ["video.example"]
                 path = 'video(?P<o>-?[0-9]+)_(?P<v>[0-9]+)'
                 query = [
                   { param = "list", re = '(?P<l>[a-z0-9]{1,8})', optional = true },
@@ -394,47 +394,50 @@ mod tests {
             "#),
             &[("o".into(), VarType::Int), ("v".into(), VarType::Pos)].into(),
             "x:{o}_{v}",
-            "https://vk.com/video{o}_{v}{?l}",
+            "https://video.example/video{o}_{v}{?l}",
             None,
             Some("play/x.m3u8".into()),
         )
         .unwrap();
         let id = |i: &str| m.matches(i).map(|x| x.identity);
         assert_eq!(
-            id("https://vk.com/video1_2?z=video3_4%2Fpl"),
+            id("https://video.example/video1_2?z=video3_4%2Fpl"),
             Some("x:3_4".into()),
             "z first"
         );
-        assert_eq!(id("https://m.vk.com/video-001_02x"), Some("x:-1_2".into()), "typed");
-        assert_eq!(id("https://vk.com/video1_0"), None, "pos");
-        assert_eq!(id("https://vk.com/video99999999999999999999_1"), None, "bounded");
-        assert_eq!(id("https://notvk.com/video1_2"), None);
-        assert_eq!(id("https://u:p@vk.com/video1_2"), None, "no user info");
+        assert_eq!(
+            id("https://m.video.example/video-001_02x"),
+            Some("x:-1_2".into()),
+            "typed"
+        );
+        assert_eq!(id("https://video.example/video1_0"), None, "pos");
+        assert_eq!(id("https://video.example/video99999999999999999999_1"), None, "bounded");
+        assert_eq!(id("https://notvideo.example/video1_2"), None);
+        assert_eq!(id("https://u:p@video.example/video1_2"), None, "no user info");
         let r = |i: &str| m.matches(i).unwrap().reference;
         assert_eq!(
-            r("https://vk.com/video1_2?list=bad%22&hash=abc"),
-            "https://vk.com/video1_2?l=abc"
+            r("https://video.example/video1_2?list=bad%22&hash=abc"),
+            "https://video.example/video1_2?l=abc"
         );
         assert_eq!(
-            r("https://vk.com/video1_2?hash=abc&list=def"),
-            "https://vk.com/video1_2?l=def",
+            r("https://video.example/video1_2?hash=abc&list=def"),
+            "https://video.example/video1_2?l=def",
             "list first"
         );
         assert_eq!(
-            r("https://vk.com/video1_2?list=a&list=b"),
-            "https://vk.com/video1_2?l=a",
+            r("https://video.example/video1_2?list=a&list=b"),
+            "https://video.example/video1_2?l=a",
             "first value"
         );
         assert_eq!(
-            r("http://gw/prefix/play/x.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo1_2"),
-            "https://vk.com/video1_2",
+            r("http://gw/prefix/play/x.m3u8?ref=https%3A%2F%2Fvideo.example%2Fvideo1_2"),
+            "https://video.example/video1_2",
             "own play URL"
         );
-        let nested =
-            "http://gw/play/x.m3u8?ref=http%3A%2F%2Fgw%2Fplay%2Fx.m3u8%3Fref%3Dhttps%253A%252F%252Fvk.com%252Fvideo1_2";
+        let nested = "http://gw/play/x.m3u8?ref=http%3A%2F%2Fgw%2Fplay%2Fx.m3u8%3Fref%3Dhttps%253A%252F%252Fvideo.example%252Fvideo1_2";
         assert_eq!(m.matches(nested), None, "one level only");
         assert_eq!(
-            m.matches(&format!("https://vk.com/video1_2?x={}", "a".repeat(5000))),
+            m.matches(&format!("https://video.example/video1_2?x={}", "a".repeat(5000))),
             None
         );
     }

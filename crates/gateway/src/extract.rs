@@ -878,7 +878,7 @@ mod tests {
     #[test]
     fn classifies_errors() {
         assert!(matches!(
-            classify("yt-dlp", "ERROR: [vk] 1_2: Video not found", &Phrases::default()),
+            classify("yt-dlp", "ERROR: [generic] 1_2: Video not found", &Phrases::default()),
             ExtractError::NotFound(_)
         ));
         assert!(matches!(
@@ -912,7 +912,7 @@ mod tests {
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let policy = yt_dlp(Some(script), Duration::from_secs(5));
         let x = Extractor::new("http://127.0.0.1:9".into(), 2);
-        let l = page(&policy, "https://vk.com/video1_2");
+        let l = page(&policy, "https://video.example/video1_2");
         let (a, b) = tokio::join!(
             x.descriptor(&l, Priority::Playback),
             x.descriptor(&l, Priority::Background)
@@ -923,7 +923,7 @@ mod tests {
         assert_eq!(calls.lines().count(), 1, "coalesced: {calls}");
         assert!(
             calls.contains("--ignore-config")
-                && calls.contains("--proxy http://127.0.0.1:9 -- https://vk.com/video1_2"),
+                && calls.contains("--proxy http://127.0.0.1:9 -- https://video.example/video1_2"),
             "{calls}"
         );
     }
@@ -978,7 +978,7 @@ mod tests {
                 let (x, policy) = (x.clone(), policy.clone());
                 tokio::spawn(async move {
                     x.descriptor(
-                        &page(&policy, &format!("https://vk.com/video1_{i}")),
+                        &page(&policy, &format!("https://video.example/video1_{i}")),
                         Priority::Background,
                     )
                     .await
@@ -987,7 +987,7 @@ mod tests {
             .collect();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let r = x
-            .descriptor(&page(&policy, "https://vk.com/video9_9"), Priority::Playback)
+            .descriptor(&page(&policy, "https://video.example/video9_9"), Priority::Playback)
             .await;
         assert!(r.is_ok(), "{r:?}");
         let refused = futures_util::future::join_all(bg)
@@ -1019,7 +1019,7 @@ sleep 30
         let policy = yt_dlp(Some(script), Duration::from_millis(500));
         let x = Extractor::new("http://127.0.0.1:9".into(), 1);
         let _ = x
-            .descriptor(&page(&policy, "https://vk.com/video1_2"), Priority::Playback)
+            .descriptor(&page(&policy, "https://video.example/video1_2"), Priority::Playback)
             .await;
         let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
         let alive = std::process::Command::new("kill")
@@ -1040,7 +1040,7 @@ sleep 30
         let x = Extractor::new("http://127.0.0.1:9".into(), 1);
         let started = Instant::now();
         let r = x
-            .descriptor(&page(&policy, "https://vk.com/video1_2"), Priority::Playback)
+            .descriptor(&page(&policy, "https://video.example/video1_2"), Priority::Playback)
             .await;
         assert!(matches!(r, Err(ExtractError::Failed(m)) if m.contains("longer than")));
         assert!(started.elapsed() < Duration::from_secs(5));
