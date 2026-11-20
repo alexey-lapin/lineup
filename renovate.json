@@ -27,6 +27,11 @@
     {
       "matchManagers": ["dockerfile"],
       "groupName": "docker images"
+    },
+    {
+      "matchManagers": ["pip_requirements"],
+      "matchFileNames": ["deploy/gateway-tools-requirements.txt"],
+      "groupName": "gateway extractors"
     }
   ]
 }

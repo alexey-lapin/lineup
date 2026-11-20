@@ -11,9 +11,15 @@ RUN cargo build --release --locked -p lineup-gateway && cp target/release/lineup
 
 # ---- extractors ------------------------------------------------------------
 FROM python:3.15-alpine AS tools
-# Pinned: update both together and run the gateway's smoke test (docs/gateway.md).
+# Every package pinned (deploy/gateway-tools-requirements.txt), installed without resolving new
+# ones, then checked: consistent dependencies, and streamlink can prepare a request (its urllib3
+# patches fail there, offline, when urllib3 moves under it).
+COPY deploy/gateway-tools-requirements.txt /tmp/requirements.txt
 RUN python -m venv /opt/tools \
-    && /opt/tools/bin/pip install --no-cache-dir 'yt-dlp==2026.10.26' 'streamlink==8.6.0'
+    && /opt/tools/bin/pip install --no-cache-dir --no-deps -r /tmp/requirements.txt \
+    && /opt/tools/bin/pip check \
+    && /opt/tools/bin/python -c "import requests, streamlink; streamlink.Streamlink().http.prepare_request(requests.Request('GET', 'https://example.com/a b'))" \
+    && /opt/tools/bin/yt-dlp --version && /opt/tools/bin/streamlink --version
 
 # ---- runtime ---------------------------------------------------------------
 FROM python:3.15-alpine
