@@ -3,6 +3,7 @@
   "inputs": [
     "id://0123456789abcdef0123456789abcdef01234567",
     "0123456789ABCDEF0123456789ABCDEF01234567",
-    "https://example.com/not-an-id"
+    "https://example.com/not-an-id",
+    "id://0000000000000000000000000000000000000000"
   ]
 }

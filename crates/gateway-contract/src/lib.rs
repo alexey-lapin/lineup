@@ -247,8 +247,9 @@ mod tests {
         let info: Info = round_trip(include_str!("../fixtures/info.json"));
         assert_eq!(info.contract, CONTRACT);
         assert!(info.rule("ids").unwrap().can(Capability::Check));
-        round_trip::<MatchRequest>(include_str!("../fixtures/match_request.json"));
+        let req: MatchRequest = round_trip(include_str!("../fixtures/match_request.json"));
         let m: MatchResponse = round_trip(include_str!("../fixtures/match_response.json"));
+        assert_eq!(req.inputs.len(), m.results.len(), "one result per input");
         assert!(matches!(&m.results[0], MatchResult::Matched(x) if x.reference.starts_with("id://")));
         assert!(matches!(&m.results[2], MatchResult::NoMatch { .. }));
         round_trip::<ObserveRequest>(include_str!("../fixtures/observe_request.json"));

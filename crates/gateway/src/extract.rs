@@ -1016,12 +1016,16 @@ sleep 30
         )
         .unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let policy = yt_dlp(Some(script), Duration::from_millis(500));
+        // Long enough for the shell to start its helper on a loaded machine (parallel test runs).
+        let policy = yt_dlp(Some(script), Duration::from_secs(3));
         let x = Extractor::new("http://127.0.0.1:9".into(), 1);
         let _ = x
             .descriptor(&page(&policy, "https://video.example/video1_2"), Priority::Playback)
             .await;
-        let pid = std::fs::read_to_string(&pidfile).unwrap().trim().to_string();
+        let pid = std::fs::read_to_string(&pidfile)
+            .expect("the tool was killed before it started its helper")
+            .trim()
+            .to_string();
         let alive = std::process::Command::new("kill")
             .args(["-0", &pid])
             .status()
