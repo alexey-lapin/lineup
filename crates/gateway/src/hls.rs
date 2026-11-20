@@ -1,13 +1,43 @@
 //! Rewriting HLS playlists so every URI points back at the gateway.
 //!
-//! Line-based on purpose: every line is kept as it is except the URIs, so timing, sequence,
-//! discontinuity and byte-range tags (and tags this code does not know) pass through unchanged.
-//! URIs are resolved against the playlist's final (post-redirect) URL and replaced by whatever the
-//! caller maps them to. Features a relay can't serve safely are refused instead of leaking a CDN
-//! URL to the player: LL-HLS parts and hints, content steering, session data URIs, and keys other
-//! than plain AES-128.
+//! Line-based on purpose: the standard tags are kept as they are except their URIs, so timing,
+//! sequence, discontinuity and byte-range tags pass through unchanged. Every other line is dropped:
+//! comments, vendor tags (`#EXT-X-TWITCH-INFO`, `#EXT-X-CUE-OUT`, ...), `#EXT-X-DATERANGE` and
+//! `#EXT-X-SESSION-DATA`, whose attributes and values can carry upstream URLs (ad trackers,
+//! interstitial `X-ASSET-URI`s, CDN nodes) and the viewer's address. URIs are resolved against the playlist's final (post-redirect) URL and
+//! replaced by whatever the caller maps them to. Features a relay can't serve safely are refused
+//! instead of leaking a CDN URL to the player or misnumbering segments: LL-HLS parts and hints,
+//! delta updates (`EXT-X-SKIP`), content steering, and keys other than plain AES-128. Kept tags are
+//! passed on with their values as they are (an `EXTINF` title, for example).
 
 use url::Url;
+
+/// Tags passed on to the player (RFC 8216 and its successor, without low-latency HLS,
+/// `EXT-X-DATERANGE` and `EXT-X-SESSION-DATA`). Anything else is dropped.
+const KEEP: [&str; 22] = [
+    "EXT-X-VERSION",
+    "EXTINF",
+    "EXT-X-BYTERANGE",
+    "EXT-X-DISCONTINUITY",
+    "EXT-X-KEY",
+    "EXT-X-MAP",
+    "EXT-X-PROGRAM-DATE-TIME",
+    "EXT-X-GAP",
+    "EXT-X-BITRATE",
+    "EXT-X-TARGETDURATION",
+    "EXT-X-MEDIA-SEQUENCE",
+    "EXT-X-DISCONTINUITY-SEQUENCE",
+    "EXT-X-ENDLIST",
+    "EXT-X-PLAYLIST-TYPE",
+    "EXT-X-I-FRAMES-ONLY",
+    "EXT-X-MEDIA",
+    "EXT-X-STREAM-INF",
+    "EXT-X-I-FRAME-STREAM-INF",
+    "EXT-X-SESSION-KEY",
+    "EXT-X-INDEPENDENT-SEGMENTS",
+    "EXT-X-START",
+    "EXT-X-ALLOW-CACHE",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -79,9 +109,7 @@ pub fn rewrite(
         }
         if let Some(tag) = t.strip_prefix('#') {
             if !tag.starts_with("EXT") {
-                out.push_str(line); // a comment
-                out.push('\n');
-                continue;
+                continue; // a comment
             }
             let name = tag.split(':').next().unwrap_or(tag);
             match name {
@@ -89,11 +117,9 @@ pub fn rewrite(
                 | "EXT-X-PRELOAD-HINT"
                 | "EXT-X-RENDITION-REPORT"
                 | "EXT-X-CONTENT-STEERING"
+                | "EXT-X-SKIP"
                 | "EXT-X-DEFINE" => {
                     return Err(HlsError::Unsupported(name.into()));
-                }
-                "EXT-X-SESSION-DATA" if attr(tag, "URI").is_some() => {
-                    return Err(HlsError::Unsupported("EXT-X-SESSION-DATA with URI".into()));
                 }
                 "EXT-X-KEY" | "EXT-X-SESSION-KEY" => {
                     let method = attr(tag, "METHOD").unwrap_or_default();
@@ -137,13 +163,16 @@ pub fn rewrite(
                 }
                 _ => {}
             }
+            if !KEEP.contains(&name) {
+                continue; // a vendor or unsupported tag: never reaches the player
+            }
             let kind = match name {
                 "EXT-X-MEDIA" | "EXT-X-I-FRAME-STREAM-INF" => Some(Kind::Playlist),
                 "EXT-X-KEY" | "EXT-X-SESSION-KEY" | "EXT-X-MAP" => Some(Kind::Resource),
                 _ => None,
             };
-            // Any other tag carrying a URI would leak it to the player: refuse it.
-            if kind.is_none() && attr(tag, "URI").is_some() && name != "EXT-X-SESSION-DATA" {
+            // A kept tag that carries a URI this code does not map would leak it: refuse it.
+            if kind.is_none() && attr(tag, "URI").is_some() {
                 return Err(HlsError::Unsupported(format!("{name} with URI")));
             }
             match kind.zip(attr(tag, "URI")) {
@@ -295,6 +324,31 @@ mod tests {
     }
 
     #[test]
+    fn vendor_tags_comments_and_dateranges_are_dropped() {
+        let body = "#EXTM3U\n# a comment with https://cdn.example/x\n\
+            #EXT-X-SESSION-DATA:DATA-ID=\"USER-IP\",VALUE=\"203.0.113.9\"\n\
+            #EXT-X-SESSION-DATA:DATA-ID=\"x\",URI=\"https://cdn.example/d.json\"\n\
+            #EXT-X-TWITCH-INFO:NODE=\"n\",USER-IP=\"203.0.113.9\",C=\"aHR0cHM6Ly9jZG4\"\n\
+            #EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:6\n\
+            #EXT-X-DATERANGE:ID=\"ad\",START-DATE=\"2026-11-20T04:41:46Z\",X-TRIGGER-URL=\"https://ads.example/t\"\n\
+            #EXT-X-DATERANGE:ID=\"i\",CLASS=\"com.apple.hls.interstitial\",START-DATE=\"2026-11-20T04:41:46Z\",X-ASSET-URI=\"https://ads.example/a.m3u8\"\n\
+            #EXT-X-CUE-OUT:30\n#EXT-X-PROGRAM-DATE-TIME:2026-11-20T04:41:40.224Z\n\
+            #EXTINF:2.000,Amazon|1\n6.ts\n#EXT-X-CUE-IN\n#EXTINF:2.000,live\n7.ts\n";
+        let (out, seen, s) = run(body, "https://cdn.example/v/index.m3u8").unwrap();
+        // A vendor tag with a URI is dropped too, not refused: the stream still plays.
+        let thumbs = "#EXTM3U\n#EXT-X-IMAGE-STREAM-INF:BANDWIDTH=1,URI=\"https://cdn.example/thumbs.m3u8\"\n";
+        assert_eq!(run(thumbs, "https://c/x.m3u8").unwrap().0, "#EXTM3U\n");
+        assert_eq!(s.segments, 2);
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            out,
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:6\n\
+             #EXT-X-PROGRAM-DATE-TIME:2026-11-20T04:41:40.224Z\n#EXTINF:2.000,Amazon|1\nR1\n\
+             #EXTINF:2.000,live\nR2\n"
+        );
+    }
+
+    #[test]
     fn media_with_keys_maps_byteranges_and_endlist() {
         let body = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n\
             #EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"720@0\"\n\
@@ -348,11 +402,11 @@ mod tests {
             "#EXTM3U\n#EXT-X-PART:DURATION=1,URI=\"p.mp4\"\n",
             "#EXTM3U\n#EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"p.mp4\"\n",
             "#EXTM3U\n#EXT-X-CONTENT-STEERING:SERVER-URI=\"s.json\"\n",
-            "#EXTM3U\n#EXT-X-SESSION-DATA:DATA-ID=\"x\",URI=\"d.json\"\n",
             "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n",
             "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n",
-            "#EXTM3U\n#EXT-X-IMAGE-STREAM-INF:BANDWIDTH=1,URI=\"https://cdn.example/thumbs.m3u8\"\n",
             "#EXTM3U\n#EXT-X-DEFINE:NAME=\"x\",VALUE=\"y\"\n",
+            // A delta update: dropping the tag would renumber every segment (and implicit IVs).
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-SKIP:SKIPPED-SEGMENTS=6\n#EXTINF:6,\nseg106.ts\n",
         ] {
             assert!(
                 matches!(run(body, "https://c/x.m3u8"), Err(HlsError::Unsupported(_))),

@@ -195,9 +195,12 @@ sandbox: an extractor is code you trust. Keep the host-level egress rules below.
   dead video; parser and network errors are inconclusive.
 - Range requests are passed through to segments (one range only); nothing else from the player is
   forwarded.
-- Refused: LL-HLS parts and hints, content steering, variable substitution, session data URIs,
-  any other tag carrying a URI (for example image playlists), and keys other than plain AES-128. No
-  transcoding: DASH-only or MP4-only pages fail clearly.
+- Only standard HLS tags reach the player. Comments, vendor tags (such as `#EXT-X-TWITCH-INFO`,
+  `#EXT-X-CUE-OUT` or image playlists), `#EXT-X-DATERANGE` and `#EXT-X-SESSION-DATA` are dropped:
+  their attributes can carry upstream URLs (ad trackers, interstitial assets, CDN nodes) and the
+  viewer's address. Kept tags pass with their values as they are.
+- Refused: LL-HLS parts and hints, delta updates (`EXT-X-SKIP`), content steering, variable
+  substitution, and keys other than plain AES-128. No transcoding: DASH-only or MP4-only pages fail clearly.
 - Sessions: at most `limits.sessions`; idle ones are evicted, but a session used within the last
   minute never is, so a new viewer gets 503 instead of stopping an active one. HEAD opens no session.
 - Upstream requests carry only the lookup's User-Agent, Accept, Accept-Language, Referer and
@@ -251,8 +254,12 @@ each extractor a rule uses must answer its `version_args`, or the gateway does n
 
 ## Updating the extractors
 
-yt-dlp and streamlink are pinned in `Dockerfile.gateway`. To update: bump both pins, rebuild, and
-smoke-test a live and a recorded video of each relay rule:
+yt-dlp, streamlink and every package they pull in are pinned in
+`deploy/gateway-tools-requirements.txt` and installed without resolving anything new, so an image
+rebuild never changes them. The build checks that the set is consistent and that streamlink can
+prepare a request. To update: change the pins (a fresh `pip install yt-dlp streamlink` then
+`pip freeze` gives a consistent set), rebuild, and smoke-test a live and a recorded video of each
+relay rule with each extractor:
 
 ```sh
 curl -s "http://localhost:8099/play/vk.m3u8?ref=<urlencoded link>" | head
