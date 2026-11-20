@@ -201,6 +201,54 @@ fn fake_yt_dlp(dir: &std::path::Path, cdn: &str, live: bool) -> std::path::PathB
     p
 }
 
+/// The rules of `deploy/gateway.example.toml`, with its commented-out rules turned on.
+fn example_rules() -> toml::Table {
+    let text = include_str!("../../../deploy/gateway.example.toml");
+    let mut uncommented = String::new();
+    let mut block = false;
+    for line in text.lines() {
+        block = line.starts_with("# [rules.") || (block && line.starts_with("# "));
+        uncommented.push_str(if block { &line[2..] } else { line });
+        uncommented.push('\n');
+    }
+    let mut all: toml::Table = uncommented.parse().unwrap();
+    all.remove("rules").unwrap().as_table().unwrap().clone()
+}
+
+/// A relay rule for `video.example/v/<n>` pages, looked up by the fake yt-dlp.
+fn pages_rule() -> toml::Value {
+    r#"
+kind = "relay"
+title = "Video pages"
+extractors = ["yt-dlp"]
+vars = { n = "pos" }
+identity = "page:{n}"
+ref = "https://video.example/v/{n}{?key}"
+[[match]]
+hosts = ["video.example"]
+path = '^/v/(?P<n>[0-9]+)$'
+query = [{ param = "key", re = '(?P<key>[a-z0-9]{1,16})', optional = true }]
+"#
+    .parse::<toml::Table>()
+    .unwrap()
+    .into()
+}
+
+fn rules_toml(rules: toml::Table) -> String {
+    let mut t = toml::Table::new();
+    t.insert("rules".into(), rules.into());
+    toml::to_string(&t).unwrap()
+}
+
+/// An `[extractors.yt-dlp]` block for a fake tool.
+fn extractor(path: &std::path::Path) -> String {
+    format!(
+        "[extractors.yt-dlp]\ncommand = \"{}\"\nargs = [\"--proxy\", \"{{proxy}}\", \"--\", \"{{url}}\"]\n\
+         output = \"yt-dlp-json\"\nversion_args = []\n",
+        path.display()
+    )
+}
+
 struct Fixture {
     url: String,
     engine: Shared,
@@ -220,24 +268,24 @@ async fn fixture_with(live: bool, acexy: bool) -> Fixture {
     let cdn_url = cdn(cdn_state.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let yt = fake_yt_dlp(dir.path(), &cdn_url, live);
-    let cfg = Config::parse(&format!(
-        r#"
-        [acestream]
-        engine_control = "{engine_url}"
-        {}
-        acexy_public = "http://192.168.1.50:8080"
-        [vk]
-        [tools]
-        yt_dlp = "{}"
-        [egress]
-        allow = ["127.0.0.1"]
-        "#,
+    let mut rules = example_rules();
+    {
+        let ace = rules["acestream"].as_table_mut().unwrap();
+        ace.insert("engine_control".into(), engine_url.clone().into());
         if acexy {
-            format!("acexy_control = \"{engine_url}\"")
+            ace.insert("acexy_control".into(), engine_url.clone().into());
         } else {
-            String::new()
-        },
-        yt.display()
+            ace.remove("acexy_control");
+            ace.remove("checks");
+        }
+        rules.remove("streams");
+        rules.remove("vk");
+        rules.insert("pages".into(), pages_rule());
+    }
+    let cfg = Config::parse(&format!(
+        "{}{}[egress]\nallow = [\"127.0.0.1\"]\n",
+        rules_toml(rules),
+        extractor(&yt)
     ))
     .unwrap();
     let g = lineup_gateway::Gateway::new(
@@ -280,7 +328,7 @@ async fn info_and_acestream_match() {
         .iter()
         .map(|r| r["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["acestream", "vk"]);
+    assert_eq!(names, ["acestream", "pages"]);
 
     let (s, r) = post(
         &format!("{}/v1/match", f.url),
@@ -291,7 +339,7 @@ async fn info_and_acestream_match() {
     let m = &r["results"][0];
     assert_eq!(m["status"], "matched");
     assert_eq!(m["identity"], format!("ace:{ACE}"));
-    assert_eq!(m["play"], format!("http://192.168.1.50:8080/ace/getstream?id={ACE}"));
+    assert_eq!(m["play"], format!("http://media-host:8080/ace/getstream?id={ACE}"));
     assert_eq!(m["hints"]["title"], "Arena 1");
     assert_eq!(m["hints"]["region"], "de");
     assert_eq!(m["hints"]["group"], "Sports");
@@ -305,7 +353,7 @@ async fn info_and_acestream_match() {
     let (s, e) = post(&format!("{}/v1/match", f.url), json!({"rule": "nope", "inputs": []})).await;
     assert_eq!((s, e["error"]["code"].as_str()), (404, Some("unknown_rule")));
     let many: Vec<String> = (0..501).map(|i| i.to_string()).collect();
-    let (s, _) = post(&format!("{}/v1/match", f.url), json!({"rule": "vk", "inputs": many})).await;
+    let (s, _) = post(&format!("{}/v1/match", f.url), json!({"rule": "pages", "inputs": many})).await;
     assert_eq!(s, 400);
 }
 
@@ -381,15 +429,16 @@ async fn acestream_observe_reads_without_starting() {
 }
 
 #[tokio::test]
-async fn vk_play_relays_everything_through_the_gateway() {
+async fn relay_play_goes_through_the_gateway() {
     let f = fixture(true).await;
     let (_, r) = post(
         &format!("{}/v1/match", f.url),
-        json!({"rule": "vk", "inputs": ["https://sport.vkvideo.ru/live-100001_200002?list=0a1b2c3d4e5f6a7b8c"]}),
+        json!({"rule": "pages", "inputs": ["https://m.video.example/v/0042?key=abc"]}),
     )
     .await;
     let m = &r["results"][0];
-    assert_eq!(m["ref"], "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c");
+    assert_eq!(m["ref"], "https://video.example/v/42?key=abc");
+    assert_eq!(m["identity"], "page:42");
     let play = m["play"].as_str().unwrap();
     // Behind a reverse-proxy prefix the play path is appended below the base; here the base is the root.
     let master_url = format!("{}/{play}", f.url);
@@ -445,17 +494,21 @@ async fn vk_play_relays_everything_through_the_gateway() {
 }
 
 #[tokio::test]
-async fn vk_observe_and_check_report_content_state() {
+async fn relay_observe_and_check_report_content_state() {
     let f = fixture(false).await;
-    let r#ref = "https://vk.com/video-1_2";
-    let (_, r) = post(&format!("{}/v1/check", f.url), json!({"rule": "vk", "ref": r#ref})).await;
+    let r#ref = "https://video.example/v/2";
+    let (_, r) = post(&format!("{}/v1/check", f.url), json!({"rule": "pages", "ref": r#ref})).await;
     assert_eq!(
         (r["outcome"].as_str(), r["content_state"].as_str()),
         (Some("ok"), Some("live")),
         "{r}"
     );
     f.cdn.lock().unwrap().ended = true;
-    let (_, r) = post(&format!("{}/v1/observe", f.url), json!({"rule": "vk", "refs": [r#ref]})).await;
+    let (_, r) = post(
+        &format!("{}/v1/observe", f.url),
+        json!({"rule": "pages", "refs": [r#ref]}),
+    )
+    .await;
     let o = &r["results"][0];
     assert_eq!(o["content_state"], "recording", "{o}");
     assert_eq!(o["title"], "Match");
@@ -468,12 +521,14 @@ async fn public_fetches_refuse_private_addresses() {
     let cdn_url = cdn(cdn_state.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let yt = fake_yt_dlp(dir.path(), &cdn_url, true);
-    let cfg = Config::parse(&format!("[vk]\n[tools]\nyt_dlp = \"{}\"\n", yt.display())).unwrap();
+    let mut rules = toml::Table::new();
+    rules.insert("pages".into(), pages_rule());
+    let cfg = Config::parse(&format!("{}{}", rules_toml(rules), extractor(&yt))).unwrap();
     let g = lineup_gateway::Gateway::new(&cfg, ProbeTiming::default())
         .await
         .unwrap();
     let url = serve(lineup_gateway::router(g)).await;
-    let r = reqwest::get(format!("{url}/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-1_2"))
+    let r = reqwest::get(format!("{url}/play/pages.m3u8?ref=https%3A%2F%2Fvideo.example%2Fv%2F2"))
         .await
         .unwrap();
     assert_eq!(r.status(), 502);
@@ -482,7 +537,7 @@ async fn public_fetches_refuse_private_addresses() {
         cdn_state.lock().unwrap().user_agents.is_empty(),
         "the CDN was never contacted"
     );
-    let r = reqwest::get(format!("{url}/play/vk.m3u8?ref=https%3A%2F%2Fexample.com%2Fx"))
+    let r = reqwest::get(format!("{url}/play/pages.m3u8?ref=https%3A%2F%2Fexample.com%2Fx"))
         .await
         .unwrap();
     assert_eq!(r.status(), 400);
@@ -552,7 +607,7 @@ async fn without_acexy_there_are_no_checks_but_names_still_show() {
 async fn expired_playlists_refresh_once_onto_the_same_variant() {
     let f = fixture(false).await;
     f.cdn.lock().unwrap().generation = 1;
-    let master_url = format!("{}/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-1_2", f.url);
+    let master_url = format!("{}/play/pages.m3u8?ref=https%3A%2F%2Fvideo.example%2Fv%2F2", f.url);
     let master = reqwest::get(&master_url).await.unwrap().text().await.unwrap();
     let child = url::Url::parse(&master_url)
         .unwrap()
@@ -589,7 +644,7 @@ async fn an_ended_playlist_from_a_live_lookup_is_not_a_recording() {
     f.cdn.lock().unwrap().ended = true;
     let (_, r) = post(
         &format!("{}/v1/check", f.url),
-        json!({"rule": "vk", "ref": "https://vk.com/video-1_2"}),
+        json!({"rule": "pages", "ref": "https://video.example/v/2"}),
     )
     .await;
     assert_eq!(
@@ -603,7 +658,7 @@ async fn an_ended_playlist_from_a_live_lookup_is_not_a_recording() {
 async fn a_refresh_never_splices_and_concurrent_expiries_share_one_refresh() {
     let f = fixture(false).await;
     f.cdn.lock().unwrap().generation = 1;
-    let master_url = format!("{}/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-1_3", f.url);
+    let master_url = format!("{}/play/pages.m3u8?ref=https%3A%2F%2Fvideo.example%2Fv%2F3", f.url);
     let child = |master: &str| {
         url::Url::parse(&master_url)
             .unwrap()
@@ -633,4 +688,206 @@ async fn a_refresh_never_splices_and_concurrent_expiries_share_one_refresh() {
         cdn.ended = true;
     }
     assert_eq!(reqwest::get(c).await.unwrap().status(), 410);
+}
+
+async fn gateway(cfg: &str) -> String {
+    let cfg = Config::parse(cfg).unwrap();
+    let g = lineup_gateway::Gateway::new(
+        &cfg,
+        ProbeTiming {
+            poll_every: std::time::Duration::from_millis(20),
+            give_up_after: std::time::Duration::from_millis(100),
+        },
+    )
+    .await
+    .unwrap();
+    serve(lineup_gateway::router(g)).await
+}
+
+#[tokio::test]
+async fn rules_on_one_engine_share_its_probe_lock() {
+    let shared = Shared::default();
+    let engine_url = engine(shared.clone()).await;
+    let mut ace = example_rules()["acestream"].as_table().unwrap().clone();
+    ace.insert("engine_control".into(), engine_url.clone().into());
+    ace.insert("acexy_control".into(), engine_url.clone().into());
+    let mut rules = toml::Table::new();
+    rules.insert("one".into(), ace.clone().into());
+    rules.insert("two".into(), ace.into());
+    let url = gateway(&rules_toml(rules)).await;
+    let check = |rule: &'static str| {
+        let url = format!("{url}/v1/check");
+        async move { post(&url, json!({"rule": rule, "ref": format!("acestream://{ACE}")})).await }
+    };
+    // One caller goes away mid-probe; checks through both rules run at once.
+    let cancelled = tokio::spawn(check("one"));
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    cancelled.abort();
+    let (a, b) = tokio::join!(check("one"), check("two"));
+    assert_eq!(
+        (a.1["outcome"].as_str(), b.1["outcome"].as_str()),
+        (Some("dead"), Some("dead"))
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let e = shared.lock().unwrap();
+    assert_eq!(e.max_open, 1, "probes on one engine never overlap, whatever the rule");
+    assert_eq!(e.open, 0);
+}
+
+#[tokio::test]
+async fn page_rules_keep_their_own_lookups_and_expiry() {
+    let cdn_state = CdnState::default();
+    let cdn_url = cdn(cdn_state.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let good = fake_yt_dlp(dir.path(), &cdn_url, true);
+    let bad = dir.path().join("broken");
+    std::fs::write(
+        &bad,
+        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho 'ERROR: Unable to download webpage: timed out' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let x = |name: &str, path: &std::path::Path| {
+        extractor(path).replace("[extractors.yt-dlp]", &format!("[extractors.{name}]"))
+    };
+    let pages = pages_rule();
+    let mut rules = toml::Table::new();
+    for (name, chain, expired) in [
+        ("good", "good", None),
+        ("broken", "broken", None),
+        ("strict", "good", Some(410)),
+    ] {
+        let mut r = pages.as_table().unwrap().clone();
+        r.insert("extractors".into(), toml::Value::Array(vec![chain.into()]));
+        if let Some(s) = expired {
+            r.insert(
+                "expired_status".into(),
+                toml::Value::Array(vec![toml::Value::Integer(s)]),
+            );
+        }
+        rules.insert(name.into(), r.into());
+    }
+    let url = gateway(&format!(
+        "{}{}{}[egress]\nallow = [\"127.0.0.1\"]\n",
+        rules_toml(rules),
+        x("good", &good),
+        x("broken", &bad)
+    ))
+    .await;
+    let page = "https://video.example/v/2";
+    // The same page: one rule's failure is not another rule's answer, in either order.
+    for rule in ["broken", "good", "broken"] {
+        let (_, r) = post(&format!("{url}/v1/check"), json!({"rule": rule, "ref": page})).await;
+        let want = if rule == "good" { "ok" } else { "unknown" };
+        assert_eq!(r["outcome"], want, "{rule}: {r}");
+    }
+    // Own play routes; a rule's expired_status decides what counts as expired.
+    let seg = |master_url: String| async move {
+        let master = reqwest::get(&master_url).await.unwrap().text().await.unwrap();
+        let child = url::Url::parse(&master_url)
+            .unwrap()
+            .join(master.lines().find(|l| l.starts_with("s/")).unwrap())
+            .unwrap();
+        let media = reqwest::get(child.clone()).await.unwrap().text().await.unwrap();
+        child.join(media.lines().find(|l| l.ends_with(".ts")).unwrap()).unwrap()
+    };
+    let q = "ref=https%3A%2F%2Fvideo.example%2Fv%2F2";
+    let good_seg = seg(format!("{url}/play/good.m3u8?{q}")).await;
+    let strict_seg = seg(format!("{url}/play/strict.m3u8?{q}")).await;
+    cdn_state.lock().unwrap().expired = true; // the CDN answers 403
+    assert_eq!(
+        reqwest::get(good_seg).await.unwrap().status(),
+        410,
+        "403 is expired by default"
+    );
+    assert_eq!(
+        reqwest::get(strict_seg).await.unwrap().status(),
+        502,
+        "403 is not in this rule's expired_status"
+    );
+    assert_eq!(
+        reqwest::get(format!("{url}/play/nope.m3u8?{q}"))
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    // The probe path (observe, check) uses the rule's expired_status too.
+    let detail = |rule: &'static str| {
+        let url = url.clone();
+        async move {
+            let (_, r) = post(&format!("{url}/v1/check"), json!({"rule": rule, "ref": page})).await;
+            r["detail"]["error"].as_str().unwrap_or_default().to_string()
+        }
+    };
+    assert!(detail("good").await.contains("expired"), "403 means expired by default");
+    assert!(detail("strict").await.contains("HTTP 403"), "not for this rule");
+}
+
+#[tokio::test]
+async fn link_rules_only_match() {
+    let mut rules = toml::Table::new();
+    rules.insert("streams".into(), example_rules()["streams"].clone());
+    let url = gateway(&rules_toml(rules)).await;
+    let (_, r) = post(
+        &format!("{url}/v1/match"),
+        json!({"rule": "streams", "inputs": ["stream://news-1", "news 1"]}),
+    )
+    .await;
+    assert_eq!(r["results"][0]["play"], "http://media-host:8000/stream/news-1.m3u8");
+    assert_eq!(r["results"][0]["hints"]["group"], "Streams");
+    assert_eq!(r["results"][1]["status"], "no_match");
+    let info: Value = reqwest::get(format!("{url}/v1/info"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["rules"][0]["capabilities"], json!([]));
+    let (s, _) = post(
+        &format!("{url}/v1/observe"),
+        json!({"rule": "streams", "refs": ["stream://a"]}),
+    )
+    .await;
+    assert_eq!(s, 409);
+    let (_, r) = post(
+        &format!("{url}/v1/check"),
+        json!({"rule": "streams", "ref": "stream://a"}),
+    )
+    .await;
+    assert_eq!(r["outcome"], "skipped");
+}
+
+#[tokio::test]
+async fn acestream_checks_are_opt_in() {
+    let shared = Shared::default();
+    let engine_url = engine(shared.clone()).await;
+    let mut ace = example_rules()["acestream"].as_table().unwrap().clone();
+    ace.insert("engine_control".into(), engine_url.clone().into());
+    ace.insert("acexy_control".into(), engine_url.into());
+    ace.remove("checks");
+    let mut rules = toml::Table::new();
+    rules.insert("acestream".into(), ace.into());
+    let url = gateway(&rules_toml(rules)).await;
+    let info: Value = reqwest::get(format!("{url}/v1/info"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["rules"][0]["capabilities"], json!(["observe"]));
+    let (_, r) = post(
+        &format!("{url}/v1/check"),
+        json!({"rule": "acestream", "ref": format!("acestream://{ACE}"), "force": true}),
+    )
+    .await;
+    assert_eq!(r["reason"], "guard_unavailable", "{r}");
+    assert!(
+        !shared
+            .lock()
+            .unwrap()
+            .seen
+            .iter()
+            .any(|s| s.starts_with("/ace/getstream"))
+    );
 }

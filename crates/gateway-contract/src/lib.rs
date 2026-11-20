@@ -1,6 +1,6 @@
 //! Wire types of the gateway contract, version 1.
 //!
-//! A gateway turns references that can't be played as-is (an Acestream id, a video page) into
+//! A gateway turns references that can't be played as-is (an id, a video page) into
 //! playable URLs. lineup talks to it through four endpoints, all JSON:
 //!
 //! - `GET  /v1/info`: the gateway's rules and their revisions.
@@ -37,7 +37,7 @@ impl Info {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleInfo {
-    /// Stable machine name, e.g. `acestream`, `vk`.
+    /// Stable machine name, e.g. `ids`, `pages`.
     pub name: String,
     /// Display name.
     pub title: String,
@@ -246,10 +246,11 @@ mod tests {
     fn fixtures() {
         let info: Info = round_trip(include_str!("../fixtures/info.json"));
         assert_eq!(info.contract, CONTRACT);
-        assert!(info.rule("acestream").unwrap().can(Capability::Check));
-        round_trip::<MatchRequest>(include_str!("../fixtures/match_request.json"));
+        assert!(info.rule("ids").unwrap().can(Capability::Check));
+        let req: MatchRequest = round_trip(include_str!("../fixtures/match_request.json"));
         let m: MatchResponse = round_trip(include_str!("../fixtures/match_response.json"));
-        assert!(matches!(&m.results[0], MatchResult::Matched(x) if x.reference.starts_with("acestream://")));
+        assert_eq!(req.inputs.len(), m.results.len(), "one result per input");
+        assert!(matches!(&m.results[0], MatchResult::Matched(x) if x.reference.starts_with("id://")));
         assert!(matches!(&m.results[2], MatchResult::NoMatch { .. }));
         round_trip::<ObserveRequest>(include_str!("../fixtures/observe_request.json"));
         round_trip::<ObserveResponse>(include_str!("../fixtures/observe_response.json"));

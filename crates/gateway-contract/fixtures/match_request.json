@@ -1,8 +1,9 @@
 {
-  "rule": "acestream",
+  "rule": "ids",
   "inputs": [
-    "acestream://41169a3f280a5537b0611b775e926852d372743d",
-    "41169A3F280A5537B0611B775E926852D372743D",
-    "https://example.com/not-ace"
+    "id://0123456789abcdef0123456789abcdef01234567",
+    "0123456789ABCDEF0123456789ABCDEF01234567",
+    "https://example.com/not-an-id",
+    "id://0000000000000000000000000000000000000000"
   ]
 }

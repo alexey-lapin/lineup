@@ -2,31 +2,31 @@
   "results": [
     {
       "status": "matched",
-      "input": "acestream://41169a3f280a5537b0611b775e926852d372743d",
-      "identity": "ace:41169a3f280a5537b0611b775e926852d372743d",
-      "ref": "acestream://41169a3f280a5537b0611b775e926852d372743d",
-      "play": "http://192.168.1.50:8080/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d",
+      "input": "id://0123456789abcdef0123456789abcdef01234567",
+      "identity": "id:0123456789abcdef0123456789abcdef01234567",
+      "ref": "id://0123456789abcdef0123456789abcdef01234567",
+      "play": "http://192.168.1.50:8080/stream?id=0123456789abcdef0123456789abcdef01234567",
       "hints": {"title": "Arena 1", "region": "de", "group": "Sports"},
       "warnings": []
     },
     {
       "status": "matched",
-      "input": "41169A3F280A5537B0611B775E926852D372743D",
-      "identity": "ace:41169a3f280a5537b0611b775e926852d372743d",
-      "ref": "acestream://41169a3f280a5537b0611b775e926852d372743d",
-      "play": "http://192.168.1.50:8080/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d",
+      "input": "0123456789ABCDEF0123456789ABCDEF01234567",
+      "identity": "id:0123456789abcdef0123456789abcdef01234567",
+      "ref": "id://0123456789abcdef0123456789abcdef01234567",
+      "play": "http://192.168.1.50:8080/stream?id=0123456789abcdef0123456789abcdef01234567",
       "hints": {"title": null, "region": null, "group": null},
-      "warnings": ["engine name lookup failed: timed out after 5s"]
+      "warnings": ["name lookup failed: timed out after 5s"]
     },
     {
       "status": "no_match",
-      "input": "https://example.com/not-ace",
-      "reason": "not an Acestream id or link"
+      "input": "https://example.com/not-an-id",
+      "reason": "not an id or id:// link"
     },
     {
       "status": "error",
-      "input": "acestream://0000000000000000000000000000000000000000",
-      "error": {"code": "engine_error", "message": "the engine rejected the id"}
+      "input": "id://0000000000000000000000000000000000000000",
+      "error": {"code": "upstream_error", "message": "the upstream rejected the id"}
     }
   ]
 }

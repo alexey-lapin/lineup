@@ -1,19 +1,190 @@
 # lineup-gateway configuration. Mount your own at /etc/lineup-gateway.toml.
+# Check a config without starting the gateway: lineup-gateway --check-config --config <file>
 
 listen = "0.0.0.0:8099"
 
-# The acestream rule: Acestream ids played through acexy. Remove the section to turn it off.
-# [acestream]
+# ---------------------------------------------------------------------------------------------
+# Extractors: commands that look a page up. `{url}` is the page, `{proxy}` the gateway's egress
+# proxy (required: every tool's traffic goes through it).
+
+[extractors.yt-dlp]
+command = "/opt/tools/bin/yt-dlp"
+args = ["--ignore-config", "--no-playlist", "--no-warnings", "--dump-single-json",
+        "--socket-timeout", "15", "--proxy", "{proxy}", "--", "{url}"]
+output = "yt-dlp-json"
+
+[extractors.streamlink]
+command = "/opt/tools/bin/streamlink"
+args = ["--no-config", "--json", "--http-proxy", "{proxy}", "--", "{url}", "best"]
+output = "streamlink-json"
+
+# ---------------------------------------------------------------------------------------------
+# Rules: each [rules.<name>] block is a rule lineup routes can use, by that name. Patterns are
+# tried in order; the first that matches gives the variables for the templates. Examples are
+# checked every time the config is loaded.
+
+# VK video pages, live or recorded, looked up by the extractors and relayed as HLS. The `list`
+# access token is kept in the ref: some videos need it.
+[rules.vk]
+kind = "relay"
+title = "VK video"
+input_hint = "vk.com, vkvideo.ru or vksport link to a video or broadcast"
+group = "VK"
+extractors = ["yt-dlp", "streamlink"]
+vars = { owner = "int", video = "pos" }
+identity = "vk:{owner}_{video}"
+ref = "https://vk.com/video{owner}_{video}{?list}"
+
+[[rules.vk.match]]   # ?z=video<owner>_<video> (a video opened over another page)
+hosts = ["vk.com", "vk.ru", "vkvideo.ru"]
+query = [
+  { param = "z", re = 'video(?P<owner>-?[0-9]+)_(?P<video>[0-9]+)(?:[^0-9].*)?' },
+  { param = "list", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true },
+]
+
+[[rules.vk.match]]   # the embed player; its `hash` is the access token when there is no `list`
+hosts = ["vk.com", "vk.ru", "vkvideo.ru"]
+path = '^/video_ext\.php'
+query = [
+  { param = "oid", re = '(?P<owner>-?[0-9]+)' },
+  { param = "id", re = '(?P<video>[0-9]+)' },
+  { param = "list", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true },
+  { param = "hash", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true },
+]
+
+[[rules.vk.match]]   # /video-1_2, /video/-1_2, /@group/video-1_2, …
+hosts = ["vk.com", "vk.ru", "vkvideo.ru"]
+path = 'video/?(?P<owner>-?[0-9]+)_(?P<video>[0-9]+)'
+query = [{ param = "list", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true }]
+
+[[rules.vk.match]]   # /live-1_2: the dash is the owner's sign
+hosts = ["vk.com", "vk.ru", "vkvideo.ru"]
+path = 'live(?P<owner>-[0-9]+)_(?P<video>[0-9]+)'
+query = [{ param = "list", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true }]
+
+[[rules.vk.match]]   # legacy vkserve proxy URLs, on any host
+path = '/vk/(?P<owner>-?[0-9]+)_(?P<video>[0-9]+)'
+query = [{ param = "list", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true }]
+
+[[rules.vk.examples]]
+input = "https://sport.vkvideo.ru/live-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+identity = "vk:-100001_200002"
+ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+play = "play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-100001_200002%3Flist%3D0a1b2c3d4e5f6a7b8c"
+[[rules.vk.examples]]
+input = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+[[rules.vk.examples]]
+input = "https://vkvideo.ru/video/-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+[[rules.vk.examples]]
+input = "https://m.vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+[[rules.vk.examples]]
+input = "https://vk.com/somegroup?z=video-100001_200002%2Fpl_x&list=0a1b2c3d4e5f6a7b8c"
+ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+[[rules.vk.examples]]
+input = "https://vk.com/video1_2?z=video3_4"
+identity = "vk:3_4"
+[[rules.vk.examples]]
+input = "http://192.168.1.50:8099/vk/-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+[[rules.vk.examples]]
+input = "http://proxy/gw/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-100001_200002%3Flist%3D0a1b2c3d4e5f6a7b8c"
+ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
+[[rules.vk.examples]]
+input = "https://vk.com/video_ext.php?oid=-1&id=2&hash=abc"
+ref = "https://vk.com/video-1_2?list=abc"
+[[rules.vk.examples]]
+input = "https://vk.com/video_ext.php?oid=-1&id=2&hash=abc&list=def"
+ref = "https://vk.com/video-1_2?list=def"
+[[rules.vk.examples]]
+input = "https://vk.com/video_ext.php?oid=-1&id=2&list=a%22b&hash=abc"
+ref = "https://vk.com/video-1_2?list=abc"
+[[rules.vk.examples]]
+input = "https://vk.com/video-001_02"
+identity = "vk:-1_2"
+ref = "https://vk.com/video-1_2"
+[[rules.vk.examples]]
+input = "https://vk.com/video1_2?list=a%22b"
+ref = "https://vk.com/video1_2"
+[[rules.vk.examples]]
+input = "https://vk.com/id1"
+match = false
+[[rules.vk.examples]]
+input = "https://example.com/video-1_2"
+match = false
+[[rules.vk.examples]]
+input = "https://vk.com/video_ext.php?oid=1&id=-2"
+match = false
+[[rules.vk.examples]]
+input = "ftp://vk.com/video1_2"
+match = false
+
+# Acestream ids, played through acexy (or the engine, or any proxy: see `play`). Uncomment and set
+# the addresses to turn it on.
+# [rules.acestream]
+# kind = "acestream"
+# title = "Acestream"
+# input_hint = "40-hex content id, acestream:// link or acexy/engine URL"
 # engine_control = "http://acestream:6878"     # gateway -> engine (names, checks)
-# acexy_control  = "http://acexy:8080"         # gateway -> acexy (activity guard, live numbers)
-# acexy_public   = "http://media-host:8080"    # written into play URLs: as players reach acexy
+# acexy_control = "http://acexy:8080"          # gateway -> acexy (live numbers, the check guard)
+# play = "http://media-host:8080/ace/getstream?id={id}"   # as players reach acexy
+# checks = true   # guarded engine probes; the guard only sees players that go through acexy
+# vars = { id = "lower" }
+# identity = "ace:{id}"
+# ref = "acestream://{id}"
+# [[rules.acestream.match]]
+# input = '(?i)^acestream://(?P<id>[0-9a-f]{40})/*$'
+# [[rules.acestream.match]]
+# input = '(?i)^(?P<id>[0-9a-f]{40})$'
+# [[rules.acestream.match]]   # acexy or engine URLs, also behind a path prefix
+# path = '/ace/'
+# query = [
+#   { param = "id", re = '(?i)(?P<id>[0-9a-f]{40})', optional = true },
+#   { param = "content_id", re = '(?i)(?P<id>[0-9a-f]{40})', optional = true },
+# ]
+# require = ["id"]
+# [[rules.acestream.examples]]
+# input = "ACESTREAM://41169A3F280A5537B0611B775E926852D372743D//"
+# identity = "ace:41169a3f280a5537b0611b775e926852d372743d"
+# ref = "acestream://41169a3f280a5537b0611b775e926852d372743d"
+# play = "http://media-host:8080/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d"
+# [[rules.acestream.examples]]
+# input = "  41169a3f280a5537b0611b775e926852d372743d  "
+# identity = "ace:41169a3f280a5537b0611b775e926852d372743d"
+# [[rules.acestream.examples]]
+# input = "http://10.0.0.9:6878/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d"
+# identity = "ace:41169a3f280a5537b0611b775e926852d372743d"
+# [[rules.acestream.examples]]
+# input = "http://x:8080/ace/manifest.m3u8?content_id=41169A3F280A5537B0611B775E926852D372743D"
+# identity = "ace:41169a3f280a5537b0611b775e926852d372743d"
+# [[rules.acestream.examples]]
+# input = "http://proxy/acexy/ace/getstream?id=41169a3f280a5537b0611b775e926852d372743d"
+# identity = "ace:41169a3f280a5537b0611b775e926852d372743d"
+# [[rules.acestream.examples]]
+# input = "acestream://abc"
+# match = false
+# [[rules.acestream.examples]]
+# input = "http://x/ace/live.m3u8?id=1"
+# match = false
+# [[rules.acestream.examples]]
+# input = "41169a3f280a5537b0611b775e926852d372743d/"
+# match = false
 
-# The vk rule: VK video pages, live or recorded, relayed as HLS.
-[vk]
-
-[tools]
-yt_dlp = "/opt/tools/bin/yt-dlp"
-streamlink = "/opt/tools/bin/streamlink"
+# Streams behind any other service, keyed by an id: the gateway only matches and writes play URLs.
+# [rules.streams]
+# kind = "link"
+# title = "Streams"
+# group = "Streams"
+# play = "http://media-host:8000/stream/{id}.m3u8"
+# identity = "stream:{id}"
+# ref = "stream://{id}"
+# [[rules.streams.match]]
+# input = '^(?:stream://)?(?P<id>[a-z0-9-]{1,64})$'
+# [[rules.streams.examples]]
+# input = "stream://news-1"
+# play = "http://media-host:8000/stream/news-1.m3u8"
 
 [limits]
 extractions = 2

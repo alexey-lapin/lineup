@@ -1,15 +1,18 @@
-//! The `acestream` rule: Acestream content ids, played through acexy.
+//! The `acestream` kind: Acestream content ids, with an engine for names and checks and,
+//! optionally, acexy for live numbers and the watcher guard.
 //!
-//! - match: `acestream://<id>`, a bare 40-hex id, or an acexy/engine URL with `id=` or
-//!   `content_id=` under an `/ace/` path segment (also behind a path prefix, and this gateway's
-//!   own play URLs). Identity `ace:<id>`, ref `acestream://<id>`, play
-//!   `<acexy_public>/ace/getstream?id=<id>`. The engine is asked for the content's name (cleaned:
-//!   quality words dropped, a `[DE]` tag becomes the region, sports-looking names get "Sports").
+//! - match: the rule's patterns, which must capture `id`; identity, ref and play come from its
+//!   templates. The engine is asked for the content's name (cleaned: quality words dropped, a
+//!   `[DE]` tag becomes the region, sports-looking names get "Sports").
 //! - observe: acexy's per-stream status and, while acexy serves the stream, the statistics of its
-//!   engine session. Never starts, controls or stops a session.
-//! - check: a short engine session of its own (unique pid), its statistics polled, then stopped.
+//!   engine session. Never starts, controls or stops a session. Without acexy: the engine's name
+//!   only.
+//! - check (opt-in, `checks = true`, needs acexy): a short engine session of its own (unique pid),
+//!   its statistics polled, then stopped. The guard only sees viewers who play through acexy:
+//!   leave checks off when the play template sends players elsewhere.
 //!   Before each check acexy is asked whether the stream is watched; a watched stream is skipped,
-//!   and an unreadable guard skips too (fail closed). One check per engine at a time.
+//!   and an unreadable guard skips too (fail closed). One check per engine at a time, across every
+//!   rule that uses the engine (the gateway hands rules on one engine the same lock).
 //!
 //! All requests go to the configured control origins only, never follow redirects, and URLs the
 //! engine reports are validated and rebased onto the configured engine.
@@ -17,10 +20,16 @@
 use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
-use gateway_contract::{CheckOutcome, CheckResponse, Fact, Hints, MatchResult, Matched, Observation};
+use gateway_contract::{
+    Capability, CheckOutcome, CheckResponse, Fact, Hints, MatchResult, Matched, Observation, RuleInfo,
+};
 use serde_json::{Value, json};
 
-use crate::config::AcestreamConfig;
+use crate::config::{AcestreamConfig, RuleConfig};
+use crate::matcher::Matcher;
+use crate::rules::Rule;
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -40,13 +49,20 @@ impl Default for ProbeTiming {
     }
 }
 
+/// One probe per engine at a time: the lock every rule on that engine shares.
+pub type EngineLock = std::sync::Arc<tokio::sync::Mutex<()>>;
+
 pub struct Acestream {
+    name: String,
     cfg: AcestreamConfig,
+    config: RuleConfig,
+    matcher: Matcher,
+    revisions: (String, String),
     client: reqwest::Client,
     timing: ProbeTiming,
     /// One probe per engine at a time. Held by the task that owns the probe, so a caller that goes
     /// away does not release it while the probe still runs.
-    probe_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    probe_lock: EngineLock,
     /// Engine names already looked up (raw), for observe.
     names: std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>,
 }
@@ -55,33 +71,65 @@ pub struct Acestream {
 const NAME_BUDGET: Duration = Duration::from_secs(20);
 const NAME_CACHE: Duration = Duration::from_secs(600);
 
-pub const MATCH_REVISION: &str = "1";
-
 impl Acestream {
-    pub fn new(cfg: AcestreamConfig, timing: ProbeTiming) -> Self {
+    pub fn new(name: &str, cfg: AcestreamConfig, timing: ProbeTiming, probe_lock: EngineLock) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .no_proxy() // only the configured origins, directly
             .redirect(reqwest::redirect::Policy::none())
             .timeout(TIMEOUT)
             .build()
             .expect("building the control client");
-        Acestream {
+        let config = RuleConfig::Acestream(cfg.clone());
+        Ok(Acestream {
+            name: name.to_string(),
+            matcher: config.matcher(name)?,
+            revisions: config.revisions(name),
+            config,
             cfg,
             client,
             timing,
-            probe_lock: Default::default(),
+            probe_lock,
             names: Default::default(),
+        })
+    }
+
+    /// The content id of an input or ref this rule accepts, from its patterns.
+    fn id_of(&self, input: &str) -> Option<String> {
+        self.matcher.matches(input)?.vars.get("id").cloned()
+    }
+
+    /// The engine this rule probes, as the key for its shared lock: scheme, host and port.
+    pub fn engine_key(cfg: &AcestreamConfig) -> String {
+        match url::Url::parse(&cfg.engine_control) {
+            Ok(u) => format!(
+                "{}://{}:{}",
+                u.scheme(),
+                u.host_str().unwrap_or_default().to_ascii_lowercase(),
+                u.port_or_known_default().unwrap_or_default()
+            ),
+            Err(_) => cfg.engine_control.clone(),
         }
     }
 
-    /// Changes when play URLs change (the public acexy address).
-    pub fn play_revision(&self) -> String {
-        format!("1:{}", short_hash(&self.cfg.acexy_public))
+    fn rule_info(&self) -> RuleInfo {
+        RuleInfo {
+            name: self.name.clone(),
+            title: self.cfg.title.clone().unwrap_or_else(|| self.name.clone()),
+            input_hint: self.cfg.input_hint.clone(),
+            capabilities: if self.can_check() {
+                vec![Capability::Observe, Capability::Check]
+            } else {
+                vec![Capability::Observe]
+            },
+            match_revision: self.revisions.0.clone(),
+            play_revision: self.revisions.1.clone(),
+        }
     }
 
-    /// Checks need acexy: only it can tell whether a stream is being watched.
+    /// Checks are opt-in (`checks = true`) and need acexy: only it can tell whether a stream is
+    /// being watched, and only for players that go through it.
     pub fn can_check(&self) -> bool {
-        self.cfg.acexy_control.is_some()
+        self.cfg.checks && self.cfg.acexy_control.is_some()
     }
 
     // ---------------------------------------------------------------- match
@@ -118,11 +166,24 @@ impl Acestream {
     }
 
     async fn match_one(&self, input: String, deadline: tokio::time::Instant) -> MatchResult {
-        let Some(id) = parse_id(&input) else {
+        let Some((m, id)) = self
+            .matcher
+            .matches(&input)
+            .and_then(|m| Some((m.clone(), m.vars.get("id")?.clone())))
+        else {
             return MatchResult::NoMatch {
                 input,
-                reason: Some("not an Acestream id, acestream:// link or acexy/engine URL".into()),
+                reason: Some(format!("not a {} reference", self.rule_info().title)),
             };
+        };
+        let play = match self.config.play(&self.name, &m) {
+            Ok(p) => p,
+            Err(e) => {
+                return MatchResult::NoMatch {
+                    input,
+                    reason: Some(e.to_string()),
+                };
+            }
         };
         let mut warnings = vec![];
         let mut hints = Hints::default();
@@ -142,9 +203,9 @@ impl Acestream {
         }
         MatchResult::Matched(Matched {
             input,
-            identity: format!("ace:{id}"),
-            reference: format!("acestream://{id}"),
-            play: format!("{}/ace/getstream?id={id}", self.cfg.acexy_public),
+            identity: m.identity,
+            reference: m.reference,
+            play,
             hints,
             warnings,
         })
@@ -182,7 +243,7 @@ impl Acestream {
             title: None,
             raw: None,
         };
-        let Some(id) = parse_id(reference) else {
+        let Some(id) = self.id_of(reference) else {
             o.reason = Some("not an Acestream reference".into());
             return o;
         };
@@ -304,19 +365,25 @@ impl Acestream {
             detail: Some(detail),
             checked_at: chrono::Utc::now().to_rfc3339(),
         };
-        let Some(id) = parse_id(reference) else {
+        let Some(id) = self.id_of(reference) else {
             return done(
                 CheckOutcome::Unknown,
                 Some("bad_ref"),
                 json!({"error": "not an Acestream reference"}),
             );
         };
-        // Without acexy there is no guard, so there are no checks, forced or not.
-        if self.cfg.acexy_control.is_none() {
+        // Without acexy there is no guard, so there are no checks, forced or not; and checks are
+        // off unless the rule turns them on.
+        if !self.can_check() {
+            let why = if self.cfg.acexy_control.is_none() {
+                "checks need acexy, which tells whether a stream is watched"
+            } else {
+                "checks are off for this rule (checks = true turns them on)"
+            };
             return done(
                 CheckOutcome::Skipped,
                 Some("guard_unavailable"),
-                json!({ "reason": "checks need acexy, which tells whether a stream is watched" }),
+                json!({ "reason": why }),
             );
         }
         // The lock, the guard and the probe all live in one task of its own: once started, a check
@@ -569,33 +636,6 @@ fn bytes(v: u64) -> String {
     }
 }
 
-/// The 40-hex content id in an input, lowercased.
-pub fn parse_id(input: &str) -> Option<String> {
-    let s = input.trim();
-    if let Some(rest) = strip_prefix_ci(s, "acestream://") {
-        return is_ace_id(rest.trim_end_matches('/')).then(|| rest.trim_end_matches('/').to_ascii_lowercase());
-    }
-    if is_ace_id(s) {
-        return Some(s.to_ascii_lowercase());
-    }
-    let u = url::Url::parse(s).ok()?;
-    if !matches!(u.scheme(), "http" | "https") || !u.path().contains("/ace/") {
-        return None;
-    }
-    let q = |k: &str| u.query_pairs().find(|(key, _)| key == k).map(|(_, v)| v.into_owned());
-    let id = q("id").or_else(|| q("content_id"))?;
-    is_ace_id(&id).then(|| id.to_ascii_lowercase())
-}
-
-fn is_ace_id(s: &str) -> bool {
-    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let head = s.get(..prefix.len())?;
-    head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
-}
-
 /// Number of clients/streams in an acexy per-id status body, if it has one.
 fn active_count(body: &Value) -> Option<u64> {
     if let Some(b) = body.get("active").and_then(Value::as_bool) {
@@ -777,43 +817,27 @@ fn unique() -> String {
     )
 }
 
-/// A short stable hash (FNV-1a) for revision strings.
-pub fn short_hash(s: &str) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x100000001b3);
+impl Rule for Acestream {
+    fn info(&self) -> RuleInfo {
+        self.rule_info()
     }
-    format!("{:08x}", h as u32)
+
+    fn match_inputs<'a>(&'a self, inputs: &'a [String]) -> BoxFuture<'a, Vec<MatchResult>> {
+        Acestream::match_inputs(self, inputs).boxed()
+    }
+
+    fn observe<'a>(&'a self, reference: &'a str) -> BoxFuture<'a, Observation> {
+        Acestream::observe(self, reference).boxed()
+    }
+
+    fn check<'a>(&'a self, reference: &'a str, force: bool) -> BoxFuture<'a, CheckResponse> {
+        Acestream::check(self, reference, force).boxed()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const ACE: &str = "41169a3f280a5537b0611b775e926852d372743d";
-
-    #[test]
-    fn input_forms() {
-        for input in [
-            format!("acestream://{ACE}"),
-            format!("ACESTREAM://{}", ACE.to_uppercase()),
-            format!("  {ACE}  "),
-            format!("http://10.0.0.9:6878/ace/getstream?id={ACE}"),
-            format!("http://x:8080/ace/manifest.m3u8?content_id={ACE}"),
-            format!("http://proxy/acexy/ace/getstream?id={ACE}"),
-        ] {
-            assert_eq!(parse_id(&input).as_deref(), Some(ACE), "{input}");
-        }
-        for bad in [
-            "acestream://abc",
-            "http://x/ace/live.m3u8?id=1",
-            "https://vk.com/video1_2",
-            "ккк",
-        ] {
-            assert_eq!(parse_id(bad), None, "{bad}");
-        }
-    }
 
     #[test]
     fn cleans_engine_names() {
