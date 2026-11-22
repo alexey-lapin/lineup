@@ -23,10 +23,10 @@ pub struct Cli {
     /// Server URL [default: from ~/.config/lineup/config.toml, else http://127.0.0.1:9300]
     #[arg(long, global = true, env = "LINEUP_SERVER")]
     pub server: Option<String>,
-    /// Print machine-readable JSON (the API response) instead of text.
+    /// Print machine-readable JSON (usually the API response) instead of text.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Only print essentials (ids, URLs); no tables.
+    /// Print less: only ids from a successful `add`, `ls` and `route ls`; some commands also drop their confirmation message.
     #[arg(short, long, global = true)]
     pub quiet: bool,
     #[command(subcommand)]
@@ -100,7 +100,7 @@ pub enum Command {
     /// Show or change app-wide settings.
     #[command(subcommand)]
     Settings(SettingsCmd),
-    /// Download a consistent copy of the server's database (restore: stop lineup, replace /data/lineup.db).
+    /// Download a consistent copy of the server's database (to restore it, see deploy/restore.sh and docs/deploy.md).
     Backup {
         /// Output file (must not exist).
         path: PathBuf,
@@ -249,7 +249,7 @@ pub enum PlaylistCmd {
     },
     /// Replace the playlist's channels with exactly these, in this order.
     Set { slug: String, channels: Vec<String> },
-    /// Print the playlist URL(s).
+    /// Print the playlist's M3U URL (its guide is at /p/<slug>/epg.xml).
     Url { slug: String },
 }
 

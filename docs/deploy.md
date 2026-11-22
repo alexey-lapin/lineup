@@ -12,12 +12,38 @@ Pin a release tag rather than `latest`. The container runs as uid 10001 and stor
 
 Open `http://<host>:9300`. On a phone, add the page to the home screen to use it as an app. Over plain HTTP it works without offline support; served over HTTPS, it also caches the UI.
 
+## Quick start: one channel in Jellyfin
+
+The shortest path from a fresh install to a channel playing with a guide, using a plain stream URL (no gateway). Replace `media-host` with an address Jellyfin can reach, not `localhost`.
+
+1. Start lineup as above and point the CLI at it ([below](#point-the-cli-at-it)), or do the same steps in the web UI.
+2. Create a playlist and add a channel to it through the built-in **Direct** route, with your stream's URL in place of the example:
+
+   ```sh
+   lineup playlist create tv
+   lineup add -r Direct https://example.com/live.m3u8 --name "My Channel" -p tv
+   ```
+
+3. Add a guide source (your XMLTV URL) and look up the channel's tvg-id. This step is optional; without a tvg-id the channel gets placeholder programmes. Adding a source starts its download in the background, and `lineup epg fetch` waits for it, so the search has data:
+
+   ```sh
+   lineup epg sources add https://example.org/guide.xml.gz
+   lineup epg fetch
+   lineup epg search "my channel"
+   lineup edit "My Channel" --tvg-id "<id from the search>"
+   ```
+
+4. In Jellyfin, add `http://media-host:9300/p/tv.m3u` as an **M3U Tuner** and `http://media-host:9300/p/tv/epg.xml` as an **XMLTV** guide provider ([details](#jellyfin)).
+5. Optionally add a [hook](#jellyfin-1) so Jellyfin refreshes its guide whenever the playlist or guide changes.
+
+Channels that need a lookup before they play (an id, a video page) go through a gateway; see the next section.
+
 ## Set up routes
 
 A route is how channels are played, set up under **Routes** (or with `lineup route`). A new installation has one route, **Direct**, for stream URLs that are put in playlists as they are. Anything that needs work before it plays (an id, a page that has to be looked up) goes through a **gateway**: a separate service that speaks lineup's gateway contract, such as [lineup-gateway](gateway.md). Add a gateway route for each of the gateway's rules you use:
 
 ```sh
-lineup route test --gateway http://gateway-host:8099             # lists the gateway's rules
+lineup route test --gateway http://gateway-host:8099             # lists the gateway's rules (exits 1: no rule given)
 lineup route add Streams --gateway http://gateway-host:8099 --rule <rule>
 lineup route add Pages --gateway http://gateway-host:8099 --rule <another rule>
 lineup route test Pages --input "<a link>"                       # try an input without saving
@@ -26,7 +52,7 @@ lineup route ls
 
 Playlists send players to the gateway (or to the service it points at), so use addresses that your players and media server can reach, not `localhost`. Where the gateway points players is the gateway's configuration, not lineup's.
 
-When you add a channel you pick its route, and the input is validated with that route only: the gateway answers with the canonical source, a play URL and suggestions (a title, a group). If the gateway is down, adding, editing and importing channels of its routes fail with a gateway error (CLI exit code 6); existing playlists and guides keep working, because lineup never calls a gateway to serve them.
+When you add a channel you pick its route, and the input is validated with that route only: the gateway answers with the canonical source, a play URL and suggestions (a title, a group). If the gateway is down, adding channels to its routes, changing a channel's source or route, importing and resyncing fail with a gateway error (CLI exit code 6). Renaming, regrouping, setting a tvg-id or logo, and enabling or disabling still work, and existing playlists and guides keep working, because lineup never calls a gateway to serve them.
 
 A route can be disabled: its channels keep their playlists and positions but are left out of playlists and guides until it is enabled again. Its kind and rule never change; create another route and move the channels (`lineup edit <channel> --route <route>`). Changing a gateway route's address (`lineup route edit Pages --base-url …`) revalidates every channel with the new address first, and changes nothing if any fails. `lineup route resync <route>` revalidates every channel with the gateway now; lineup also does that on its own when the gateway reports that its rule changed.
 
@@ -57,8 +83,9 @@ If you already have an M3U file, import it. Every entry is validated with the ro
 lineup import ./channels.m3u -p tv -r Streams --dry-run
 lineup import ./channels.m3u -p tv -r Streams
 lineup import ./channels.m3u -p tv -r Pages
-lineup import ./channels.m3u -p tv -r Direct --dry-run   # check what is left before importing the rest as direct
 ```
+
+The Direct route accepts every http(s) URL, including gateway play URLs, and import only reuses channels on the same route. So importing the whole file as Direct after the gateway routes would add those entries a second time. Import the remaining entries from a copy of the file without them, or review the Direct `--dry-run` carefully.
 
 Gateway rules recognise their inputs in their usual forms, which can include play URLs of other services already in your file. If the gateway fails during an import, nothing is written. Re-importing is safe: channels that already exist on the route are reused and their details are kept, and the report shows where the file differs (including a different source for the same channel).
 
@@ -88,7 +115,7 @@ lineup epg sources ls          # last fetch status, channel count
 lineup epg search "sports one" # find the tvg-id for a channel
 ```
 
-lineup downloads each source shortly after it is added, 3 minutes after every start, and then every `epg_refresh_hours` (default 6, `0` turns the schedule off). `lineup epg fetch` fetches now. When several sources carry the same channel id, the one with the higher priority wins.
+lineup downloads each enabled source shortly after it is added or its URL changes, 3 minutes after every start, and then every `epg_refresh_hours` (default 6, `0` turns the schedule off). `lineup epg fetch` fetches now. When several sources carry the same channel id, the one with the higher priority wins.
 
 Each playlist gets its own guide with just its channels:
 

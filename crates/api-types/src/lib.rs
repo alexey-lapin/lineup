@@ -53,8 +53,7 @@ pub struct ChannelHealth {
     pub content_state: Option<ContentState>,
     /// Why the last attempt was `unknown` or `skipped` (e.g. `busy`).
     pub reason: Option<String>,
-    /// Gateway details of the last attempt.
-    #[schema(value_type = Object)]
+    /// Gateway details of the last attempt (any JSON, or null).
     pub detail: Option<serde_json::Value>,
 }
 
@@ -75,7 +74,7 @@ pub struct CheckResult {
     pub outcome: CheckOutcome,
     pub reason: Option<String>,
     pub content_state: Option<ContentState>,
-    #[schema(value_type = Object)]
+    /// Gateway details (any JSON, or null).
     pub detail: Option<serde_json::Value>,
     /// False when the result was not stored (the channel or its route changed meanwhile, or the
     /// check did not run).
@@ -324,7 +323,8 @@ fn default_true() -> bool {
     true
 }
 
-/// Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.
+/// Partial update. Absent fields are left unchanged. `null` clears `group_title`, `tvg_id` and
+/// `tvg_logo`; for the other fields `null` is the same as absent.
 /// `route_id` and/or `input` revalidate the source (with the current source when only the route
 /// changes).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -421,9 +421,12 @@ pub struct ItemsReplace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Settings {
     /// Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
+    /// 0..=168, default 6.
+    #[schema(maximum = 168)]
     pub epg_refresh_hours: u32,
     /// Hours between scheduled checks of all enabled channels on routes that support checks (the
-    /// first runs 10 minutes after start); 0 turns them off.
+    /// first runs 10 minutes after start); 0 turns them off. 0..=168, default 0.
+    #[schema(maximum = 168)]
     pub check_interval_hours: u32,
     /// Increases with every change; of two copies of the settings, the higher revision is newer.
     /// Read-only.
@@ -433,9 +436,13 @@ pub struct Settings {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct SettingsPatch {
+    /// 0..=168.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(maximum = 168)]
     pub epg_refresh_hours: Option<u32>,
+    /// 0..=168.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(maximum = 168)]
     pub check_interval_hours: Option<u32>,
 }
 
@@ -586,7 +593,8 @@ pub struct ImportReport {
     pub playlist_slug: String,
     pub playlist_created: bool,
     pub entries: Vec<ImportEntry>,
-    /// Lines that could not be parsed into an entry.
+    /// Lines that could not be parsed into an entry, and entries the route did not accept or the
+    /// gateway failed on (with the reason).
     pub skipped_lines: Vec<String>,
 }
 
@@ -740,7 +748,9 @@ pub struct HookCreate {
     /// Defaults to every event type.
     #[serde(default)]
     pub events: Option<Vec<String>>,
+    /// Seconds, 0..=3600; default 30.
     #[serde(default)]
+    #[schema(maximum = 3600)]
     pub debounce_secs: Option<u32>,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -755,7 +765,9 @@ pub struct HookPatch {
     pub config: Option<HookConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events: Option<Vec<String>>,
+    /// Seconds, 0..=3600.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(maximum = 3600)]
     pub debounce_secs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,

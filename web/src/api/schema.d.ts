@@ -125,7 +125,7 @@ export interface paths {
         };
         get: operations["list_epg_sources"];
         put?: never;
-        /** Adds a source and starts fetching it in the background. */
+        /** Adds a source and, when it is enabled, starts fetching it in the background. */
         post: operations["create_epg_source"];
         delete?: never;
         options?: never;
@@ -148,7 +148,7 @@ export interface paths {
         head?: never;
         /**
          * A URL change keeps the current guide data until the new URL's first successful fetch, which starts
-         *     immediately.
+         *     immediately when the source is enabled.
          */
         patch: operations["patch_epg_source"];
         trace?: never;
@@ -540,8 +540,8 @@ export interface components {
             /** Format: date-time */
             conclusive_at?: string | null;
             content_state?: components["schemas"]["ContentState"] | null;
-            /** @description Gateway details of the last attempt. */
-            detail: Record<string, never>;
+            /** @description Gateway details of the last attempt (any JSON, or null). */
+            detail?: unknown;
             last_attempt: components["schemas"]["CheckOutcome"];
             /** Format: date-time */
             last_attempt_at: string;
@@ -562,7 +562,8 @@ export interface components {
             route_id: number;
         };
         /**
-         * @description Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.
+         * @description Partial update. Absent fields are left unchanged. `null` clears `group_title`, `tvg_id` and
+         *     `tvg_logo`; for the other fields `null` is the same as absent.
          *     `route_id` and/or `input` revalidate the source (with the current source when only the route
          *     changes).
          */
@@ -600,7 +601,8 @@ export interface components {
             /** Format: int64 */
             channel_id: number;
             content_state?: components["schemas"]["ContentState"] | null;
-            detail: Record<string, never>;
+            /** @description Gateway details (any JSON, or null). */
+            detail?: unknown;
             outcome: components["schemas"]["CheckOutcome"];
             reason?: string | null;
             /**
@@ -765,7 +767,10 @@ export interface components {
         };
         HookCreate: {
             config: components["schemas"]["HookConfig"];
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description Seconds, 0..=3600; default 30.
+             */
             debounce_secs?: number | null;
             enabled?: boolean;
             /** @description Defaults to every event type. */
@@ -795,7 +800,10 @@ export interface components {
         };
         HookPatch: {
             config?: components["schemas"]["HookConfig"] | null;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description Seconds, 0..=3600.
+             */
             debounce_secs?: number | null;
             enabled?: boolean | null;
             events?: string[] | null;
@@ -824,7 +832,10 @@ export interface components {
             entries: components["schemas"]["ImportEntry"][];
             playlist_created: boolean;
             playlist_slug: string;
-            /** @description Lines that could not be parsed into an entry. */
+            /**
+             * @description Lines that could not be parsed into an entry, and entries the route did not accept or the
+             *     gateway failed on (with the reason).
+             */
             skipped_lines: string[];
         };
         ImportRequest: {
@@ -1063,12 +1074,13 @@ export interface components {
             /**
              * Format: int32
              * @description Hours between scheduled checks of all enabled channels on routes that support checks (the
-             *     first runs 10 minutes after start); 0 turns them off.
+             *     first runs 10 minutes after start); 0 turns them off. 0..=168, default 0.
              */
             check_interval_hours: number;
             /**
              * Format: int32
              * @description Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.
+             *     0..=168, default 6.
              */
             epg_refresh_hours: number;
             /**
@@ -1079,9 +1091,15 @@ export interface components {
             revision?: number;
         };
         SettingsPatch: {
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description 0..=168.
+             */
             check_interval_hours?: number | null;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description 0..=168.
+             */
             epg_refresh_hours?: number | null;
         };
         Status: {
@@ -1141,6 +1159,14 @@ export interface operations {
                     "application/json": components["schemas"]["Channel"][];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     create_channel: {
@@ -1162,6 +1188,14 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Channel"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
             409: {
@@ -1217,6 +1251,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     delete_channel: {
@@ -1237,6 +1279,14 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1330,6 +1380,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     checks: {
@@ -1377,6 +1435,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             502: {
                 headers: {
                     [name: string]: unknown;
@@ -1409,6 +1475,14 @@ export interface operations {
                     "application/json": components["schemas"]["EpgChannel"][];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     fetch_epg: {
@@ -1433,6 +1507,14 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1510,6 +1592,14 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1637,6 +1727,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     delete_hook: {
@@ -1657,6 +1755,14 @@ export interface operations {
                 content?: never;
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1737,6 +1843,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     test_hook: {
@@ -1759,6 +1873,14 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1789,7 +1911,31 @@ export interface operations {
                     "application/json": components["schemas"]["ImportReport"];
                 };
             };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1847,6 +1993,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     get_playlist: {
@@ -1869,6 +2023,14 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1911,6 +2073,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     patch_playlist: {
@@ -1945,6 +2115,14 @@ export interface operations {
                 };
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2034,6 +2212,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     remove_item: {
@@ -2057,6 +2243,14 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2098,6 +2292,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     refresh: {
@@ -2122,6 +2324,14 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2294,6 +2504,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     delete_route: {
@@ -2322,6 +2540,14 @@ export interface operations {
                 };
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2461,6 +2687,14 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

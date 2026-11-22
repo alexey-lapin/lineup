@@ -362,7 +362,7 @@ pub async fn run(cli: Cli) -> R {
             let r: CheckResponse = x.c.post_slow("/checks", &CheckRequest { ids, force }).await?;
             x.emit(&r, |r| {
                 if r.background {
-                    println!("checking all channels in the background; see `lineup ls` for results");
+                    println!("checking all channels in the background; see `lineup ls --health dead` or `lineup show <channel>` for results");
                 }
                 output::check_results(&r.results);
             });

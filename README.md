@@ -26,7 +26,7 @@ brew install alexey-lapin/tap/lineup
 ```
 
 ```sh
-lineup route test --gateway http://gateway-host:8099                 # lists the gateway's rules
+lineup route test --gateway http://gateway-host:8099                 # lists the gateway's rules (exits 1: no rule given)
 lineup route add Streams --gateway http://gateway-host:8099 --rule <rule>
 lineup route ls | show <route> | edit <route> [--name --base-url --enable|--disable] | rm <route> | resync <route>
 lineup add -r Streams <ref> -p tv --yes          # name, group, tvg-id and logo suggested from the gateway and guide
@@ -48,7 +48,7 @@ lineup usage                                   # usage spec (https://usage.jdx.d
 lineup completions <shell>                     # bash, zsh, fish, elvish, powershell
 ```
 
-Every command accepts `--json`, which prints the API response, and `-q`. The server is chosen by `--server`, then `LINEUP_SERVER`, then `~/.config/lineup/config.toml` (`server = "http://host:9300"`), and finally defaults to `http://127.0.0.1:9300`.
+Every command accepts `--json`, which prints machine-readable output (usually the API response), and `-q`, which prints only ids from a successful `add`, `ls` and `route ls`, and drops some confirmation messages (such as `rm` and `enable`). The server is chosen by `--server`, then `LINEUP_SERVER`, then `~/.config/lineup/config.toml` (`server = "http://host:9300"`), and finally defaults to `http://127.0.0.1:9300`.
 
 Exit codes:
 
@@ -62,7 +62,7 @@ Exit codes:
 | 5 | server unreachable |
 | 6 | a route's gateway failed or is unreachable |
 
-`add` takes several inputs. With `--json` it always prints an array with one entry per input: `{input, ok, channel | would_create, error: {code, message}}`. It exits 0 when every input succeeds. When every input fails with the same kind of error, it exits with that error's code. Otherwise (partial success or mixed errors) it exits 1.
+`add` takes several inputs. With `--json`, once the route is resolved, it prints an array with one entry per input: `{input, ok, channel | would_create, error: {code, message}}`. Errors before that (an unknown route, `--name` with several inputs) print one error object instead. It exits 0 when every input succeeds. When every input fails with the same kind of error, it exits with that error's code. Otherwise (partial success or mixed errors) it exits 1.
 
 ## Development
 
@@ -81,4 +81,4 @@ corepack pnpm -C web gen:api
 
 CI checks that both generated files are up to date.
 
-Release: push a `v*` tag (a tag with a `-`, like `v1.0.0-rc.1`, becomes a pre-release). The release workflow runs the same checks as CI, builds `ghcr.io/<owner>/lineup` and `ghcr.io/<owner>/lineup-gateway` for amd64 and arm64 on native runners, and archives for macOS and Linux (x86_64 and arm64) of `lineup`, the client-only `lineup-cli` and `lineup-gateway` (static musl on Linux). It installs the Homebrew formula from those archives, and only then publishes the GitHub release with the archives, `SHA256SUMS` and notes. A stable release then updates `Formula/lineup.rb` in `alexey-lapin/homebrew-tap`, which needs the `TAP_GITHUB_TOKEN` secret (a token with contents read and write on that repository only); it never replaces a newer version. Notes list merged pull requests by label (`.github/release.yml`), or the commits since the previous tag when there are none (`.github/scripts/release-notes.sh`). To rebuild an existing tag, run the workflow by hand with that tag; tick `cli` to rebuild the archives and refresh the release files too, and `tap` as well to publish the formula again.
+Release: push a `v*` tag (a tag with a `-`, like `v1.0.0-rc.1`, becomes a pre-release). The release workflow runs the same checks as CI, builds `ghcr.io/<owner>/lineup` and `ghcr.io/<owner>/lineup-gateway` for amd64 and arm64 on native runners, and archives for macOS and Linux (x86_64 and arm64) of `lineup`, the client-only `lineup-cli` and `lineup-gateway` (the Linux gateway archives are static musl builds; `lineup` and `lineup-cli` target glibc). It installs the Homebrew formula from those archives, and only then publishes the GitHub release with the archives, `SHA256SUMS` and notes. A stable release then updates `Formula/lineup.rb` in `alexey-lapin/homebrew-tap`; it never replaces a newer version. Notes list merged pull requests by label (`.github/release.yml`), or the commits since the previous tag when there are none (`.github/scripts/release-notes.sh`). To rebuild an existing tag, run the workflow by hand with that tag; tick `cli` to rebuild the archives and refresh the release files too, and `tap` as well to publish the formula again.
