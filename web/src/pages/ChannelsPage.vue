@@ -120,19 +120,6 @@ async function checkAll() {
   checking.value = null
 }
 
-/** Badge for the last conclusive check; a hint when the latest attempt was inconclusive. */
-function health(c: Channel) {
-  const h = c.health
-  if (!h) return null
-  const color = h.conclusive === 'ok' ? 'success' : h.conclusive === 'dead' ? 'error' : 'neutral'
-  const label = h.conclusive ?? h.last_attempt
-  const hint =
-    h.conclusive !== h.last_attempt
-      ? `Latest attempt ${new Date(h.last_attempt_at).toLocaleString()}: ${h.last_attempt}`
-      : `Checked ${new Date(h.last_attempt_at).toLocaleString()}`
-  return { color, label, hint, stale: h.conclusive !== h.last_attempt } as const
-}
-
 async function confirmDelete() {
   const c = deleting.value
   if (!c) return
@@ -226,14 +213,6 @@ function actions(c: Channel): DropdownMenuItem[][] {
             </div>
             <UTooltip v-if="!row.original.route_enabled" :content="floating()" :text="routeOff(row.original)">
               <UBadge label="route off" color="neutral" variant="outline" size="sm" icon="i-lucide-plug" />
-            </UTooltip>
-            <UTooltip v-if="health(row.original)" :content="floating()" :text="health(row.original)!.hint">
-              <UBadge
-                :label="health(row.original)!.label"
-                :color="health(row.original)!.color"
-                :variant="health(row.original)!.stale ? 'outline' : 'subtle'"
-                size="sm"
-              />
             </UTooltip>
             <UIcon v-if="checking === row.original.id" name="i-lucide-loader-circle" class="size-4 animate-spin text-muted" />
           </div>

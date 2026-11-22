@@ -1,9 +1,10 @@
 //! Human-readable rendering.
 
 use api_types::{
-    Channel, ChannelInfo, CheckOutcome, CheckResult, ContentState, DeliveryTrigger, EpgChannel, EpgFetchResult,
-    EpgFetchStatus, EpgSource, Hook, HookConfig, HookDelivery, ImportAction, ImportReport, Playlist, PlaylistDetail,
-    ResolveResponse, ResyncReport, Route, RouteConfig, RouteStatus, RouteTestResult, Settings, Status, ValidatedSource,
+    Channel, ChannelHealth, ChannelInfo, CheckOutcome, CheckResult, ContentState, DeliveryTrigger, EpgChannel,
+    EpgFetchResult, EpgFetchStatus, EpgSource, Hook, HookConfig, HookDelivery, ImportAction, ImportReport, Playlist,
+    PlaylistDetail, ResolveResponse, ResyncReport, Route, RouteConfig, RouteStatus, RouteTestResult, Settings, Status,
+    ValidatedSource,
 };
 
 /// A short label for a channel's source: its route and identity.
@@ -53,7 +54,7 @@ pub fn channels(list: &[Channel]) {
         return;
     }
     table(
-        &["ID", "NAME", "GROUP", "SOURCE", "TVG-ID", "HEALTH", "PLAYLISTS"],
+        &["ID", "NAME", "GROUP", "SOURCE", "TVG-ID", "PLAYLISTS"],
         list.iter()
             .map(|c| {
                 let name = if c.enabled {
@@ -67,7 +68,6 @@ pub fn channels(list: &[Channel]) {
                     c.group_title.clone().unwrap_or_default(),
                     source_label(&c.route_name, &c.identity),
                     c.tvg_id.clone().unwrap_or_default(),
-                    health_label(c),
                     c.playlists.join(","),
                 ]
             })
@@ -87,18 +87,23 @@ fn state(s: ContentState) -> &'static str {
     }
 }
 
-/// The conclusive result, with the latest attempt when it was inconclusive ("ok (unknown)").
-fn health_label(c: &Channel) -> String {
-    match &c.health {
-        None => String::new(),
-        Some(h) => {
-            let base = h.conclusive.map_or("-", outcome);
-            if h.conclusive != Some(h.last_attempt) {
-                format!("{base} ({})", outcome(h.last_attempt))
-            } else {
-                base.to_string()
-            }
-        }
+/// The latest check, with when it ran, and the last conclusive one when that is older.
+fn health(h: Option<&ChannelHealth>) {
+    let Some(h) = h else {
+        println!("last check: never");
+        return;
+    };
+    let at = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
+    let extra = h.content_state.map(|s| format!(", {}", state(s))).unwrap_or_default();
+    println!(
+        "last check: {} at {}{extra}",
+        outcome(h.last_attempt),
+        at(h.last_attempt_at)
+    );
+    if let (Some(c), Some(t)) = (h.conclusive, h.conclusive_at)
+        && h.conclusive != Some(h.last_attempt)
+    {
+        println!("last known: {} at {}", outcome(c), at(t));
     }
 }
 
@@ -155,6 +160,7 @@ pub fn channel(c: &Channel) {
             c.playlists.join(", ")
         }
     );
+    health(c.health.as_ref());
 }
 
 pub fn playlists(list: &[Playlist]) {
@@ -398,23 +404,7 @@ pub fn route_test(r: &RouteTestResult) {
 
 pub fn channel_info(i: &ChannelInfo) {
     println!("channel:    {} (route {})", i.channel_id, i.route_id);
-    match &i.health {
-        Some(h) => {
-            let at = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M UTC").to_string();
-            let extra = h.content_state.map(|s| format!(", {}", state(s))).unwrap_or_default();
-            println!(
-                "last check: {} at {}{extra}",
-                outcome(h.last_attempt),
-                at(h.last_attempt_at)
-            );
-            if let (Some(c), Some(t)) = (h.conclusive, h.conclusive_at)
-                && h.conclusive != Some(h.last_attempt)
-            {
-                println!("last known: {} at {}", outcome(c), at(t));
-            }
-        }
-        None => println!("last check: never"),
-    }
+    health(i.health.as_ref());
     if !i.checks.available
         && let Some(why) = &i.checks.reason
     {
