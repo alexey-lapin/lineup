@@ -22,13 +22,13 @@ tokio = { workspace = true, features = ["process", "net", "io-util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-axum = "0.8"
-reqwest = { version = "0.13", features = ["json", "query", "stream"] }
-futures-util = "0.3"
+axum.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+futures-util.workspace = true
 bytes = "1"
-toml = "1.0"
+toml.workspace = true
 regex = "1"
 percent-encoding = "2"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
