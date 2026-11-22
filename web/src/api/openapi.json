@@ -78,6 +78,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -100,6 +109,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -166,6 +184,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -185,6 +212,15 @@
         "responses": {
           "204": {},
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -301,6 +337,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -348,6 +393,15 @@
             }
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -405,6 +459,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -444,6 +507,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -467,7 +539,7 @@
         }
       },
       "post": {
-        "summary": "Adds a source and starts fetching it in the background.",
+        "summary": "Adds a source and, when it is enabled, starts fetching it in the background.",
         "operationId": "create_epg_source",
         "requestBody": {
           "content": {
@@ -525,11 +597,20 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
       "patch": {
-        "summary": "A URL change keeps the current guide data until the new URL's first successful fetch, which starts\nimmediately.",
+        "summary": "A URL change keeps the current guide data until the new URL's first successful fetch, which starts\nimmediately when the source is enabled.",
         "operationId": "patch_epg_source",
         "parameters": [
           {
@@ -667,6 +748,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -686,6 +776,15 @@
         "responses": {
           "204": {},
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -796,6 +895,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -833,6 +941,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -860,7 +977,34 @@
               }
             }
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -920,6 +1064,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -955,6 +1108,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -982,6 +1144,15 @@
             }
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1034,6 +1205,15 @@
             }
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1147,6 +1327,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -1184,6 +1373,15 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1245,6 +1443,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -1273,6 +1480,15 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1468,6 +1684,15 @@
                 }
               }
             }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -1497,6 +1722,15 @@
             }
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1670,6 +1904,15 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -1919,8 +2162,7 @@
         "description": "Check results of a channel. Only `ok` and `dead` are conclusive.",
         "required": [
           "last_attempt",
-          "last_attempt_at",
-          "detail"
+          "last_attempt_at"
         ],
         "properties": {
           "conclusive": {
@@ -1953,8 +2195,11 @@
             ]
           },
           "detail": {
-            "type": "object",
-            "description": "Gateway details of the last attempt."
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Gateway details of the last attempt (any JSON, or null)."
           },
           "last_attempt": {
             "$ref": "#/components/schemas/CheckOutcome"
@@ -2026,7 +2271,7 @@
       },
       "ChannelPatch": {
         "type": "object",
-        "description": "Partial update. Absent fields are left unchanged; for nullable fields, `null` clears.\n`route_id` and/or `input` revalidate the source (with the current source when only the route\nchanges).",
+        "description": "Partial update. Absent fields are left unchanged. `null` clears `group_title`, `tvg_id` and\n`tvg_logo`; for the other fields `null` is the same as absent.\n`route_id` and/or `input` revalidate the source (with the current source when only the route\nchanges).",
         "properties": {
           "enabled": {
             "type": [
@@ -2124,7 +2369,6 @@
         "required": [
           "channel_id",
           "outcome",
-          "detail",
           "recorded"
         ],
         "properties": {
@@ -2143,7 +2387,11 @@
             ]
           },
           "detail": {
-            "type": "object"
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Gateway details (any JSON, or null)."
           },
           "outcome": {
             "$ref": "#/components/schemas/CheckOutcome"
@@ -2626,6 +2874,8 @@
               "null"
             ],
             "format": "int32",
+            "description": "Seconds, 0..=3600; default 30.",
+            "maximum": 3600,
             "minimum": 0
           },
           "enabled": {
@@ -2726,6 +2976,8 @@
               "null"
             ],
             "format": "int32",
+            "description": "Seconds, 0..=3600.",
+            "maximum": 3600,
             "minimum": 0
           },
           "enabled": {
@@ -2852,7 +3104,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Lines that could not be parsed into an entry."
+            "description": "Lines that could not be parsed into an entry, and entries the route did not accept or the\ngateway failed on (with the reason)."
           }
         }
       },
@@ -3605,13 +3857,15 @@
           "check_interval_hours": {
             "type": "integer",
             "format": "int32",
-            "description": "Hours between scheduled checks of all enabled channels on routes that support checks (the\nfirst runs 10 minutes after start); 0 turns them off.",
+            "description": "Hours between scheduled checks of all enabled channels on routes that support checks (the\nfirst runs 10 minutes after start); 0 turns them off. 0..=168, default 0.",
+            "maximum": 168,
             "minimum": 0
           },
           "epg_refresh_hours": {
             "type": "integer",
             "format": "int32",
-            "description": "Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.",
+            "description": "Hours between scheduled EPG fetches (the first runs 3 minutes after start); 0 turns the schedule off.\n0..=168, default 6.",
+            "maximum": 168,
             "minimum": 0
           },
           "revision": {
@@ -3631,6 +3885,8 @@
               "null"
             ],
             "format": "int32",
+            "description": "0..=168.",
+            "maximum": 168,
             "minimum": 0
           },
           "epg_refresh_hours": {
@@ -3639,6 +3895,8 @@
               "null"
             ],
             "format": "int32",
+            "description": "0..=168.",
+            "maximum": 168,
             "minimum": 0
           }
         }

@@ -21,10 +21,19 @@ relay rule (VK video pages), a commented-out `acestream` rule and a commented-ou
 
 ```sh
 docker build -f Dockerfile.gateway -t lineup-gateway .
-lineup-gateway --check-config --config gateway.toml      # or with the image: --entrypoint
+cp deploy/gateway.example.toml gateway.toml               # then edit it
+docker run --rm -v $PWD/gateway.toml:/etc/lineup-gateway.toml:ro lineup-gateway --check-config
 docker run -d --name lineup-gateway -p 8099:8099 \
   -v $PWD/gateway.toml:/etc/lineup-gateway.toml:ro lineup-gateway
 ```
+
+Settings outside the config file:
+
+| Flag / env | Default | What |
+|---|---|---|
+| `--config` / `LINEUP_GATEWAY_CONFIG` | `/etc/lineup-gateway.toml` | the config file |
+| `LINEUP_GATEWAY_LISTEN` | the config's `listen` (default `0.0.0.0:8099`) | overrides `listen`; `--healthcheck` uses it too |
+| `LINEUP_GATEWAY_LOG` | `info` | log filter |
 
 Or without Docker, from the release's `lineup-gateway-<version>-<target>.tar.gz` (macOS, and
 static Linux binaries for x86_64 and arm64). The archive has an example config and the pinned
@@ -41,7 +50,7 @@ cp gateway.example.toml gateway.toml
 Then in lineup:
 
 ```sh
-lineup route test --gateway http://gateway-host:8099      # lists the gateway's rules
+lineup route test --gateway http://gateway-host:8099      # lists the gateway's rules (exits 1: no rule given)
 lineup route add VK --gateway http://gateway-host:8099 --rule vk
 ```
 
@@ -72,7 +81,7 @@ identity = "vk:-1_2"
 ref = "https://vk.com/video-1_2?list=abc"
 ```
 
-Rule names are 1–32 of `a-z 0-9 - _`. A rule's name is part of lineup's routes: renaming a rule
+Rule names (and extractor names) are 1–32 of `a-z 0-9 - _`, starting with a letter or digit. A rule's name is part of lineup's routes: renaming a rule
 is creating another one.
 
 ### Patterns
@@ -180,8 +189,9 @@ sandbox: an extractor is code you trust. Keep the host-level egress rules below.
   session and returns the master playlist with every URI (variants, audio and subtitle
   renditions, keys, init sections, segments) rewritten to `s/<session>/<n>.<ext>`.
 - While a broadcast is live the playlists are live; after it ends, opening the same URL again
-  plays the recording, which is seekable. A session started on the live broadcast stays live until
-  the player reopens the channel.
+  plays the recording, which is seekable. A session keeps relaying the stream it was opened on and
+  never switches to the recording by itself; when that stream ends upstream (`#EXT-X-ENDLIST`), so
+  does the session, and reopening the channel starts a new lookup.
 - Lookups are cached for 60 s; once a media playlist with `#EXT-X-ENDLIST` is seen for a lookup
   that did not say live, up to 3 h (never past the signed URL's expiry). A page without a video
   or without a stream yet backs off (1, 2, 5, 10 min); a tool or network failure is retried after
@@ -205,16 +215,18 @@ sandbox: an extractor is code you trust. Keep the host-level egress rules below.
   that still says live, or without segments, is "ended, recording not ready" (inconclusive in
   checks). Only explicit "video not found/removed/private" messages from the extractors count as a
   dead video; parser and network errors are inconclusive.
-- Range requests are passed through to segments (one range only); nothing else from the player is
-  forwarded.
+- For segments, keys and init sections, the player's `Range` (one range only) and `If-Range`
+  headers are passed through; nothing else from the player is forwarded.
 - Only standard HLS tags reach the player. Comments, vendor tags (such as `#EXT-X-TWITCH-INFO`,
   `#EXT-X-CUE-OUT` or image playlists), `#EXT-X-DATERANGE` and `#EXT-X-SESSION-DATA` are dropped:
   their attributes can carry upstream URLs (ad trackers, interstitial assets, CDN nodes) and the
   viewer's address. Kept tags pass with their values as they are.
 - Refused: LL-HLS parts and hints, delta updates (`EXT-X-SKIP`), content steering, variable
   substitution, and keys other than plain AES-128. No transcoding: DASH-only or MP4-only pages fail clearly.
-- Sessions: at most `limits.sessions`; idle ones are evicted, but a session used within the last
-  minute never is, so a new viewer gets 503 instead of stopping an active one. HEAD opens no session.
+- Sessions: at most `limits.sessions`. A session unused for `limits.session_idle_secs` (default
+  1800) is dropped. When the limit is reached, the least recently used idle session is evicted, but
+  one used within the last minute never is, so a new viewer gets 503 instead of stopping an active
+  one. HEAD opens no session.
 - Upstream requests carry only the lookup's User-Agent, Accept, Accept-Language, Referer and
   Origin, for every host of the stream. Cookies and authorization are never sent: sites whose
   media needs them are not supported.
@@ -255,6 +267,8 @@ even when lineup stops waiting.
 - Ambient `HTTP(S)_PROXY` settings are ignored, so no proxy can resolve names past this rule.
 - Not shipped, recommended on the host: drop the container's outbound traffic to private ranges
   except DNS and the engine/acexy host:port pairs, for example with `DOCKER-USER` iptables rules.
+- `[egress].allow` lists hosts exempt from the private-address rule. It exists for tests and
+  should stay empty (the default); every guarantee above assumes it is.
 - No authentication: run it on a trusted LAN only.
 
 ## Health and shutdown

@@ -34,13 +34,14 @@ lineup itself knows no streaming protocol. A channel is played through a **route
 
 - One Rust binary. The built UI is embedded with rust-embed. Everything is served on one port: UI, `/api/*`, `/p/*`, and `/healthz`.
 - Docker image built by GitHub Actions and pushed to GHCR with pinned semver tags. macOS and Linux CLI binaries are attached to GitHub releases.
-- Boot configuration comes only from env:
-  - `LINEUP_BIND` (default `0.0.0.0:9300`)
-  - `LINEUP_DATA_DIR` (default `/data`)
-  - `LINEUP_LOG`
+- Boot configuration comes from `serve` flags, each with an env fallback, and from env:
+  - `--bind` / `LINEUP_BIND` (default `0.0.0.0:9300`)
+  - `--data-dir` / `LINEUP_DATA_DIR` (default `./data`; the container image sets `/data`). Paths below under `/data` are relative to it.
+  - `LINEUP_LOG` (default `info`)
+  - `TZ`: the server's time zone, used for the placeholder guide's hour boundaries (§5); read at start.
 - Everything else is runtime configuration stored in SQLite: routes (§4b) and settings.
 - Every schedule is boot-relative (run shortly after start, then every N hours), so hosts that sleep or power off overnight still get fresh data soon after they come back.
-- lineup works without any gateway (direct routes). Gateway routes need their gateway reachable to add, edit, import or resync channels; playlists and guides never call a gateway.
+- lineup works without any gateway (direct routes). Gateway routes need their gateway reachable to add channels, change a channel's source or route, import, and resync; metadata edits (name, group, tvg-id, logo), enabling and disabling, and route renames work without it. Playlists and guides never call a gateway.
 
 ## 4. Data model (SQLite via sqlx, with migrations)
 
@@ -123,7 +124,7 @@ A route is a configured way to play channels; every channel has exactly one.
 
 **Validation** (one path for create, source edits, moves between routes, import and resync; clients never send identities or play references):
 - Direct: trim; require http(s) and a host.
-- Gateway: `GET {base}/v1/info` (refused unless it speaks contract 1 and has the rule), then `POST {base}/v1/match {rule, inputs}` in batches of 500. Per input: `matched` (identity, ref, play, hints, warnings), `no_match` (422 with the reason), or `error` (422 with the gateway's message). An HTTP-level failure fails the whole operation with 502 and code `gateway_unreachable`, `gateway_error` or `contract_mismatch`.
+- Gateway: `GET {base}/v1/info` (refused unless it speaks contract 1 and has the rule), then `POST {base}/v1/match {rule, inputs}` in batches of 500. Per input: `matched` (identity, ref, play, hints, warnings), `no_match` (422 `invalid` with the reason), or `error` (502 `gateway_error` with the gateway's message). On import, `no_match` and `error` entries are skipped and listed instead (`skipped_lines`); `POST /routes/test` reports them as a 200 result with `ok: false`. An HTTP-level failure fails the whole operation with 502 and code `gateway_unreachable`, `gateway_error` or `contract_mismatch`.
 - Gateway calls run before the store's write lock; the write then checks the route revision (and, for edits, the channel's `source_revision`).
 
 **Base URL edits and resync**
@@ -169,7 +170,7 @@ Built per request from the per-source caches, for the same eligible channels as 
 ## 6. EPG ingestion
 
 - `epg_sources` starts empty. You add XMLTV URLs (plain or gzipped), for example regional files from a public EPG provider.
-- Schedule: 3 minutes after start, then every `epg_refresh_hours` (default 6; 0 turns it off). The scheduler compares wall-clock time every 10 minutes, so a host that slept catches up soon after it wakes. A fetch can also be started from the UI or CLI, and adding a source or changing its URL fetches it right away.
+- Schedule: 3 minutes after start, then every `epg_refresh_hours` (default 6; 0 turns it off). The scheduler compares wall-clock time every 10 minutes, so a host that slept catches up soon after it wakes. A fetch can also be started from the UI or CLI, and adding an enabled source, or changing an enabled source's URL, fetches it right away. Disabled sources are never fetched.
 - The **unfiltered raw download is kept**. A regional guide is tens of MB gzipped, which is fine. Because filtering happens when the response is served (§5), adding a tvg-id never needs a re-download.
 
 **Generations.** Each source has a directory `/data/epg/<source_id>/`, and each successful download becomes a generation directory `gen-<n>/` inside it. A generation holds:
@@ -186,7 +187,7 @@ A download is accepted only if it parses as a whole document, including the clos
 
 **Fetch sequence**
 1. Send validators only when the current generation is complete *and* its `meta.url` equals the source's configured URL. Otherwise send none. So after a URL change, every attempt stays unconditional until a generation for the new URL is published, including across restarts.
-2. On `304`: if the current generation is complete, there is nothing to do. If it is incomplete or missing, rebuild it from the raw file inside it; if that fails, fetch again unconditionally.
+2. The current generation is validated before validators are sent, so a `304` to a conditional request means the served data is good and there is nothing to do. A `304` to an unconditional request (no usable generation) fails that fetch and leaves what is served unchanged. A missing or broken generation at startup is handled by recovery, which serves the newest usable one.
 3. On `200`:
    1. Stream the body into `gen-<n+1>/raw` (at most 1 GiB).
    2. Parse it and write `programmes.*` and `channels.json`, dropping programmes that ended more than 6h ago.
@@ -210,7 +211,7 @@ You pick the route, then paste the input. `POST /api/v1/resolve {route_id, input
 - `duplicate_of`, an existing channel on the route with the same identity, and `duplicate_source` when that channel's stored source differs (for example a newer access token in the link). Editing that channel with the new input updates it ("Update source");
 - suggestions and guide matches.
 
-Suggestions come from the gateway's hints (`title`, `region`, `group`): `name` from the title (or a placeholder: host and last path segment for direct URLs, the identity for gateway routes), `group_title` from the group. When there is a title, it is fuzzy-matched against `epg_channels.display_names` with normalized token similarity (strsim), with a bonus for a matching region suffix (`.de`, `.uk`, `.us`); the top 5 `{xmltv_id, display_name, icon, score}` are returned, and the best one's tvg-id and logo are suggested when it scores at least 0.6. Gateway warnings (such as a failed title lookup) never fail the resolve.
+Suggestions come from the gateway's hints (`title`, `region`, `group`): `name` from the title (or a placeholder: host and last path segment for direct URLs, the identity for gateway routes), `group_title` from the group. When there is a title, it is fuzzy-matched against `epg_channels.display_names` with normalized token similarity (strsim), with a bonus for a matching region suffix (`.de`, `.uk`, `.us`); the top 5 `{source_id, xmltv_id, display_names, icon, score}` are returned (candidates are ranked on their display names and on their channel id, with its region suffix stripped), and the best one's tvg-id and logo are suggested when it scores at least 0.6. Gateway warnings (such as a failed title lookup) never fail the resolve.
 
 Site- or protocol-specific suggestion logic (cleaning upstream names, region tags, guessing a group) belongs to the gateway rule that produces the hints. The UI fills empty fields with the suggestions and offers the other matches and a guide search. In the CLI, the suggested name is always used unless `--name` is given; the other suggestions are applied with `--yes`, or after a confirmation prompt on a terminal. Explicit flags always win. Creating a channel validates the input again; a preview is never trusted.
 
@@ -222,6 +223,7 @@ Site- or protocol-specific suggestion logic (cleaning upstream names, region tag
 - `channel.unhealthy {channel_id, name, detail}`
 - `channel.recovered {channel_id, name}`
 - UI-only (SSE, not hook event types): `channel.checked {channel_id}`, `settings.changed {keys, revision}`, `route.changed {route_id, revision}`.
+- SSE stream control: `ready {}` on every connection, and `resync {}` when the client fell behind and events were dropped. On either (and after a reconnect) a client re-reads the state it shows.
 
 **Which mutations affect which outputs.** Every write goes through one service function. It computes the affected slugs *before* deleting anything, then invalidates caches and emits events.
 
@@ -230,13 +232,15 @@ Site- or protocol-specific suggestion logic (cleaning upstream names, region tag
 | channel name / group / tvg_id / logo / source / route / enabled | all containing the channel | `playlist.changed` (+ `epg.updated` if the tvg_id or name changed) |
 | channel delete | all that contained it (captured before delete) | `playlist.changed` |
 | item add / remove / move / replace | that playlist | `playlist.changed` |
-| playlist create / rename / delete | that slug | `playlist.changed` |
+| playlist create / rename / delete | that slug (a slug rename lists the old and the new slug) | `playlist.changed` |
 | route enable / disable | playlists with ≥1 channel of the route | `playlist.changed`, then `route.changed` |
 | route base URL change, or a resync that changed channels | playlists with ≥1 channel of the route | `playlist.changed`, then `route.changed` |
 | route create / rename / delete, a resync with no changes | — | `route.changed`, SSE only |
 | settings change (guide refresh, check interval) | — | `settings.changed`, SSE only |
-| EPG source publish | all | `epg.updated` |
-| EPG source enable / disable / delete / priority change | all (EPG cache flushed) | `epg.updated` |
+| EPG source publish (enabled source) | all | `epg.updated` |
+| EPG source create | — (it has no data until its first publish) | — |
+| EPG source enable / disable / priority change (source has a served generation) | all (EPG cache flushed) | `epg.updated` |
+| EPG source delete (enabled source with a served generation) | all (EPG cache flushed) | `epg.updated` |
 | EPG source URL change | — (current gen stays served until the new URL's first successful publish; fetches stay unconditional until then per §6, first one runs immediately) | `epg.updated` on that publish |
 | health status transition | — | `channel.unhealthy` / `channel.recovered` (hooks and SSE) |
 | check with no transition | — | `channel.checked`, SSE only |
@@ -318,7 +322,7 @@ GET    /events (SSE)   -- live updates for the UI: channel/playlist/route change
 
 - The same binary: `lineup serve` runs the server, every other subcommand is a client.
 - Server address: `--server` / `LINEUP_SERVER` / `~/.config/lineup/config.toml`.
-- Built with clap derive. `clap_usage` produces a jdx usage spec (`lineup usage`), which drives completions and docs. `--json` on every command, plus `-q`.
+- Built with clap derive. `lineup usage` (clap_usage, a jdx usage spec) and `lineup completions` (clap_complete) are both generated from the clap definitions. `--json` on every client command prints machine-readable output, usually the API response (a few commands build their own object, such as `backup` and `playlist url`); `usage` and `completions` always print text. `-q` prints only ids from `add`, `ls` and `route ls`, and drops confirmation messages.
 - Exit codes: 0 ok, 1 generic, 2 usage/invalid input, 3 not found, 4 conflict/duplicate, 5 server unreachable, 6 gateway failed.
 
 ```
@@ -329,10 +333,10 @@ ls [query] [--group --playlist --route --health dead] ; show <channel> ; info <c
 edit <channel> [--name … --source <input> --route <route>] ; rm <channel> ; enable/disable <channel>
 playlist ls|create <slug> [--name]|rm <slug>|show <slug>
 playlist add <slug> <channel>... [--at N] ; playlist remove <slug> <channel>... ; playlist move <slug> <channel> <pos>
-playlist url <slug>     # prints m3u + epg URLs
+playlist url <slug>     # prints the M3U URL (the guide is at /p/<slug>/epg.xml)
 route ls | show <route> | add <name> (--direct | --gateway <url> --rule <rule>) [--disabled]
 route edit <route> [--name --base-url --enable|--disable] | rm <route> | resync <route>
-route test [<route> | --gateway <url> [--rule <rule>]] [--input <input>]     # lists the gateway's rules
+route test [<route> | --gateway <url> [--rule <rule>]] [--input <input>]     # lists the gateway's rules; exits 1 without a valid rule
 check [<channel>...] [--force]
 epg fetch ; epg sources ls|add|rm ; epg search <query>
 hook ls|add|rm|test <id> ; hook deliveries <id>
@@ -385,7 +389,7 @@ The server's `test-support` feature adds a stub gateway (`lineup_server::testing
 
 ## 14. Milestones
 
-**Build order** (CI and Dockerfile):
+**Build order** (by hand, after an API change). The Dockerfile builds the UI from the committed `openapi.json` and generated types, then Rust; CI runs the Rust and web jobs separately and fails if the committed generated files are out of date.
 1. `cargo run -p lineup-server --bin openapi > web/src/api/openapi.json`. The bin only builds the router metadata and needs no running server.
 2. `pnpm gen:api && pnpm build`, which outputs `web/dist`.
 3. `cargo build --release`. rust-embed reads `web/dist` relative to the server crate. `build.rs` writes a placeholder `web/dist/index.html` when it is missing, so `cargo check` works without node.

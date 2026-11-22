@@ -295,7 +295,7 @@ struct ChannelQuery {
     health: Option<CheckOutcome>,
 }
 
-#[utoipa::path(get, path = "/channels", params(ChannelQuery), responses((status = 200, body = Vec<Channel>)))]
+#[utoipa::path(get, path = "/channels", params(ChannelQuery), responses((status = 200, body = Vec<Channel>), (status = 422, body = ErrorBody)))]
 async fn list_channels(
     State(s): State<AppState>,
     ApiQuery(q): ApiQuery<ChannelQuery>,
@@ -313,8 +313,8 @@ async fn list_channels(
 /// Create a channel. Its input is validated with the route (a gateway route asks its gateway);
 /// 502 when the gateway fails.
 #[utoipa::path(post, path = "/channels", request_body = ChannelCreate,
-    responses((status = 201, body = Channel), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody),
-        (status = 502, body = ErrorBody)))]
+    responses((status = 201, body = Channel), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody),
+        (status = 422, body = ErrorBody), (status = 502, body = ErrorBody)))]
 async fn create_channel(
     State(s): State<AppState>,
     Body(req): Body<ChannelCreate>,
@@ -323,7 +323,7 @@ async fn create_channel(
 }
 
 #[utoipa::path(get, path = "/channels/{id}", params(("id" = i64, Path)),
-    responses((status = 200, body = Channel), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = Channel), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn get_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<Channel>> {
     Ok(Json(s.get_channel(id).await?))
 }
@@ -341,7 +341,7 @@ async fn patch_channel(
 }
 
 #[utoipa::path(delete, path = "/channels/{id}", params(("id" = i64, Path)),
-    responses((status = 204), (status = 404, body = ErrorBody)))]
+    responses((status = 204), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn delete_channel(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
     s.delete_channel(id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -357,7 +357,7 @@ async fn resolve(State(s): State<AppState>, Body(req): Body<ResolveRequest>) -> 
 
 /// Stored check results and what the route's gateway observes now (never starts a stream).
 #[utoipa::path(get, path = "/channels/{id}/info", params(("id" = i64, Path)),
-    responses((status = 200, body = ChannelInfo), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = ChannelInfo), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn channel_info(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<ChannelInfo>> {
     Ok(Json(s.catalog.channel_info(id).await?))
 }
@@ -367,7 +367,7 @@ async fn channel_info(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> A
 /// routes with checks in the background (202).
 #[utoipa::path(post, path = "/checks", request_body = CheckRequest,
     responses((status = 200, body = CheckResponse), (status = 202, body = CheckResponse),
-        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 502, body = ErrorBody)))]
+        (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 502, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn checks(
     State(s): State<AppState>,
     Body(req): Body<CheckRequest>,
@@ -400,7 +400,7 @@ async fn list_playlists(State(s): State<AppState>) -> ApiResult<Json<Vec<Playlis
 }
 
 #[utoipa::path(post, path = "/playlists", request_body = PlaylistCreate,
-    responses((status = 201, body = PlaylistDetail), (status = 409, body = ErrorBody)))]
+    responses((status = 201, body = PlaylistDetail), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn create_playlist(
     State(s): State<AppState>,
     Body(req): Body<PlaylistCreate>,
@@ -409,13 +409,13 @@ async fn create_playlist(
 }
 
 #[utoipa::path(get, path = "/playlists/{slug}", params(("slug" = String, Path)),
-    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn get_playlist(State(s): State<AppState>, ApiPath(slug): ApiPath<String>) -> ApiResult<Json<PlaylistDetail>> {
     Ok(Json(s.get_playlist(&slug).await?))
 }
 
 #[utoipa::path(patch, path = "/playlists/{slug}", params(("slug" = String, Path)), request_body = PlaylistPatch,
-    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn patch_playlist(
     State(s): State<AppState>,
     ApiPath(slug): ApiPath<String>,
@@ -425,14 +425,14 @@ async fn patch_playlist(
 }
 
 #[utoipa::path(delete, path = "/playlists/{slug}", params(("slug" = String, Path)),
-    responses((status = 204), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+    responses((status = 204), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn delete_playlist(State(s): State<AppState>, ApiPath(slug): ApiPath<String>) -> ApiResult<StatusCode> {
     s.delete_playlist(&slug).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(post, path = "/playlists/{slug}/items", params(("slug" = String, Path)), request_body = ItemAdd,
-    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn add_item(
     State(s): State<AppState>,
     ApiPath(slug): ApiPath<String>,
@@ -453,7 +453,7 @@ async fn replace_items(
 
 #[utoipa::path(delete, path = "/playlists/{slug}/items/{channel_id}",
     params(("slug" = String, Path), ("channel_id" = i64, Path)),
-    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn remove_item(
     State(s): State<AppState>,
     ApiPath((slug, channel_id)): ApiPath<(String, i64)>,
@@ -469,7 +469,7 @@ struct MoveRequest {
 
 #[utoipa::path(post, path = "/playlists/{slug}/items/{channel_id}/move",
     params(("slug" = String, Path), ("channel_id" = i64, Path)), request_body = MoveRequest,
-    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = PlaylistDetail), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn move_item(
     State(s): State<AppState>,
     ApiPath((slug, channel_id)): ApiPath<(String, i64)>,
@@ -506,7 +506,7 @@ async fn create_route(State(s): State<AppState>, Body(req): Body<RouteCreate>) -
 }
 
 #[utoipa::path(get, path = "/routes/{id}", params(("id" = i64, Path)),
-    responses((status = 200, body = Route), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = Route), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn get_route(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<Route>> {
     Ok(Json(s.get_route(id).await?))
 }
@@ -526,7 +526,7 @@ async fn patch_route(
 
 /// Delete a route; 409 while channels use it.
 #[utoipa::path(delete, path = "/routes/{id}", params(("id" = i64, Path)),
-    responses((status = 204), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody)))]
+    responses((status = 204), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn delete_route(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
     s.delete_route(id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -542,7 +542,7 @@ async fn test_route(State(s): State<AppState>, Body(req): Body<RouteTestRequest>
 
 /// The saved route's gateway, live: whether it answers, its rule and channels pending a resync.
 #[utoipa::path(get, path = "/routes/{id}/status", params(("id" = i64, Path)),
-    responses((status = 200, body = RouteStatus), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = RouteStatus), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn route_status(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<RouteStatus>> {
     Ok(Json(s.catalog.route_status(id).await?))
 }
@@ -559,7 +559,8 @@ async fn resync_route(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> A
 // -------------------------------------------------------------------- import, refresh
 
 #[utoipa::path(post, path = "/import", request_body = ImportRequest,
-    responses((status = 200, body = ImportReport), (status = 422, body = ErrorBody)))]
+    responses((status = 200, body = ImportReport), (status = 404, body = ErrorBody), (status = 409, body = ErrorBody),
+        (status = 422, body = ErrorBody), (status = 502, body = ErrorBody)))]
 async fn import(State(s): State<AppState>, Body(req): Body<ImportRequest>) -> ApiResult<Json<ImportReport>> {
     let text = match (req.m3u_text, req.url) {
         (Some(t), None) => t,
@@ -608,7 +609,7 @@ async fn fetch_text(url: &str) -> Result<String, Error> {
 }
 
 #[utoipa::path(post, path = "/refresh", request_body = RefreshRequest,
-    responses((status = 200, body = RefreshResponse), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = RefreshResponse), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn refresh(State(s): State<AppState>, Body(req): Body<RefreshRequest>) -> ApiResult<Json<RefreshResponse>> {
     Ok(Json(RefreshResponse {
         slugs: s.refresh(req.slugs).await?,
@@ -622,7 +623,7 @@ async fn list_epg_sources(State(s): State<AppState>) -> ApiResult<Json<Vec<EpgSo
     Ok(Json(s.list_epg_sources().await?))
 }
 
-/// Adds a source and starts fetching it in the background.
+/// Adds a source and, when it is enabled, starts fetching it in the background.
 #[utoipa::path(post, path = "/epg/sources", request_body = EpgSourceCreate,
     responses((status = 201, body = EpgSource), (status = 422, body = ErrorBody)))]
 async fn create_epg_source(
@@ -637,7 +638,7 @@ async fn create_epg_source(
 }
 
 /// A URL change keeps the current guide data until the new URL's first successful fetch, which starts
-/// immediately.
+/// immediately when the source is enabled.
 #[utoipa::path(patch, path = "/epg/sources/{id}", params(("id" = i64, Path)), request_body = EpgSourcePatch,
     responses((status = 200, body = EpgSource), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn patch_epg_source(
@@ -653,7 +654,7 @@ async fn patch_epg_source(
 }
 
 #[utoipa::path(delete, path = "/epg/sources/{id}", params(("id" = i64, Path)),
-    responses((status = 204), (status = 404, body = ErrorBody)))]
+    responses((status = 204), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn delete_epg_source(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
     s.delete_epg_source(id).await?;
     s.epg.spawn_forget(id);
@@ -663,7 +664,7 @@ async fn delete_epg_source(State(s): State<AppState>, ApiPath(id): ApiPath<i64>)
 /// Fetch sources now and wait for the result. Fetches run one at a time, so this waits for any fetch
 /// already running.
 #[utoipa::path(post, path = "/epg/fetch", request_body = EpgFetchRequest,
-    responses((status = 200, body = Vec<EpgFetchResult>), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = Vec<EpgFetchResult>), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn fetch_epg(
     State(s): State<AppState>,
     Body(req): Body<EpgFetchRequest>,
@@ -681,7 +682,7 @@ struct EpgChannelQuery {
 }
 
 /// Channels offered by the enabled sources. With `q`, the best matches first.
-#[utoipa::path(get, path = "/epg/channels", params(EpgChannelQuery), responses((status = 200, body = Vec<EpgChannel>)))]
+#[utoipa::path(get, path = "/epg/channels", params(EpgChannelQuery), responses((status = 200, body = Vec<EpgChannel>), (status = 422, body = ErrorBody)))]
 async fn search_epg_channels(
     State(s): State<AppState>,
     ApiQuery(q): ApiQuery<EpgChannelQuery>,
@@ -705,7 +706,7 @@ async fn create_hook(State(s): State<AppState>, Body(req): Body<HookCreate>) -> 
 }
 
 #[utoipa::path(get, path = "/hooks/{id}", params(("id" = i64, Path)),
-    responses((status = 200, body = Hook), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = Hook), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn get_hook(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<Hook>> {
     Ok(Json(s.get_hook(id).await?))
 }
@@ -721,7 +722,7 @@ async fn patch_hook(
 }
 
 #[utoipa::path(delete, path = "/hooks/{id}", params(("id" = i64, Path)),
-    responses((status = 204), (status = 404, body = ErrorBody)))]
+    responses((status = 204), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn delete_hook(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<StatusCode> {
     s.delete_hook(id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -730,7 +731,7 @@ async fn delete_hook(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> Ap
 /// Send a synthetic `hook.test` event now (one attempt, no debounce) and return the logged result.
 /// For a Jellyfin hook this really starts a guide refresh.
 #[utoipa::path(post, path = "/hooks/{id}/test", params(("id" = i64, Path)),
-    responses((status = 200, body = HookDelivery), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = HookDelivery), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn test_hook(State(s): State<AppState>, ApiPath(id): ApiPath<i64>) -> ApiResult<Json<HookDelivery>> {
     Ok(Json(s.hooks.test(id).await?))
 }
@@ -744,7 +745,7 @@ struct DeliveryQuery {
 
 /// Recent delivery attempts, newest first.
 #[utoipa::path(get, path = "/hooks/{id}/deliveries", params(("id" = i64, Path), DeliveryQuery),
-    responses((status = 200, body = Vec<HookDelivery>), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = Vec<HookDelivery>), (status = 404, body = ErrorBody), (status = 422, body = ErrorBody)))]
 async fn hook_deliveries(
     State(s): State<AppState>,
     ApiPath(id): ApiPath<i64>,
