@@ -5,9 +5,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["server"]
+# The server and its embedded web UI. `--no-default-features` builds the client-only CLI.
+server = ["dep:lineup-server", "dep:tracing-subscriber", "lineup-cli/serve"]
+
 [dependencies]
-lineup-server.workspace = true
+lineup-server = { workspace = true, optional = true }
 lineup-cli.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, optional = true }

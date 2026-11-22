@@ -1,12 +1,12 @@
 //! `lineup` command line: argument definitions and the HTTP client commands.
 //!
-//! `serve` is defined here but executed by the `lineup` binary (which links the server).
+//! `serve` is defined here (feature `serve`) but executed by the `lineup` binary, which links the
+//! server. Without the feature the binary is a client only.
 
 mod client;
 mod commands;
 mod output;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -36,6 +36,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the lineup server.
+    #[cfg(feature = "serve")]
     Serve(ServeArgs),
     /// Add channels: each input is validated with the given route (a URL for a direct route; what
     /// the gateway rule accepts for a gateway route, such as an id or a page link).
@@ -115,11 +116,12 @@ pub enum Command {
     },
 }
 
+#[cfg(feature = "serve")]
 #[derive(Debug, Args)]
 pub struct ServeArgs {
     /// Address to listen on.
     #[arg(long, env = "LINEUP_BIND", default_value = "0.0.0.0:9300")]
-    pub bind: SocketAddr,
+    pub bind: std::net::SocketAddr,
     /// Directory for the database and caches.
     #[arg(long, env = "LINEUP_DATA_DIR", default_value = "./data")]
     pub data_dir: PathBuf,
@@ -437,6 +439,7 @@ pub enum SettingsCmd {
 
 /// What the binary should do after parsing.
 pub enum Dispatch {
+    #[cfg(feature = "serve")]
     Serve(ServeArgs),
     Client(Cli),
 }
@@ -444,6 +447,7 @@ pub enum Dispatch {
 pub fn parse() -> Dispatch {
     let cli = Cli::parse();
     match cli.command {
+        #[cfg(feature = "serve")]
         Command::Serve(args) => Dispatch::Serve(args),
         _ => Dispatch::Client(cli),
     }

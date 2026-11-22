@@ -3,6 +3,7 @@ use lineup_cli::Dispatch;
 #[tokio::main]
 async fn main() {
     let code = match lineup_cli::parse() {
+        #[cfg(feature = "server")]
         Dispatch::Serve(args) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -23,6 +24,13 @@ async fn main() {
             }
         }
         Dispatch::Client(cli) => lineup_cli::run(cli).await,
+        // `lineup-cli/serve` enabled without this crate's `server` feature.
+        #[cfg(not(feature = "server"))]
+        #[allow(unreachable_patterns)]
+        _ => {
+            eprintln!("error: this build has no server");
+            2
+        }
     };
     std::process::exit(code);
 }

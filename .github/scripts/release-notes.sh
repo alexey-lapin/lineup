@@ -22,10 +22,16 @@ cat <<MD
 ## Install
 
 \`\`\`sh
-docker pull $image:$version   # linux/amd64, linux/arm64
+docker pull $image:$version           # linux/amd64, linux/arm64
+docker pull $image-gateway:$version
+brew install alexey-lapin/tap/lineup  # the CLI (stable releases)
 \`\`\`
 
-The CLI for macOS and Linux is attached below as \`lineup-$tag-<target>.tar.gz\`; \`SHA256SUMS\` lists their checksums.
+Attached below, for macOS and Linux (x86_64 and arm64), with \`SHA256SUMS\`:
+
+- \`lineup-$tag-<target>.tar.gz\`: lineup, the server with its web UI and the CLI in one binary.
+- \`lineup-cli-$tag-<target>.tar.gz\`: the CLI only.
+- \`lineup-gateway-$tag-<target>.tar.gz\`: lineup-gateway (static on Linux), with an example config and the pinned extractor requirements. Relay rules need yt-dlp or streamlink installed; see its README.
 
 MD
 

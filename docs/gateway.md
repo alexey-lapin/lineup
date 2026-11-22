@@ -26,6 +26,18 @@ docker run -d --name lineup-gateway -p 8099:8099 \
   -v $PWD/gateway.toml:/etc/lineup-gateway.toml:ro lineup-gateway
 ```
 
+Or without Docker, from the release's `lineup-gateway-<version>-<target>.tar.gz` (macOS, and
+static Linux binaries for x86_64 and arm64). The archive has an example config and the pinned
+extractor requirements; relay rules need the extractors installed, as its README describes:
+
+```sh
+python3 -m venv /opt/tools
+/opt/tools/bin/pip install --no-deps -r gateway-tools-requirements.txt && /opt/tools/bin/pip check
+cp gateway.example.toml gateway.toml
+./lineup-gateway --check-config --config gateway.toml
+./lineup-gateway --config gateway.toml
+```
+
 Then in lineup:
 
 ```sh

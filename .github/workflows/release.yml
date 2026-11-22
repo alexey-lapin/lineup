@@ -10,7 +10,11 @@ on:
         description: Existing tag to build, e.g. v0.1.0
         required: true
       cli:
-        description: Also build the CLI archives and create or update the GitHub release
+        description: Also build the archives and create or update the GitHub release
+        type: boolean
+        default: false
+      tap:
+        description: Also publish the Homebrew formula (stable tags; needs cli)
         type: boolean
         default: false
 
@@ -41,6 +45,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - run: cargo clippy -p lineup --no-default-features --locked -- -D warnings
       - run: |
           cargo run -q --locked -p lineup-server --bin openapi > /tmp/openapi.json
           diff -u web/src/api/openapi.json /tmp/openapi.json
@@ -161,6 +166,8 @@ jobs:
           path: web/dist
           retention-days: 1
 
+  # Per target: lineup (server, web UI and CLI), lineup-cli (the client only) and, on macOS,
+  # lineup-gateway. The Linux gateway is built static in gateway-linux.
   cli:
     needs: web
     strategy:
@@ -175,6 +182,8 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
+    env:
+      T: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -189,17 +198,117 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --release --locked -p lineup --target ${{ matrix.target }}
-      - run: tar -C target/${{ matrix.target }}/release -czf lineup-${{ env.TAG }}-${{ matrix.target }}.tar.gz lineup
+      - run: cargo build --release --locked -p lineup --target "$T"
+      - run: cargo build --release --locked -p lineup --no-default-features --target "$T" --target-dir target/client
+      - if: runner.os == 'macOS'
+        run: cargo build --release --locked -p lineup-gateway --target "$T"
+      - name: Package
+        run: |
+          mkdir dist
+          tar -C "target/$T/release" -czf "dist/lineup-$TAG-$T.tar.gz" lineup
+          tar -C "target/client/$T/release" -czf "dist/lineup-cli-$TAG-$T.tar.gz" lineup
+          if [ "$RUNNER_OS" = macOS ]; then
+            .github/scripts/package-gateway.sh "target/$T/release/lineup-gateway" "dist/lineup-gateway-$TAG-$T.tar.gz"
+          fi
+          ls -l dist
+      # Run what this runner can run (the x86_64 macOS build is cross-compiled).
+      - name: Smoke test
+        run: |
+          case "$T" in "$(uname -m | sed 's/arm64/aarch64/')"-*) ;; *) echo "not native, skipped"; exit 0 ;; esac
+          "target/$T/release/lineup" --version
+          "target/$T/release/lineup" serve --help >/dev/null
+          "target/client/$T/release/lineup" --version
+          if "target/client/$T/release/lineup" serve --help >/dev/null 2>&1; then
+            echo "the client-only build has serve"; exit 1
+          fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            "target/$T/release/lineup-gateway" --version
+            "target/$T/release/lineup-gateway" --check-config --config deploy/gateway.example.toml
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: cli-${{ matrix.target }}
-          path: lineup-${{ env.TAG }}-${{ matrix.target }}.tar.gz
+          path: dist/*
           retention-days: 1
+
+  # Static (musl) gateway binaries, built in the same Alpine image as Dockerfile.gateway, on
+  # native runners.
+  gateway-linux:
+    needs: verify
+    if: github.event_name == 'push' || inputs.cli
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    env:
+      T: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - name: Build
+        run: |
+          image=$(awk '$1 == "FROM" && $2 ~ /^rust:/ { print $2; exit }' Dockerfile.gateway)
+          docker run --rm -v "$PWD:/src" -w /src "$image" sh -c \
+            "apk add --no-cache musl-dev build-base >/dev/null && cargo build --release --locked -p lineup-gateway --target $T"
+          sudo chown -R "$(id -u):$(id -g)" target
+      - name: Static and runs outside Alpine
+        run: |
+          bin="target/$T/release/lineup-gateway"
+          file "$bin"
+          if readelf -l "$bin" | grep -q INTERP || readelf -d "$bin" | grep -q NEEDED; then
+            echo "$bin is dynamically linked"; exit 1
+          fi
+          "$bin" --version
+          "$bin" --check-config --config deploy/gateway.example.toml
+      - run: |
+          mkdir dist
+          .github/scripts/package-gateway.sh "target/$T/release/lineup-gateway" "dist/lineup-gateway-$TAG-$T.tar.gz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gateway-${{ matrix.target }}
+          path: dist/*
+          retention-days: 1
+
+  # The Homebrew formula, installed from the archives before anything is published.
+  formula:
+    needs: cli
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          path: dist
+          merge-multiple: true
+      - name: brew install from a temporary tap
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"; fi
+          # A pre-release tag (1.0.0-rc.1) is tested as its X.Y.Z; only stable tags are published.
+          version=${TAG#v}; version=${version%%-*}
+          if [ "$TAG" != "v$version" ]; then
+            for f in dist/lineup-cli-*.tar.gz; do mv "$f" "${f/$TAG/v$version}"; done
+          fi
+          (cd dist && shasum -a 256 lineup-cli-*.tar.gz > SHA256SUMS)
+          python3 .github/scripts/render-formula.py "$version" "file://$PWD/dist" dist/SHA256SUMS lineup.rb
+          brew tap-new --no-git lineup/staging
+          cp lineup.rb "$(brew --repository lineup/staging)/Formula/lineup.rb"
+          brew install lineup/staging/lineup
+          brew test lineup/staging/lineup
+          bin="$(brew --prefix lineup/staging/lineup)/bin"
+          [ "$(ls "$bin")" = lineup ] || { echo "formula installed: $(ls "$bin")"; exit 1; }
+          "$bin/lineup" --version
 
   # Published only once the image and every archive exist, so a release is never partial.
   release:
-    needs: [manifest, cli]
+    needs: [manifest, cli, gateway-linux, formula]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -211,11 +320,22 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
-          pattern: cli-*
+          pattern: "{cli,gateway}-*"
           path: dist
           merge-multiple: true
-      - working-directory: dist
-        run: sha256sum lineup-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Every archive, and nothing else
+        working-directory: dist
+        run: |
+          expected=$(
+            for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+              echo "lineup-$TAG-$t.tar.gz"; echo "lineup-cli-$TAG-$t.tar.gz"
+            done
+            for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+              echo "lineup-gateway-$TAG-$t.tar.gz"
+            done
+          )
+          diff <(sort <<<"$expected") <(ls | sort)
+          sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
       - run: .github/scripts/release-notes.sh "$TAG" "$IMAGE" > notes.md && cat notes.md
       - name: Create or update the release
         run: |
@@ -232,3 +352,23 @@ jobs:
             gh release create "$TAG" --verify-tag --draft --title "lineup $TAG" --notes-file notes.md "${flags[@]}" dist/*
             gh release edit "$TAG" --draft=false
           fi
+
+  # The tap gets stable releases only, once the release is public.
+  tap:
+    needs: release
+    # One tap update at a time, so the version check in publish-formula.sh sees the latest tap.
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    if: ${{ !contains(inputs.tag || github.ref_name, '-') && (github.event_name == 'push' || (inputs.cli && inputs.tap)) }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          gh release download "$TAG" -p SHA256SUMS -D /tmp
+          python3 .github/scripts/render-formula.py "${TAG#v}" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" /tmp/SHA256SUMS lineup.rb
+          .github/scripts/publish-formula.sh "$TAG" lineup.rb
