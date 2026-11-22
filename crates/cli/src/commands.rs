@@ -126,7 +126,9 @@ pub async fn run(cli: Cli) -> R {
         routes: None,
     };
     match cli.command {
-        Command::Serve(_) | Command::Usage | Command::Completions { .. } => unreachable!("handled by caller"),
+        #[cfg(feature = "serve")]
+        Command::Serve(_) => unreachable!("handled by caller"),
+        Command::Usage | Command::Completions { .. } => unreachable!("handled by caller"),
 
         Command::Backup { path } => {
             if path.exists() {

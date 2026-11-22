@@ -3,6 +3,7 @@ use lineup_cli::Dispatch;
 #[tokio::main]
 async fn main() {
     let code = match lineup_cli::parse() {
+        #[cfg(feature = "server")]
         Dispatch::Serve(args) => {
             tracing_subscriber::fmt()
                 .with_env_filter(

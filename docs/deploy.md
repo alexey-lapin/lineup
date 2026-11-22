@@ -47,7 +47,7 @@ lineup completions zsh > ~/.zfunc/_lineup     # also bash, fish, elvish, powersh
 lineup usage                                  # a usage spec (https://usage.jdx.dev)
 ```
 
-CLI binaries for macOS and Linux (x86_64 and arm64) are attached to each GitHub release.
+Each GitHub release has binaries for macOS and Linux (x86_64 and arm64): `lineup-*` (the server and the CLI) and `lineup-cli-*` (the CLI only, without `serve`). The CLI is also on Homebrew: `brew install alexey-lapin/tap/lineup`.
 
 ## Bring in an existing playlist
 

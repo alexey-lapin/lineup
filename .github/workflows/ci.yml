@@ -17,6 +17,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+      - name: Client-only build
+        run: cargo clippy -p lineup --no-default-features --locked -- -D warnings
       - name: OpenAPI document is up to date
         run: |
           cargo run -q --locked -p lineup-server --bin openapi > /tmp/openapi.json

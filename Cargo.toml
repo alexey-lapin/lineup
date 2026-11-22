@@ -13,7 +13,7 @@ publish = false
 api-types = { package = "lineup-api-types", path = "crates/api-types" }
 gateway-contract = { path = "crates/gateway-contract" }
 lineup-server = { path = "crates/server" }
-lineup-cli = { path = "crates/cli" }
+lineup-cli = { path = "crates/cli", default-features = false }
 
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
