@@ -24,6 +24,13 @@ async fn main() {
             }
         }
         Dispatch::Client(cli) => lineup_cli::run(cli).await,
+        // `lineup-cli/serve` enabled without this crate's `server` feature.
+        #[cfg(not(feature = "server"))]
+        #[allow(unreachable_patterns)]
+        _ => {
+            eprintln!("error: this build has no server");
+            2
+        }
     };
     std::process::exit(code);
 }

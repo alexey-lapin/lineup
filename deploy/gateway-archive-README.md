@@ -23,9 +23,10 @@ The pins are tested with the image's Python (3.15). With another Python, or anot
 install what works there and point each `[extractors.*] command` at it (a bare name such as
 `yt-dlp` is looked up on PATH).
 
-Then check the config and run it:
+Then make a config from the example, check it and run it:
 
 ```sh
+cp gateway.example.toml gateway.toml
 ./lineup-gateway --check-config --config gateway.toml
 ./lineup-gateway --config gateway.toml
 ```

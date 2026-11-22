@@ -293,7 +293,9 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"; fi
           # A pre-release tag (1.0.0-rc.1) is tested as its X.Y.Z; only stable tags are published.
           version=${TAG#v}; version=${version%%-*}
-          for f in dist/lineup-cli-*.tar.gz; do mv "$f" "${f/$TAG/v$version}"; done
+          if [ "$TAG" != "v$version" ]; then
+            for f in dist/lineup-cli-*.tar.gz; do mv "$f" "${f/$TAG/v$version}"; done
+          fi
           (cd dist && shasum -a 256 lineup-cli-*.tar.gz > SHA256SUMS)
           python3 .github/scripts/render-formula.py "$version" "file://$PWD/dist" dist/SHA256SUMS lineup.rb
           brew tap-new --no-git lineup/staging
@@ -354,6 +356,10 @@ jobs:
   # The tap gets stable releases only, once the release is public.
   tap:
     needs: release
+    # One tap update at a time, so the version check in publish-formula.sh sees the latest tap.
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
     if: ${{ !contains(inputs.tag || github.ref_name, '-') && (github.event_name == 'push' || (inputs.cli && inputs.tap)) }}
     runs-on: ubuntu-latest
     env:
