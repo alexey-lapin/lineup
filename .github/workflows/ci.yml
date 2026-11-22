@@ -55,3 +55,23 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The gateway's extractors (Dockerfile.gateway's tools stage): installs the pinned requirements,
+  # runs pip check and the streamlink smoke test, on both architectures. Without it, an extractor
+  # update would first be installed by a release.
+  gateway-tools:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.gateway
+          target: tools
+          push: false
+          cache-from: type=gha,scope=gateway-tools-${{ matrix.runner }}
+          cache-to: type=gha,mode=max,scope=gateway-tools-${{ matrix.runner }}
