@@ -41,7 +41,7 @@ extractor requirements; relay rules need the extractors installed, as its README
 
 ```sh
 python3 -m venv /opt/tools
-/opt/tools/bin/pip install --no-deps -r gateway-tools-requirements.txt && /opt/tools/bin/pip check
+/opt/tools/bin/pip install --no-deps --require-hashes -r gateway-tools-requirements.txt && /opt/tools/bin/pip check
 cp gateway.example.toml gateway.toml
 ./lineup-gateway --check-config --config gateway.toml
 ./lineup-gateway --config gateway.toml
@@ -280,12 +280,15 @@ each extractor a rule uses must answer its `version_args`, or the gateway does n
 
 ## Updating the extractors
 
-yt-dlp, streamlink and every package they pull in are pinned in
-`deploy/gateway-tools-requirements.txt` and installed without resolving anything new, so an image
-rebuild never changes them. The build checks that the set is consistent and that streamlink can
-prepare a request. To update: change the pins (a fresh `pip install yt-dlp streamlink` then
-`pip freeze` gives a consistent set), rebuild, and smoke-test a live and a recorded video of each
-relay rule with each extractor:
+yt-dlp and streamlink are pinned in `deploy/gateway-tools-requirements.in`.
+`deploy/gateway-tools-requirements.txt` is compiled from it with `uv pip compile` (the command is in
+its header; run it from `deploy/`): every package they pull in, pinned with hashes, resolved for any
+Linux or macOS Python 3.11+. The image installs that file without resolving anything new, so a
+rebuild never changes it, and checks that the set is consistent and that streamlink can prepare a
+request. Renovate bumps the pins in the `.in` and recompiles; transitive packages move with its
+weekly lock file maintenance. To update by hand: change the `.in`, recompile (add `--upgrade` to
+refresh everything), rebuild, and smoke-test a live and a recorded video of each relay rule with
+each extractor:
 
 ```sh
 curl -s "http://localhost:8099/play/vk.m3u8?ref=<urlencoded link>" | head

@@ -1,0 +1,5 @@
+# The extractors in the lineup-gateway image. gateway-tools-requirements.txt is generated from this
+# file: every package they pull in, pinned with hashes, for any Linux or macOS Python 3.11+.
+# Regenerate it from this directory with the command in its header; Renovate does that for updates.
+yt-dlp==2026.10.26
+streamlink==8.6.3

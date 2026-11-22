@@ -10,6 +10,12 @@
     "enabled": true,
     "schedule": ["before 9am on monday"]
   },
+  "pip_requirements": {
+    "enabled": false
+  },
+  "pip-compile": {
+    "managerFilePatterns": ["/^deploy/gateway-tools-requirements\\.txt$/"]
+  },
   "packageRules": [
     {
       "matchManagers": ["cargo"],
@@ -34,8 +40,7 @@
       "groupName": "node"
     },
     {
-      "matchManagers": ["pip_requirements"],
-      "matchFileNames": ["deploy/gateway-tools-requirements.txt"],
+      "matchManagers": ["pip-compile"],
       "groupName": "gateway extractors"
     }
   ]
