@@ -26,7 +26,7 @@ pub struct Cli {
     /// Print machine-readable JSON (usually the API response) instead of text.
     #[arg(long, global = true)]
     pub json: bool,
-    /// Print less: only ids from `add`, `ls` and `route ls`, and no confirmation messages.
+    /// Print less: only ids from a successful `add`, `ls` and `route ls`; some commands also drop their confirmation message.
     #[arg(short, long, global = true)]
     pub quiet: bool,
     #[command(subcommand)]

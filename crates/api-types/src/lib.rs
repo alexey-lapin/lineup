@@ -54,7 +54,6 @@ pub struct ChannelHealth {
     /// Why the last attempt was `unknown` or `skipped` (e.g. `busy`).
     pub reason: Option<String>,
     /// Gateway details of the last attempt (any JSON, or null).
-    #[schema(value_type = Option<Object>)]
     pub detail: Option<serde_json::Value>,
 }
 
@@ -76,7 +75,6 @@ pub struct CheckResult {
     pub reason: Option<String>,
     pub content_state: Option<ContentState>,
     /// Gateway details (any JSON, or null).
-    #[schema(value_type = Option<Object>)]
     pub detail: Option<serde_json::Value>,
     /// False when the result was not stored (the channel or its route changed meanwhile, or the
     /// check did not run).

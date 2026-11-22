@@ -37,7 +37,7 @@ lineup itself knows no streaming protocol. A channel is played through a **route
 - Boot configuration comes from `serve` flags, each with an env fallback, and from env:
   - `--bind` / `LINEUP_BIND` (default `0.0.0.0:9300`)
   - `--data-dir` / `LINEUP_DATA_DIR` (default `./data`; the container image sets `/data`). Paths below under `/data` are relative to it.
-  - `LINEUP_LOG` (default `info`)
+  - `LINEUP_LOG` (default `info,sqlx=warn`; the example compose file sets `info`)
   - `TZ`: the server's time zone, used for the placeholder guide's hour boundaries (§5); read at start.
 - Everything else is runtime configuration stored in SQLite: routes (§4b) and settings.
 - Every schedule is boot-relative (run shortly after start, then every N hours), so hosts that sleep or power off overnight still get fresh data soon after they come back.
@@ -124,7 +124,7 @@ A route is a configured way to play channels; every channel has exactly one.
 
 **Validation** (one path for create, source edits, moves between routes, import and resync; clients never send identities or play references):
 - Direct: trim; require http(s) and a host.
-- Gateway: `GET {base}/v1/info` (refused unless it speaks contract 1 and has the rule), then `POST {base}/v1/match {rule, inputs}` in batches of 500. Per input: `matched` (identity, ref, play, hints, warnings), `no_match` (422 `invalid` with the reason), or `error` (502 `gateway_error` with the gateway's message). On import, `no_match` and `error` entries are skipped and listed instead (`skipped_lines`); `POST /routes/test` reports them as a 200 result with `ok: false`. An HTTP-level failure fails the whole operation with 502 and code `gateway_unreachable`, `gateway_error` or `contract_mismatch`.
+- Gateway: `GET {base}/v1/info` (refused unless it speaks contract 1 and has the rule), then `POST {base}/v1/match {rule, inputs}` in batches of 500. Per input: `matched` (identity, ref, play, hints, warnings), `no_match` (422 `invalid` with the reason), or `error` (502 `gateway_error` with the gateway's message). On import, `no_match` and `error` entries are skipped and listed instead (`skipped_lines`); `POST /routes/test` reports them as a 200 result with `ok: false`. For source validation, import and resync, an HTTP-level failure fails the whole operation with 502 and code `gateway_unreachable`, `gateway_error` or `contract_mismatch`. `POST /routes/test` instead reports every gateway failure (unreachable, timeout, contract mismatch, a failed sample) in its 200 result with `ok: false`; only an invalid draft config is refused, with 422.
 - Gateway calls run before the store's write lock; the write then checks the route revision (and, for edits, the channel's `source_revision`).
 
 **Base URL edits and resync**
@@ -322,7 +322,7 @@ GET    /events (SSE)   -- live updates for the UI: channel/playlist/route change
 
 - The same binary: `lineup serve` runs the server, every other subcommand is a client.
 - Server address: `--server` / `LINEUP_SERVER` / `~/.config/lineup/config.toml`.
-- Built with clap derive. `lineup usage` (clap_usage, a jdx usage spec) and `lineup completions` (clap_complete) are both generated from the clap definitions. `--json` on every client command prints machine-readable output, usually the API response (a few commands build their own object, such as `backup` and `playlist url`); `usage` and `completions` always print text. `-q` prints only ids from `add`, `ls` and `route ls`, and drops confirmation messages.
+- Built with clap derive. `lineup usage` (clap_usage, a jdx usage spec) and `lineup completions` (clap_complete) are both generated from the clap definitions. `--json` on every client command prints machine-readable output, usually the API response (a few commands build their own object, such as `backup` and `playlist url`); `usage` and `completions` always print text. `-q` prints only ids from a successful `add`, `ls` and `route ls`, and drops some confirmation messages (such as `rm` and `enable`); other commands print as usual.
 - Exit codes: 0 ok, 1 generic, 2 usage/invalid input, 3 not found, 4 conflict/duplicate, 5 server unreachable, 6 gateway failed.
 
 ```

@@ -17,19 +17,20 @@ Open `http://<host>:9300`. On a phone, add the page to the home screen to use it
 The shortest path from a fresh install to a channel playing with a guide, using a plain stream URL (no gateway). Replace `media-host` with an address Jellyfin can reach, not `localhost`.
 
 1. Start lineup as above and point the CLI at it ([below](#point-the-cli-at-it)), or do the same steps in the web UI.
-2. Create a playlist and add a channel to it through the built-in **Direct** route:
+2. Create a playlist and add a channel to it through the built-in **Direct** route, with your stream's URL in place of the example:
 
    ```sh
    lineup playlist create tv
    lineup add -r Direct https://example.com/live.m3u8 --name "My Channel" -p tv
    ```
 
-3. Add a guide source and look up the channel's tvg-id (optional; without one the channel gets placeholder programmes):
+3. Add a guide source (your XMLTV URL) and look up the channel's tvg-id. This step is optional; without a tvg-id the channel gets placeholder programmes. Adding a source starts its download in the background, and `lineup epg fetch` waits for it, so the search has data:
 
    ```sh
    lineup epg sources add https://example.org/guide.xml.gz
+   lineup epg fetch
    lineup epg search "my channel"
-   lineup edit "My Channel" --tvg-id <id from the search>
+   lineup edit "My Channel" --tvg-id "<id from the search>"
    ```
 
 4. In Jellyfin, add `http://media-host:9300/p/tv.m3u` as an **M3U Tuner** and `http://media-host:9300/p/tv/epg.xml` as an **XMLTV** guide provider ([details](#jellyfin)).

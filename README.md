@@ -48,7 +48,7 @@ lineup usage                                   # usage spec (https://usage.jdx.d
 lineup completions <shell>                     # bash, zsh, fish, elvish, powershell
 ```
 
-Every command accepts `--json`, which prints machine-readable output (usually the API response), and `-q`, which prints only ids from `add`, `ls` and `route ls` and drops confirmation messages. The server is chosen by `--server`, then `LINEUP_SERVER`, then `~/.config/lineup/config.toml` (`server = "http://host:9300"`), and finally defaults to `http://127.0.0.1:9300`.
+Every command accepts `--json`, which prints machine-readable output (usually the API response), and `-q`, which prints only ids from a successful `add`, `ls` and `route ls`, and drops some confirmation messages (such as `rm` and `enable`). The server is chosen by `--server`, then `LINEUP_SERVER`, then `~/.config/lineup/config.toml` (`server = "http://host:9300"`), and finally defaults to `http://127.0.0.1:9300`.
 
 Exit codes:
 

@@ -541,7 +541,7 @@ export interface components {
             conclusive_at?: string | null;
             content_state?: components["schemas"]["ContentState"] | null;
             /** @description Gateway details of the last attempt (any JSON, or null). */
-            detail?: Record<string, never> | null;
+            detail?: unknown;
             last_attempt: components["schemas"]["CheckOutcome"];
             /** Format: date-time */
             last_attempt_at: string;
@@ -602,7 +602,7 @@ export interface components {
             channel_id: number;
             content_state?: components["schemas"]["ContentState"] | null;
             /** @description Gateway details (any JSON, or null). */
-            detail?: Record<string, never> | null;
+            detail?: unknown;
             outcome: components["schemas"]["CheckOutcome"];
             reason?: string | null;
             /**

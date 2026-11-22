@@ -2195,10 +2195,6 @@
             ]
           },
           "detail": {
-            "type": [
-              "object",
-              "null"
-            ],
             "description": "Gateway details of the last attempt (any JSON, or null)."
           },
           "last_attempt": {
@@ -2387,10 +2383,6 @@
             ]
           },
           "detail": {
-            "type": [
-              "object",
-              "null"
-            ],
             "description": "Gateway details (any JSON, or null)."
           },
           "outcome": {
