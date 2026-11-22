@@ -69,7 +69,8 @@ Exit codes:
 ```sh
 cargo test                                         # server, CLI and HTTP tests (no node needed)
 cargo run -p lineup -- serve --data-dir ./data     # http://127.0.0.1:9300
-corepack pnpm -C web install && corepack pnpm -C web dev   # UI dev server, proxies /api and /p to :9300
+npm i -g corepack && corepack enable                       # once: Node 25+ no longer bundles corepack
+pnpm -C web install && pnpm -C web dev                     # UI dev server, proxies /api and /p to :9300
 ```
 
 After you change the API:

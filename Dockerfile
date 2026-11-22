@@ -1,7 +1,8 @@
 # ---- web UI ----------------------------------------------------------------
-FROM node:24-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /src/web
-RUN corepack enable
+# Node 25+ no longer bundles corepack; it installs the pnpm that package.json's packageManager names.
+RUN npm install -g corepack@0.36.0 && corepack enable
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY web/ ./
