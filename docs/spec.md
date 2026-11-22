@@ -71,7 +71,7 @@ channels(
   UNIQUE(route_id, identity)
 )
 channel_health(channel_id PK REFERENCES channels ON DELETE CASCADE,
-  conclusive TEXT NULL ('ok','dead'), conclusive_at,          -- last conclusive result; drives events + badge
+  conclusive TEXT NULL ('ok','dead'), conclusive_at,          -- last conclusive result; drives events
   last_attempt TEXT ('ok','dead','unknown','skipped'), last_attempt_at,
   content_state TEXT NULL ('live','ended_processing','recording'), reason TEXT NULL, detail JSON)
 playlists(id INTEGER PK, slug TEXT UNIQUE, name TEXT, created_at, updated_at)
@@ -275,7 +275,7 @@ A check asks the route's gateway whether a channel plays (`POST {base}/v1/check 
   - `dead → ok` emits `channel.recovered`.
   - No change emits `channel.checked` (SSE only).
 - `unknown` and `skipped` never touch `conclusive`, so "dead, unknown, skipped, ok" emits exactly one recovery.
-- The UI badge shows `conclusive`, with a hint when the latest attempt is inconclusive.
+- Lists (the web channel table, `lineup ls`) show no health: a stored result can be old and would read as the current state. The channel's details (web, `lineup show`, `lineup info`) show the latest attempt and the last conclusive result, each with its time.
 - Playlists are never edited.
 
 ## 10. REST API (`/api/v1`, JSON, OpenAPI via utoipa at `/api/openapi.json`)
@@ -347,7 +347,7 @@ usage                   # emit usage spec
 ## 12. Web UI (Vue 3 + Vite + TS + @nuxt/ui v4 in Vue mode, vue-router, Pinia Colada; a hand-written manifest and service worker)
 
 - **Channels**
-  - Searchable table with group, health badge, route and identity, and playlist chips.
+  - Searchable table with group, route and identity, and playlist chips.
   - An "Add" slideover: pick the route (the last one used is preselected), paste the input, and see the validated source, play URL and suggestions with editable fields: tvg-id picker backed by `/epg/channels`, logo preview, playlist checkboxes. A duplicate whose stored source differs offers "Update it to this link".
   - Row actions: details, edit, check (gateway routes), copy play URL, open in VLC (`vlc-x-callback://x-callback-url/stream?url=…`) or Infuse (`infuse://x-callback-url/play?url=…`), delete. Channels of a disabled route show a "route off" badge.
   - Details (`/channels/:id`, a slideover; full width on phones): stored fields, what the gateway observes now (polled every 5 s while visible, one request at a time), latest check and Check now.
