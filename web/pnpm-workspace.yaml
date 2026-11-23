@@ -1,7 +1,5 @@
 allowBuilds:
   esbuild: true
   vue-demi: true
-# Packages must be a day old (minutes; pnpm's default value, set explicitly so it is visible and
-# strict: resolution fails rather than falling back to a newer version). --frozen-lockfile rejects
-# younger lockfile entries, so Renovate waits 3 days for npm updates (security:minimumReleaseAgeNpm).
+# Minutes; explicit so it is strict. Renovate waits longer (security:minimumReleaseAgeNpm).
 minimumReleaseAge: 1440

@@ -10,16 +10,6 @@
     "enabled": true,
     "schedule": ["before 9am on monday"]
   },
-  "customManagers": [
-    {
-      "customType": "regex",
-      "description": "corepack is installed explicitly: Node 25+ no longer bundles it",
-      "managerFilePatterns": ["/(^|/)Dockerfile$/", "/^\\.github/workflows/[^/]+\\.ya?ml$/"],
-      "matchStrings": ["corepack@(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
-      "depNameTemplate": "corepack",
-      "datasourceTemplate": "npm"
-    }
-  ],
   "packageRules": [
     {
       "matchManagers": ["cargo"],
@@ -32,11 +22,6 @@
       "groupName": "web packages"
     },
     {
-      "description": "The package manager is a toolchain change; keep it out of the dependency group",
-      "matchDepNames": ["pnpm", "corepack"],
-      "groupName": "pnpm"
-    },
-    {
       "matchManagers": ["github-actions"],
       "groupName": "github actions"
     },
@@ -45,7 +30,6 @@
       "groupName": "docker images"
     },
     {
-      "description": "One Node version: the web stage image and .node-version (CI, release) move together",
       "matchDepNames": ["node"],
       "groupName": "node"
     },
