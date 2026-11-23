@@ -170,32 +170,6 @@ Jellyfin's **Refresh Guide** task re-reads tuners and guide providers. To run it
 
 If the task id ever changes (a 404 in `lineup hook deliveries`), look it up again and `lineup hook edit <id> --url …`. Jellyfin reuses a downloaded XMLTV guide for a while (about an hour), so a refresh right after a guide change may still show the old programmes until a later refresh.
 
-## Upgrading from 0.4
-
-lineup 0.5 starts from a new database and cannot open a 0.4 one: it refuses to start and leaves the old file untouched. Integrations are replaced by routes, and the protocol support they had moved out of lineup into a gateway. To move over:
-
-1. Before upgrading, while 0.4 is still running, save what you will need (into an empty folder):
-
-   ```sh
-   lineup --json ls > channels.json                 # every channel, also disabled ones and ones in no playlist
-   lineup --json playlist ls > playlists.json
-   for p in $(jq -r '.[].slug' playlists.json); do
-     curl -fsS -o "$p.m3u" "http://media-host:9300/p/$p.m3u"
-     lineup --json playlist show "$p" > "playlist-$p.json"
-   done
-   lineup --json epg sources ls > epg-sources.json
-   lineup --json hook ls > hooks.json               # header secrets are masked: take the Jellyfin API key from Jellyfin
-   lineup --json integration ls > integrations.json
-   ```
-
-2. Run a gateway that has rules for what your integrations covered (for example [lineup-gateway](gateway.md)), configured with the addresses from `integrations.json`.
-3. Stop and remove the 0.4 container, and keep its volume as the backup, with the 0.4 image tag in case you roll back.
-4. Start 0.5 on a new, empty volume (change the volume's `name:` in the compose file, for example to `lineup-data-0.5`, and the image tag).
-5. Add the gateway routes (above), then import each playlist once per route, previewing first. Entries whose 0.4 play URLs no rule accepts are skipped and listed; add those channels again from their original links.
-6. From the JSON records, add back the channels in no playlist and disable the ones that were disabled. Event flags and kickoff times no longer exist in 0.5. Then add the guide sources and hooks again, and set the check schedule under Settings if you used one.
-
-Imported channels take their name, group, tvg-id and logo from the M3U.
-
 ## Health checks
 
 lineup checks channels through their route's gateway, when the gateway's rule supports checks; how a check is done is up to the gateway (for example, it may skip a stream someone is watching and report it as skipped). A check may also report what the source is now: live, ended with the recording not ready yet, or a recording.
@@ -237,7 +211,5 @@ docker stop lineup && sh deploy/restore.sh ./lineup-backup.db && docker start li
 ```
 
 It checks the backup (`integrity_check` plus a test query) before changing anything. It stages the copy next to the live database, then moves the current `lineup.db`, `-wal` and `-shm` into `/data/pre-restore-<timestamp>/` (WAL can hold committed rows, so nothing is deleted). It refuses to run while lineup is up. If validation fails, the live files are untouched, and because `&&` chains the commands, lineup stays stopped until the restore succeeds.
-
-A backup restores into the same lineup version line: 0.5 refuses a 0.4 database (see Upgrading from 0.4).
 
 Re-importing an exported M3U is **not** a full restore. It brings back that playlist's channels and their M3U fields, but not disabled channels, other playlists, routes or settings. Use the database backup for that.

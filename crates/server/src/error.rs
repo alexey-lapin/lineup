@@ -14,9 +14,6 @@ pub enum Error {
     Migrate(#[from] sqlx::migrate::MigrateError),
     #[error("{0}")]
     Internal(String),
-    /// The database file belongs to another lineup release (or is not a lineup database).
-    #[error("{0}")]
-    UnsupportedDatabase(String),
     /// A route's gateway could not be reached (connection, timeout).
     #[error("{0}")]
     GatewayUnreachable(String),
@@ -35,7 +32,7 @@ impl Error {
             Error::NotFound(_) => "not_found",
             Error::Conflict(_) => "conflict",
             Error::Invalid(_) => "invalid",
-            Error::Db(_) | Error::Migrate(_) | Error::Internal(_) | Error::UnsupportedDatabase(_) => "internal",
+            Error::Db(_) | Error::Migrate(_) | Error::Internal(_) => "internal",
             Error::GatewayUnreachable(_) => "gateway_unreachable",
             Error::GatewayError(_) => "gateway_error",
             Error::ContractMismatch(_) => "contract_mismatch",

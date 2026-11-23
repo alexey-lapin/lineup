@@ -62,10 +62,6 @@ hosts = ["vk.com", "vk.ru", "vkvideo.ru"]
 path = 'live(?P<owner>-[0-9]+)_(?P<video>[0-9]+)'
 query = [{ param = "list", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true }]
 
-[[rules.vk.match]]   # legacy vkserve proxy URLs, on any host
-path = '/vk/(?P<owner>-?[0-9]+)_(?P<video>[0-9]+)'
-query = [{ param = "list", re = '(?P<list>[A-Za-z0-9_-]{1,64})', optional = true }]
-
 [[rules.vk.examples]]
 input = "https://sport.vkvideo.ru/live-100001_200002?list=0a1b2c3d4e5f6a7b8c"
 identity = "vk:-100001_200002"
@@ -86,9 +82,6 @@ ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
 [[rules.vk.examples]]
 input = "https://vk.com/video1_2?z=video3_4"
 identity = "vk:3_4"
-[[rules.vk.examples]]
-input = "http://192.168.1.50:8099/vk/-100001_200002?list=0a1b2c3d4e5f6a7b8c"
-ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"
 [[rules.vk.examples]]
 input = "http://proxy/gw/play/vk.m3u8?ref=https%3A%2F%2Fvk.com%2Fvideo-100001_200002%3Flist%3D0a1b2c3d4e5f6a7b8c"
 ref = "https://vk.com/video-100001_200002?list=0a1b2c3d4e5f6a7b8c"

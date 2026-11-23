@@ -412,20 +412,8 @@ impl Limits {
     }
 }
 
-/// Sections of the 0.5 format, refused with a pointer to the migration notes.
-const OLD_SECTIONS: [&str; 3] = ["acestream", "vk", "tools"];
-
 impl Config {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
-        if let Ok(table) = text.parse::<toml::Table>()
-            && let Some(old) = OLD_SECTIONS.iter().find(|s| table.contains_key(**s))
-        {
-            anyhow::bail!(
-                "[{old}] is the configuration format of lineup-gateway 0.5; rules are now [rules.<name>] \
-                 blocks with a kind, and tools are [extractors.<name>] (see \"Migrating from 0.5\" in \
-                 docs/gateway.md)"
-            );
-        }
         let mut c: Config = toml::from_str(text)?;
         if let Ok(l) = std::env::var("LINEUP_GATEWAY_LISTEN") {
             c.listen = l.parse()?;
@@ -636,8 +624,6 @@ mod tests {
         for b in &bad {
             assert!(Config::parse(b).is_err(), "{b}");
         }
-        let old = Config::parse("[vk]\n").unwrap_err().to_string();
-        assert!(old.contains("Migrating from 0.5"), "{old}");
     }
 
     #[test]

@@ -129,17 +129,8 @@ impl Store {
             .filename(path)
             .create_if_missing(true)
             .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5));
-        // Check the lineage before anything changes the file: the WAL switch below rewrites the
-        // header of a database that may belong to another release.
-        let probe = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts.clone())
-            .await?;
-        let checked = check_lineage(&probe).await;
-        probe.close().await;
-        checked?;
-        let opts = opts.journal_mode(SqliteJournalMode::Wal);
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePoolOptions::new().max_connections(4).connect_with(opts).await?;
         Self::init(pool).await
     }
@@ -153,7 +144,6 @@ impl Store {
     }
 
     async fn init(pool: SqlitePool) -> Result<Self> {
-        check_lineage(&pool).await?;
         MIGRATOR.run(&pool).await?;
         let (events, _) = broadcast::channel(64);
         let store = Store {
@@ -1312,49 +1302,6 @@ async fn render_m3u(conn: &mut SqliteConnection, slug: &str, url_tvg: Option<&st
 }
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
-const OLD_DATABASE: &str = "this database is from lineup 0.4 or older, which this version cannot open. \
-    Move the data directory aside (keep it as a backup; only the release that wrote it can read it), \
-    start with an empty one and set lineup up again (see the 0.5.0 release notes)";
-
-/// Refuse databases of another schema lineage before migrating. The lineage is identified by the
-/// checksum of migration 1: databases of lineup 0.4 and older applied a different 0001. Later
-/// migrations of this lineage, and newer-than-binary or dirty databases, are left to the migrator.
-async fn check_lineage(pool: &SqlitePool) -> Result<()> {
-    let ledger: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')")
-            .fetch_one(pool)
-            .await?;
-    let tables: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
-         AND name <> '_sqlx_migrations'",
-    )
-    .fetch_one(pool)
-    .await?;
-    let first: Option<Vec<u8>> = if ledger {
-        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
-            .fetch_optional(pool)
-            .await?
-    } else {
-        None
-    };
-    let expected = MIGRATOR
-        .iter()
-        .find(|m| m.version == 1)
-        .map(|m| m.checksum.as_ref())
-        .ok_or_else(|| Error::Internal("migration 1 is missing".into()))?;
-    match first {
-        Some(c) if c == expected => Ok(()),
-        Some(_) => Err(Error::UnsupportedDatabase(OLD_DATABASE.into())),
-        // Empty (new) database.
-        None if tables == 0 => Ok(()),
-        None => Err(Error::UnsupportedDatabase(
-            "the database has tables but no lineup schema history; it is not a lineup 0.5 database. \
-             Point lineup at an empty data directory"
-                .into(),
-        )),
-    }
-}
 
 mod epg;
 mod health;

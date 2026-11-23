@@ -45,11 +45,6 @@ lineup itself knows no streaming protocol. A channel is played through a **route
 
 ## 4. Data model (SQLite via sqlx, with migrations)
 
-0.5.0 started a new schema lineage (one migration 0001). lineup identifies a database's lineage by the
-checksum of its applied migration 1: a database of lineup 0.4 or older (or one with tables but no
-migration history) is refused at startup, untouched, before anything is written to it. Later
-migrations of the 0.5 lineage are handled by the migrator as usual.
-
 ```
 settings(key TEXT PK, value JSON)          -- epg_refresh_hours, check_interval_hours, revision
 routes(
