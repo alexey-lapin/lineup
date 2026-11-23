@@ -1,3 +1,5 @@
 allowBuilds:
   esbuild: true
   vue-demi: true
+# Minutes; explicit so it is strict. Renovate waits longer (security:minimumReleaseAgeNpm).
+minimumReleaseAge: 1440

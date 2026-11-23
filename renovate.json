@@ -2,7 +2,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
-    ":semanticCommitsDisabled"
+    ":semanticCommitsDisabled",
+    "security:minimumReleaseAgeNpm"
   ],
   "labels": ["dependencies"],
   "lockFileMaintenance": {
@@ -27,6 +28,10 @@
     {
       "matchManagers": ["dockerfile"],
       "groupName": "docker images"
+    },
+    {
+      "matchDepNames": ["node"],
+      "groupName": "node"
     },
     {
       "matchManagers": ["pip_requirements"],
