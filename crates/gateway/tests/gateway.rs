@@ -187,6 +187,19 @@ async fn cdn(state: CdnState) -> String {
     serve(app).await
 }
 
+/// Writes an executable script from a child process. Written here, the open write descriptor would
+/// leak into any child another test thread forks meanwhile, and running the script would then fail
+/// with "Text file busy".
+fn write_script(path: &std::path::Path, body: &str) {
+    let status = std::process::Command::new("sh")
+        .args(["-c", "printf %s \"$2\" > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .arg(body)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 /// A fake yt-dlp printing an info dict for the CDN.
 fn fake_yt_dlp(dir: &std::path::Path, cdn: &str, live: bool) -> std::path::PathBuf {
     let p = dir.join("yt-dlp");
@@ -196,8 +209,7 @@ fn fake_yt_dlp(dir: &std::path::Path, cdn: &str, live: bool) -> std::path::PathB
                      "manifest_url": format!("{cdn}/v/master.m3u8"),
                      "http_headers": {"User-Agent": "Mozilla/5.0 Chrome/140", "Cookie": "secret"}}]
     });
-    std::fs::write(&p, format!("#!/bin/sh\ncat <<'JSON'\n{info}\nJSON\n")).unwrap();
-    std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    write_script(&p, &format!("#!/bin/sh\ncat <<'JSON'\n{info}\nJSON\n"));
     p
 }
 
@@ -741,12 +753,10 @@ async fn page_rules_keep_their_own_lookups_and_expiry() {
     let dir = tempfile::tempdir().unwrap();
     let good = fake_yt_dlp(dir.path(), &cdn_url, true);
     let bad = dir.path().join("broken");
-    std::fs::write(
+    write_script(
         &bad,
         "#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho 'ERROR: Unable to download webpage: timed out' >&2\nexit 1\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    );
     let x = |name: &str, path: &std::path::Path| {
         extractor(path).replace("[extractors.yt-dlp]", &format!("[extractors.{name}]"))
     };

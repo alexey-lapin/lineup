@@ -901,15 +901,13 @@ mod tests {
         let log = dir.path().join("calls");
         // A fake yt-dlp: records its arguments, sleeps a little, prints a descriptor.
         let script = dir.path().join("yt-dlp");
-        std::fs::write(
+        write_script(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$@\" >> {}\nsleep 0.2\necho '{{\"is_live\": true, \"formats\": [{{\"protocol\": \"m3u8_native\", \"url\": \"https://cdn/a.m3u8\"}}]}}'\n",
                 log.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        );
         let policy = yt_dlp(Some(script), Duration::from_secs(5));
         let x = Extractor::new("http://127.0.0.1:9".into(), 2);
         let l = page(&policy, "https://video.example/video1_2");
@@ -964,12 +962,10 @@ mod tests {
     async fn background_work_never_refuses_playback() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("yt-dlp");
-        std::fs::write(
+        write_script(
             &script,
             "#!/bin/sh\nsleep 0.3\necho '{\"formats\": [{\"protocol\": \"m3u8_native\", \"url\": \"https://cdn/a.m3u8\"}]}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        );
         let policy = yt_dlp(Some(script), Duration::from_secs(5));
         let x = Extractor::new("http://127.0.0.1:9".into(), 2);
         // Fill background admission with lookups of distinct pages.
@@ -1003,9 +999,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("helper.pid");
         let script = dir.path().join("yt-dlp");
-        std::fs::write(
+        write_script(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh
 sleep 30 &
 echo $! > {}
@@ -1013,9 +1009,7 @@ sleep 30
 ",
                 pidfile.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        );
         // Long enough for the shell to start its helper on a loaded machine (parallel test runs).
         let policy = yt_dlp(Some(script), Duration::from_secs(3));
         let x = Extractor::new("http://127.0.0.1:9".into(), 1);
@@ -1038,8 +1032,7 @@ sleep 30
     async fn kills_slow_tools() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("yt-dlp");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        write_script(&script, "#!/bin/sh\nsleep 30\n");
         let policy = yt_dlp(Some(script), Duration::from_millis(300));
         let x = Extractor::new("http://127.0.0.1:9".into(), 1);
         let started = Instant::now();
@@ -1086,18 +1079,16 @@ sleep 30
         let dir = tempfile::tempdir().unwrap();
         let envfile = dir.path().join("env");
         let script = dir.path().join("plugin");
-        std::fs::write(
+        write_script(
             &script,
-            format!(
+            &format!(
                 "#!/bin/sh\nenv > {}\ncase \"$2\" in\n\
                  *gone*) echo '{{\"error\": \"removed\", \"kind\": \"not_found\"}}'; exit 3;;\n\
                  *) echo '{{\"manifest_url\": \"https://cdn/p.m3u8\", \"headers\": {{\"Cookie\": \"c\", \"Origin\": \"o\"}}, \"is_live\": true}}';;\n\
                  esac\n",
                 envfile.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        );
         // SAFETY: tests in this module do not read these variables concurrently.
         unsafe {
             std::env::set_var("LINEUP_TEST_SECRET", "leak");
@@ -1142,16 +1133,27 @@ sleep 30
         );
     }
 
+    /// Writes an executable script from a child process. Written here, the open write descriptor would
+    /// leak into any child another test thread forks meanwhile, and running the script would then fail
+    /// with "Text file busy".
+    fn write_script(path: &std::path::Path, body: &str) {
+        let status = std::process::Command::new("sh")
+            .args(["-c", "printf %s \"$2\" > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .arg(body)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     /// A descriptor-json tool printing `stdout` and `stderr` and exiting with `code`.
     async fn plugin(stdout: &str, stderr: &str, code: i32, expires_param: &str) -> Result<Descriptor, ExtractError> {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("plugin");
-        std::fs::write(
+        write_script(
             &script,
-            format!("#!/bin/sh\ncat <<'OUT'\n{stdout}\nOUT\necho '{stderr}' >&2\nexit {code}\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\ncat <<'OUT'\n{stdout}\nOUT\necho '{stderr}' >&2\nexit {code}\n"),
+        );
         let tool = Arc::new(Tool {
             name: "plugin".into(),
             command: script,
