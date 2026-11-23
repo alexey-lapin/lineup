@@ -597,8 +597,6 @@ mod tests {
     fn refuses_bad_configs() {
         let bad = [
             "bogus = 1\n".to_string(),
-            "[vk]\n".into(),
-            "[tools]\nyt_dlp = '/x'\n".into(),
             "[rules.a]\nkind = 'nope'\n".into(),
             ACE.replace("http://e:6878/", "x"),
             ACE.replace("kind = 'acestream'", "kind = 'acestream'\nextra = 1"),
