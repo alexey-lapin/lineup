@@ -1,0 +1,11 @@
+# Labels a pull request from its branch prefix; .github/release.yml sorts release notes by label.
+enhancement:
+  - head-branch: ['^feat/']
+bug:
+  - head-branch: ['^fix/']
+documentation:
+  - head-branch: ['^docs/']
+dependencies:
+  - head-branch: ['^deps/']
+skip-changelog:
+  - head-branch: ['^release/']
