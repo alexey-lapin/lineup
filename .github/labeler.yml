@@ -5,7 +5,5 @@ bug:
   - head-branch: ['^fix/']
 documentation:
   - head-branch: ['^docs/']
-dependencies:
-  - head-branch: ['^deps/']
 skip-changelog:
   - head-branch: ['^release/']

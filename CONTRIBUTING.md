@@ -1,15 +1,14 @@
 # Contributing
 
-Name a pull request's branch with a prefix; it sets the label that puts the pull request in a
-release notes section:
+Name a pull request's branch `feat/…` or `fix/…`; the prefix sets the label that puts the pull
+request in a release notes section:
 
 | Prefix | Label | Section |
 |---|---|---|
 | `feat/` | `enhancement` | Features: anything new or changed, including CI and tooling |
 | `fix/` | `bug` | Fixes: anything broken, including builds and tests |
-| `docs/` | `documentation` | Documentation |
-| `deps/` | `dependencies` | Dependencies: version updates only |
-| `release/` | `skip-changelog` | left out |
+| `docs/` | `documentation` | Documentation: only for pull requests that change nothing but docs |
+| `release/` | `skip-changelog` | left out: the version bump of a release |
 
-Other prefixes get no label and land in Other changes; use `feat/` or `fix/` instead. The label is
-set when the pull request opens. To move one to another section, change its label.
+Renovate labels its own pull requests `dependencies`. The label is set when a pull request opens;
+to move one to another section, change its label.
