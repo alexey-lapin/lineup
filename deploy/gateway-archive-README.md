@@ -19,7 +19,7 @@ python3 -m venv /opt/tools
 /opt/tools/bin/pip check
 ```
 
-The pins need Python 3.11 or newer, on Linux or macOS. Installed somewhere else, point each
+The pins need Python 3.15, on Linux or macOS. Installed somewhere else, point each
 `[extractors.*] command` there (a bare name such as `yt-dlp` is looked up on PATH).
 
 Then make a config from the example, check it and run it:
