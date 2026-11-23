@@ -41,7 +41,8 @@
     },
     {
       "matchManagers": ["pip-compile"],
-      "groupName": "gateway extractors"
+      "groupName": "gateway extractors",
+      "minimumReleaseAge": "3 days"
     }
   ]
 }

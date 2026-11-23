@@ -283,7 +283,11 @@ each extractor a rule uses must answer its `version_args`, or the gateway does n
 yt-dlp and streamlink are pinned in `deploy/gateway-tools-requirements.in`, which `uv pip compile`
 turns into `deploy/gateway-tools-requirements.txt`: every package they pull in, with hashes (the
 command is in its header; run it from `deploy/`). Renovate bumps the `.in` and recompiles, and
-refreshes the rest in its weekly lock file maintenance. After an update, smoke-test a live and a
+refreshes the rest in its weekly lock file maintenance. Both wait 3 days after a release:
+Renovate's `minimumReleaseAge` holds back yt-dlp and streamlink bumps, and `deploy/uv.toml`
+(`exclude-newer`) makes the compile leave out younger releases of every package. To take a newer
+release sooner, such as an urgent yt-dlp fix, compile with `--exclude-newer-package yt-dlp=<now>`
+and leave the header as it was. After an update, smoke-test a live and a
 recorded video of each relay rule with each extractor:
 
 ```sh
