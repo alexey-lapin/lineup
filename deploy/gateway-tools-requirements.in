@@ -1,0 +1,3 @@
+# Compiled into gateway-tools-requirements.txt; the command is in its header.
+yt-dlp==2026.10.26
+streamlink==8.6.3
