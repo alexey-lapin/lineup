@@ -290,27 +290,3 @@ recorded video of each relay rule with each extractor:
 curl -s "http://localhost:8099/play/vk.m3u8?ref=<urlencoded link>" | head
 ffprobe -v error -show_entries stream=codec_type,width,height "http://localhost:8099/play/vk.m3u8?ref=<…>"
 ```
-
-## Migrating from 0.5
-
-The 0.5 config format (`[acestream]`, `[vk]`, `[tools]`) is refused at startup. Start from the
-example config:
-
-- `[tools]` → `[extractors.yt-dlp]` and `[extractors.streamlink]` as in the example.
-- `[vk]` → the example's `[rules.vk]` block (patterns and examples included).
-- `[acestream]` → the example's `[rules.acestream]` block: `engine_control` and `acexy_control`
-  as before; `acexy_public = "http://host:8080"` becomes
-  `play = "http://host:8080/ace/getstream?id={id}"`; add `checks = true` to keep checks.
-
-The rule names and play URLs stay the same, so lineup routes keep working. The rule revisions
-change once (they are hashes now), and lineup revalidates the routes on its next poll.
-
-Behaviour changes:
-
-- Acestream checks are off unless `checks = true`.
-- An Acestream URL whose `id=` is not a valid id falls back to `content_id=`.
-- URLs with user info are refused; inputs over 4 KiB are refused.
-- A gateway play URL inside a gateway play URL is read one level deep only.
-- VK: a `video_ext.php` `hash` must look like a `list` token (`[A-Za-z0-9_-]{1,64}`), so every
-  stored ref reads back to itself; the legacy `/vk/<owner>_<video>` form is also accepted on VK
-  hosts.
