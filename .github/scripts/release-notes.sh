@@ -3,8 +3,8 @@
 #
 # usage: release-notes.sh <tag> <image>
 #
-# GitHub's generated notes (configured by .github/release.yml) list merged pull requests. When the
-# range has none, as with commits pushed straight to main, the commits since the previous tag are
+# GitHub's generated notes (configured by .github/release.yml) list merged pull requests by label.
+# Outside GitHub Actions, or if generating them fails, the commits since the previous tag are
 # listed instead. Needs full git history and, for the generated notes, an authenticated gh.
 set -euo pipefail
 
@@ -42,8 +42,7 @@ if [[ -n ${GITHUB_REPOSITORY:-} ]]; then
   generated=$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body || true)
 fi
 
-# Generated notes list pull requests as "* title by @author in <url>".
-if grep -q '^\* .* in https://' <<<"$generated"; then
+if [[ -n $generated ]]; then
   echo "$generated"
 else
   echo "## Changes"

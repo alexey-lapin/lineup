@@ -1,13 +1,13 @@
-# Categories for GitHub's generated release notes (pull requests, by label).
+# Categories for GitHub's generated release notes, by pull request label. .github/labeler.yml sets
+# the label from the branch prefix (CONTRIBUTING.md); Renovate labels its own pull requests.
 changelog:
   exclude:
     labels: [skip-changelog]
-    authors: [dependabot, github-actions]
   categories:
     - title: Features
-      labels: [feature, enhancement]
+      labels: [enhancement]
     - title: Fixes
-      labels: [bug, fix]
+      labels: [bug]
     - title: Documentation
       labels: [documentation]
     - title: Dependencies
