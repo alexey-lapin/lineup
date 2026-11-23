@@ -315,33 +315,26 @@ GET    /events (SSE)   -- live updates for the UI: channel/playlist/route change
 
 ## 11. CLI
 
-- The same binary: `lineup serve` runs the server, every other subcommand is a client.
-- Server address: `--server` / `LINEUP_SERVER` / `~/.config/lineup/config.toml`.
-- Built with clap derive. `lineup usage` (clap_usage, a jdx usage spec) and `lineup completions` (clap_complete) are both generated from the clap definitions. `--json` on every client command prints machine-readable output, usually the API response (a few commands build their own object, such as `backup` and `playlist url`); `usage` and `completions` always print text. `-q` prints only ids from a successful `add`, `ls` and `route ls`, and drops some confirmation messages (such as `rm` and `enable`); other commands print as usual.
-- Exit codes: 0 ok, 1 generic, 2 usage/invalid input, 3 not found, 4 conflict/duplicate, 5 server unreachable, 6 gateway failed.
-
-```
-serve
-add <input>... --route <route> [--name --group --tvg-id --logo --playlist <slug>] [--yes] [--dry-run]
-resolve <input> --route <route>
-ls [query] [--group --playlist --route --health dead] ; show <channel> ; info <channel>
-edit <channel> [--name … --source <input> --route <route>] ; rm <channel> ; enable/disable <channel>
-playlist ls|create <slug> [--name]|rm <slug>|show <slug>
-playlist add <slug> <channel>... [--at N] ; playlist remove <slug> <channel>... ; playlist move <slug> <channel> <pos>
-playlist url <slug>     # prints the M3U URL (the guide is at /p/<slug>/epg.xml)
-route ls | show <route> | add <name> (--direct | --gateway <url> --rule <rule>) [--disabled]
-route edit <route> [--name --base-url --enable|--disable] | rm <route> | resync <route>
-route test [<route> | --gateway <url> [--rule <rule>]] [--input <input>]     # lists the gateway's rules; exits 1 without a valid rule
-check [<channel>...] [--force]
-epg fetch ; epg sources ls|add|rm ; epg search <query>
-hook ls|add|rm|test <id> ; hook deliveries <id>
-refresh [<slug>...]
-import <file|url> --playlist <slug> --route <route> [--dry-run]
-settings get | set epg_refresh_hours <n> | set check_interval_hours <n>
-backup <file>
-usage                   # emit usage spec
-```
+- The same binary: `lineup serve` runs the server, every other subcommand is a client. A client-only build (`--no-default-features`) leaves out `serve`, the server and the UI. `lineup --help` is the command reference.
+- Server address: `--server`, then `LINEUP_SERVER`, then `server = "…"` in `~/.config/lineup/config.toml`, then `http://127.0.0.1:9300`.
+- Built with clap derive. `lineup usage` (clap_usage, a jdx usage spec) and `lineup completions` (clap_complete) are both generated from the clap definitions.
+- `--json` on every client command prints machine-readable output, usually the API response (a few commands build their own object, such as `backup` and `playlist url`); `usage` and `completions` always print text. `-q` prints only ids from a successful `add`, `ls` and `route ls`, and drops some confirmation messages (such as `rm` and `enable`); other commands print as usual.
 - `<channel>` accepts an id, an exact name, or a channel's exact stored source or identity. `<route>` accepts an id or an exact name.
+- `add` takes several inputs. With `--json`, once the route is resolved, it prints an array with one entry per input: `{input, ok, channel | would_create, error: {code, message}}`. Errors before that (an unknown route, `--name` with several inputs) print one error object instead.
+
+**Exit codes**
+
+| Code | Meaning |
+|---|---|
+| 0 | ok |
+| 1 | error |
+| 2 | usage or invalid input |
+| 3 | not found |
+| 4 | conflict, such as a duplicate source |
+| 5 | server unreachable |
+| 6 | a route's gateway failed or is unreachable |
+
+`add` exits 0 when every input succeeds. When every input fails with the same kind of error, it exits with that error's code; otherwise (partial success or mixed errors) it exits 1.
 
 ## 12. Web UI (Vue 3 + Vite + TS + @nuxt/ui v4 in Vue mode, vue-router, Pinia Colada; a hand-written manifest and service worker)
 
@@ -372,15 +365,16 @@ crates/
   cli/               clap client (depends on api-types)
   api-types/         shared serde DTOs + utoipa schemas
   gateway-contract/  wire types of the gateway contract v1, with JSON fixtures
+  gateway/           lineup-gateway: config-driven rules, extractors, HLS relay
   lineup/            the binary: dispatches `serve` → server, else → cli
 web/                 Vue app (pnpm), builds to web/dist, embedded by server via rust-embed
-docs/                spec.md, deploy.md, releases/
+docs/                spec.md, deploy.md, gateway.md, releases/ (a release's hand-written notes, when it has any)
 Dockerfile           multi-stage: node build web → rust build (musl) → alpine
-.github/workflows/   ci.yml (fmt, clippy, test, web typecheck/build/test), release.yml (GHCR + binaries)
-deploy/              example compose.yaml, restore.sh
+Dockerfile.gateway   rust build (musl) + pinned extractors in a Python venv → python alpine
+.github/workflows/   ci.yml (fmt, clippy, test, web build/test), release.yml (images, archives, Homebrew), labeler.yml
+.github/             release.yml (release notes sections by label), labeler.yml (labels from branch prefixes), scripts/
+deploy/              example compose.yaml, restore.sh, gateway example config and extractor pins
 ```
-
-The server's `test-support` feature adds a stub gateway (`lineup_server::testing::StubGateway`) used by the server and CLI tests.
 
 ## 14. Milestones
 
@@ -392,7 +386,11 @@ The server's `test-support` feature adds a stub gateway (`lineup_server::testing
 
 **M1–M4** (0.1–0.4, done): core and deployment, EPG and the add flow, hooks and health, polish (PWA, player links, usage/completions, release binaries).
 
-**M5 Routes and gateways** (0.5): routes replace integrations; protocol knowledge moves out of lineup into gateways behind contract v1; generic checks, observation and resync; fresh schema lineage.
+**M5 Routes and gateways** (0.5): routes replace integrations; protocol knowledge moves out of lineup into gateways behind contract v1; generic checks, observation and resync.
+
+**M6 Gateway rules from config** (0.6): lineup-gateway knows no site; rules, extractors and templates are configuration.
+
+**M7 Distribution** (0.7): a client-only CLI, Homebrew, and lineup-gateway archives.
 
 ## 15. Open questions
 

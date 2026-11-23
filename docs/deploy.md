@@ -64,7 +64,7 @@ echo 'server = "http://media-host:9300"' > ~/.config/lineup/config.toml
 lineup status
 ```
 
-Or set `LINEUP_SERVER`, or pass `--server`. Every command takes `--json` for scripts and agents, and exit codes are stable (0 ok, 2 usage or invalid input, 3 not found, 4 conflict, 5 server unreachable, 6 a gateway failed).
+Or set `LINEUP_SERVER`, or pass `--server`. Every command takes `--json` for scripts and agents, and exit codes are stable ([spec §11](spec.md#11-cli)). `lineup --help` lists every command.
 
 Shell completions:
 
