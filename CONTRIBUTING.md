@@ -5,11 +5,11 @@ release notes section:
 
 | Prefix | Label | Section |
 |---|---|---|
-| `feat/` | `enhancement` | Features |
-| `fix/` | `bug` | Fixes (user-facing bugs) |
+| `feat/` | `enhancement` | Features: anything new or changed, including CI and tooling |
+| `fix/` | `bug` | Fixes: anything broken, including builds and tests |
 | `docs/` | `documentation` | Documentation |
-| `deps/` | `dependencies` | Dependencies |
+| `deps/` | `dependencies` | Dependencies: version updates only |
 | `release/` | `skip-changelog` | left out |
-| anything else, e.g. `chore/`, `ci/`, `refactor/`, `test/` | none | Other changes |
 
-The label is set when the pull request opens. To move one to another section, change its label.
+Other prefixes get no label and land in Other changes; use `feat/` or `fix/` instead. The label is
+set when the pull request opens. To move one to another section, change its label.
