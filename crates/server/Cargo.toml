@@ -19,11 +19,11 @@ url.workspace = true
 utoipa.workspace = true
 tracing-subscriber.workspace = true
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono"] }
-axum = "0.8"
+axum.workspace = true
 utoipa-axum = "0.3"
 rust-embed = { version = "8", features = ["mime-guess"] }
-reqwest = { version = "0.13", features = ["json", "query"] }
-futures-util = "0.3"
+reqwest.workspace = true
+futures-util.workspace = true
 quick-xml = "0.42.0"
 flate2 = "1.1.10"
 strsim = "0.11.1"
@@ -35,5 +35,5 @@ test-support = []
 [dev-dependencies]
 lineup-server = { path = ".", features = ["test-support"] }
 http-body-util = "0.1.5"
-tempfile = "3"
+tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
