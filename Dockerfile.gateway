@@ -11,8 +11,7 @@ RUN cargo build --release --locked -p lineup-gateway && cp target/release/lineup
 
 # ---- extractors ------------------------------------------------------------
 FROM python:3.15-alpine AS tools
-# Every package pinned with hashes (deploy/gateway-tools-requirements.txt, compiled from the .in),
-# installed without resolving new ones, then checked: consistent dependencies, and streamlink can
+# The compiled pins, installed as they are, then checked: consistent dependencies, and streamlink can
 # prepare a request (its urllib3 patches fail there, offline, when urllib3 moves under it).
 COPY deploy/gateway-tools-requirements.txt /tmp/requirements.txt
 RUN python -m venv /opt/tools \

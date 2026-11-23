@@ -280,15 +280,11 @@ each extractor a rule uses must answer its `version_args`, or the gateway does n
 
 ## Updating the extractors
 
-yt-dlp and streamlink are pinned in `deploy/gateway-tools-requirements.in`.
-`deploy/gateway-tools-requirements.txt` is compiled from it with `uv pip compile` (the command is in
-its header; run it from `deploy/`): every package they pull in, pinned with hashes, resolved for any
-Linux or macOS Python 3.11+. The image installs that file without resolving anything new, so a
-rebuild never changes it, and checks that the set is consistent and that streamlink can prepare a
-request. Renovate bumps the pins in the `.in` and recompiles; transitive packages move with its
-weekly lock file maintenance. To update by hand: change the `.in`, recompile (add `--upgrade` to
-refresh everything), rebuild, and smoke-test a live and a recorded video of each relay rule with
-each extractor:
+yt-dlp and streamlink are pinned in `deploy/gateway-tools-requirements.in`, which `uv pip compile`
+turns into `deploy/gateway-tools-requirements.txt`: every package they pull in, with hashes (the
+command is in its header; run it from `deploy/`). Renovate bumps the `.in` and recompiles, and
+refreshes the rest in its weekly lock file maintenance. After an update, smoke-test a live and a
+recorded video of each relay rule with each extractor:
 
 ```sh
 curl -s "http://localhost:8099/play/vk.m3u8?ref=<urlencoded link>" | head
