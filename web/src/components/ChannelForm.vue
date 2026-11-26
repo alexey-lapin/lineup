@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { api, routeSummary, type Channel, type EpgChannel, type ResolveResponse } from '../api'
 import EpgSearch from './EpgSearch.vue'
-import { lastRoute, rememberRoute, useAction, useChannels, useInvalidateAll, usePlaylists, useRoutes } from '../composables'
+import { useAction, useChannels, useInvalidateAll, usePlaylists, useRoutes } from '../composables'
 import { floating } from '../safe-area'
 
 const props = defineProps<{ channel?: Channel | null }>()
@@ -96,9 +96,7 @@ watch(
     resetResolution()
     if (!o) return
     const c = props.channel
-    const remembered = lastRoute()
-    const fallback = routes.value?.find((r) => r.id === remembered) ?? routes.value?.[0]
-    state.value.route_id = c?.route_id ?? fallback?.id
+    state.value.route_id = c?.route_id
     state.value.input = ''
     state.value.name = c?.name ?? ''
     state.value.group_title = c?.group_title ?? undefined
@@ -110,13 +108,6 @@ watch(
   },
   { immediate: true }
 )
-
-// Routes may load after the form opened: pick one then.
-watch(routes, (list) => {
-  if (open.value && state.value.route_id == null && list?.length) {
-    state.value.route_id = (list.find((r) => r.id === lastRoute()) ?? list[0])!.id
-  }
-})
 
 const currentKey = computed(() => key(state.value.route_id, state.value.input.trim()))
 watch(currentKey, (k) => {
@@ -224,7 +215,6 @@ async function save() {
           }),
         'Channel added'
       )
-  if (result.ok && !props.channel) rememberRoute(resolution!.route_id)
   saving.value = false
   if (result.ok) {
     await invalidate()
