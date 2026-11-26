@@ -3,7 +3,7 @@ import type { TableColumn } from '@nuxt/ui'
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, routeSummary, type ImportReport } from '../api'
-import { lastRoute, rememberRoute, useAction, useInvalidateAll, useRoutes } from '../composables'
+import { useAction, useInvalidateAll, useRoutes } from '../composables'
 import { floating } from '../safe-area'
 
 type Entry = ImportReport['entries'][number]
@@ -15,14 +15,11 @@ const invalidate = useInvalidateAll()
 const text = ref('')
 const slug = ref('tv')
 const { data: routes } = useRoutes()
-const routeId = ref<number | undefined>(lastRoute() ?? undefined)
-watch(
-  routes,
-  (list) => {
-    if (list?.length && !list.some((r) => r.id === routeId.value)) routeId.value = list[0]!.id
-  },
-  { immediate: true }
-)
+const routeId = ref<number | undefined>()
+// A route deleted meanwhile is no choice at all.
+watch(routes, (list) => {
+  if (list && !list.some((r) => r.id === routeId.value)) routeId.value = undefined
+})
 const routeItems = computed(() =>
   (routes.value ?? []).map((r) => ({ label: r.name, description: routeSummary(r.config), value: r.id }))
 )
@@ -76,7 +73,6 @@ async function commit() {
   const r = await run(() => api.importM3u(snap.text, snap.slug, snap.route, false), 'Import complete')
   busy.value = false
   if (r.ok) {
-    rememberRoute(snap.route)
     await invalidate()
     router.push(`/playlists/${r.value.playlist_slug}`)
   }

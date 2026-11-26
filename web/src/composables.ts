@@ -15,26 +15,6 @@ export function useRoutes() {
   return useQuery({ key: ['routes'], query: () => api.routes() })
 }
 
-const LAST_ROUTE = 'lineup.lastRoute'
-
-/** The route last used to add a channel or import (per browser), if any. */
-export function lastRoute(): number | null {
-  try {
-    const v = Number(localStorage.getItem(LAST_ROUTE))
-    return Number.isInteger(v) && v > 0 ? v : null
-  } catch {
-    return null
-  }
-}
-
-export function rememberRoute(id: number) {
-  try {
-    localStorage.setItem(LAST_ROUTE, String(id))
-  } catch {
-    // Storage may be unavailable (private mode); the choice is just not remembered.
-  }
-}
-
 /** Most mutations change channels and playlist contents together; refresh all of them. */
 export function useInvalidateAll() {
   const cache = useQueryCache()
