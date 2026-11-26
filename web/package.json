@@ -2,7 +2,7 @@
   "name": "lineup-web",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.21.0",
+  "packageManager": "pnpm@12.23.0",
   "scripts": {
     "dev": "vite",
     "gen:api": "openapi-typescript src/api/openapi.json -o src/api/schema.d.ts",
