@@ -206,7 +206,8 @@ describe('ImportPage', () => {
     const w = mount(ImportPage, { shallow: true, global: { plugins: list } })
     const vm = w.vm as any
     await flush()
-    expect(vm.routeId).toBe(1)
+    expect(vm.routeId).toBeUndefined() // no route until one is picked
+    vm.routeId = 1
     vm.text = 'TEXT-A'
     vm.slug = 'a'
     await flush()

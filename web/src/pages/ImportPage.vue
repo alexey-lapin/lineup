@@ -16,13 +16,10 @@ const text = ref('')
 const slug = ref('tv')
 const { data: routes } = useRoutes()
 const routeId = ref<number | undefined>()
-watch(
-  routes,
-  (list) => {
-    if (list?.length && !list.some((r) => r.id === routeId.value)) routeId.value = list[0]!.id
-  },
-  { immediate: true }
-)
+// A route deleted meanwhile is no choice at all.
+watch(routes, (list) => {
+  if (list && !list.some((r) => r.id === routeId.value)) routeId.value = undefined
+})
 const routeItems = computed(() =>
   (routes.value ?? []).map((r) => ({ label: r.name, description: routeSummary(r.config), value: r.id }))
 )
