@@ -340,7 +340,7 @@ GET    /events (SSE)   -- live updates for the UI: channel/playlist/route change
 
 - **Channels**
   - Searchable table with group, route and identity, and playlist chips.
-  - An "Add" slideover: pick the route (the last one used is preselected), paste the input, and see the validated source, play URL and suggestions with editable fields: tvg-id picker backed by `/epg/channels`, logo preview, playlist checkboxes. A duplicate whose stored source differs offers "Update it to this link".
+  - An "Add" slideover: pick the route (none is preselected), paste the input, and see the validated source, play URL and suggestions with editable fields: tvg-id picker backed by `/epg/channels`, logo preview, playlist checkboxes. A duplicate whose stored source differs offers "Update it to this link".
   - Row actions: details, edit, check (gateway routes), copy play URL, open in VLC (`vlc-x-callback://x-callback-url/stream?url=…`) or Infuse (`infuse://x-callback-url/play?url=…`), delete. Channels of a disabled route show a "route off" badge.
   - Details (`/channels/:id`, a slideover; full width on phones): stored fields, what the gateway observes now (polled every 5 s while visible, one request at a time), latest check and Check now.
 - **Routes**: one card per route with its config, the gateway's live status (rule, capabilities, channels pending a resync), the last resync report, and Resync / Enable / Edit / Delete. Adding a route loads the gateway's rules from its URL; any config can be tried with an input before saving.
@@ -354,6 +354,7 @@ GET    /events (SSE)   -- live updates for the UI: channel/playlist/route change
 - **Live updates**: SSE invalidates queries.
 - **PWA**: manifest, icons, `apple-mobile-web-app-capable`, safe-area insets, mobile-first layout using UDashboard* components that collapse to a bottom nav or drawer on phones.
   - Caveat: over plain HTTP on a LAN the service worker won't register on iOS. It still works as a home-screen web app, just with no offline support, which is acceptable.
+- **Logos**: logo URLs load straight from their hosts in the browser; the page's referrer policy (`same-origin`) sends no `Referer` on cross-origin requests, so hosts that refuse hotlinking still serve them.
 - **Types**: TS types are generated from OpenAPI (`openapi-typescript`) and called through a thin `openapi-fetch` client.
 
 ## 13. Repo layout
